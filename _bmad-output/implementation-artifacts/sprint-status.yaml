@@ -49,8 +49,8 @@ story_location: _bmad-output/implementation-artifacts
 
 development_status:
   epic-1: in-progress
-  1-1-read-career-state-and-identify-the-active-save: in-progress
-  1-2-open-and-close-the-scout-panel-with-a-dedicated-shortcut: backlog
+  1-1-read-career-state-and-identify-the-active-save: review
+  1-2-open-and-close-the-scout-panel-with-a-dedicated-shortcut: review
   1-3-persist-scout-state-per-save: backlog
   1-4-browse-the-olheiros-available-to-hire: backlog
   1-5-hire-an-olheiro: backlog

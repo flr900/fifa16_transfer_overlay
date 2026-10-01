@@ -90,14 +90,12 @@ impl<T: Send + 'static> AsyncTask<T> {
         }
     }
 
-    #[allow(dead_code)] // API fixa do AD-4
     pub fn is_running(&self) -> bool {
         self.in_progress.load(Ordering::SeqCst)
     }
 
     /// Volta para `Idle` (ex.: antes de re-localizar a carreira). No-op
     /// enquanto houver execução em andamento.
-    #[allow(dead_code)] // API fixa do AD-4
     pub fn reset(&self) {
         if !self.is_running() {
             set_state(&self.state, TaskState::Idle);

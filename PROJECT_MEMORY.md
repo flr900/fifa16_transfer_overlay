@@ -1145,6 +1145,199 @@ Em ordem de promessa/esforço:
    tipo orçamento) enquanto se retoma escrita de atributos de jogador
    em uma sessão futura dedicada.
 
+## Sessão 6 — Story 1.1: leitura de estado da carreira
+
+Primeira sessão no Windows depois do código da Story 1.1 ter sido
+escrito num Mac sem compilar. O crate `fifa_overlay` compilou de
+primeira; 22 testes unitários passam (`cargo test`).
+
+### Achados offline (sem o jogo aberto) — confirmados
+
+- **Short names** (via `tools/resolve_short_names.py` +
+  `fifa_ng_db-meta.xml`): `GJUr` = `career_calendar` (`currdate`=`aLZZ`,
+  `startdate`=`vHhZ`, 19 bits, `rangelow=20080101`); `mPrV` =
+  `career_users` (`firstname`=`HdeP`, `surname`=`rREd`,
+  `clubteamid`=`NTyS` com `rangelow=-1`); `dqXv` = `career_managerpref`
+  (`transferbudget`=`SnDr`, 31 bits). As datas ficam guardadas como
+  `YYYYMMDD - 20080101`; depois de somar o `rangelow` o valor é o
+  `YYYYMMDD` normal.
+- **Nomes do manager NÃO são Huffman**: `firstname`/`surname` são
+  strings fixas inline (`storage_type` 0, 256 bits = 32 bytes,
+  terminadas em `\0`). AD-11 vale sem desvio.
+- **O save tem 3 databases**: carreira (34 tabelas: `GJUr`/`mPrV`/
+  `dqXv`...), jogadores (38 tabelas, `CZUM` com 32.602 registros) e uma
+  com 1 tabela. O código original da story exigia `GJUr` E `CZUM` no
+  mesmo blob — **nunca casaria**. Corrigido: `is_career_db` agora exige
+  `GJUr` + `mPrV` + `dqXv`.
+- **Build do jogo**: o `FileVersion` fixo do `fifa16.exe` é `1.0.0.0` e
+  o `ProductVersion` fixo é `16.0.0.0`; só a **string** `ProductVersion`
+  (`StringFileInfo`) traz `16.0.2904053` (2904053 nem cabe em 16 bits).
+  `save_repo` agora compara essa string; testado contra o exe instalado.
+- **Identidade (AD-11)** nos saves de `save_backups/`:
+  `717036e3` e `705c22c4` → `20350717|Felipe|Careca|241` (mesma
+  carreira, dias diferentes → mesmo hash); `7a096416` →
+  `20350721|Felipe|Careca|73` (outra carreira → hash diferente). Os
+  saves atuais em `Documents\FIFA 16` têm outras duas carreiras
+  (`20280715|...|234` e `20270108|...|130285`). Teste de oráculo:
+  `save_repo::tests::real_saves_*`.
+
+### Teste com o jogo aberto (carreira "teste", 2026-09-30) — blob de carreira NÃO é fonte viva
+
+O FIFA roda **elevado** (admin): o injetor tem de rodar num terminal
+como Administrador ("Acesso negado 0x80070005" caso contrário).
+
+1. Logo após criar a carreira e salvar (save 21:42: `transferbudget =
+   74.000.000`), o usuário passou dinheiro do orçamento de transferência
+   para o de salários **sem salvar** (tela: 67.000.000).
+2. "Localizar carreira": build verificada (`16.0.2904053`), **1 único**
+   blob de carreira (34 tabelas, `0x8B470000+0x352D4`), `currdate =
+   20260701` (bate com a tela), identidade `20260717|Senhor|Manager|243`,
+   mas **`transferbudget = 74.000.000`** — o valor do último save, não o
+   da tela.
+3. Usuário salvou de novo (DATA no disco: `transferbudget = 67.000.000`,
+   `wagebudget` 500.000 → 634.615). Duas novas localizações **não
+   acharam mais nenhum blob de carreira** no heap.
+
+**Conclusão**: o blob de carreira no heap é um buffer de
+carga/serialização do save (conteúdo = último load/save), não o estado
+vivo, e é liberado/realocado depois de um save — mesma natureza do
+blob `CZUM`. **Não serve como fonte de `currdate`/`transferbudget`**,
+e nem é confiável para a identidade (pode não existir na hora).
+A fonte viva do orçamento continua sendo a ocorrência única achada por
+scan de valor exato (sessão 4). Decisão de estratégia (Task 1.3)
+pendente com o Felipe.
+
+### Sonda de estado vivo — struct viva do orçamento ACHADA (2026-09-30)
+
+Felipe escolheu a estratégia "sondar struct viva". Botão "Sondar" na
+janela de debug (`save_repo::start_live_probe`): scan do orçamento
+atual por i32 exato + procura de outros valores da carreira em ±1 KB.
+Obs. (atualizada): o eject + reinjeção funcionou ~4 vezes seguidas e
+na 5ª o **jogo crashou** logo após o "Finished removing hook" (antes
+da DLL nova inicializar) — confirma o item 2 dos "Bugs de
+infraestrutura". Use eject por conveniência, mas conte com reiniciar.
+Para reinjetar a build mais recente: `fifa_overlay\inject_dev.ps1`
+(como Administrador). Log reduzido para INFO (o TRACE do hudhook
+gravava uma linha por frame).
+
+Obs.: "Descarregar DLL (eject)" + injetar de novo **funcionou** desta
+vez sem reiniciar o jogo.
+
+Orçamento na tela `63.999.988` (salário `692.307`): 71 ocorrências; 69
+soltas; duas com vizinhos. A melhor (`0x8CD9E74C`, região
+`0x8CCB0000`) é o `dqXv` vivo decodificado em i32 contíguos:
+
+| offset | valor | campo |
+| --- | --- | --- |
+| −4 | 692.307 | `wagebudget` (atual) |
+| 0 | 63.999.988 | `transferbudget` (atual) |
+| +12 | 932 | ? |
+| +16 | 1 | ? |
+| +20 | 4.650.000 | `startofseasonwagebudget` |
+| +24 | 74.000.000 | `startofseasontransferbudget` |
+| +28 | 4.150.000 | `startofseasonplayerwages` |
+| +32 | 38.000 | ? |
+
+A segunda (`0xAE8C0F08`) tem a mesma ordem com passo de 16 bytes
+(−16 salário, 0 orçamento, +80/+96/+112 valores de início de temporada)
+— outra representação interna.
+
+**Consequência**: dá para localizar o orçamento vivo SEM saber o valor
+atual: os três valores de início de temporada são constantes na
+temporada e estão no save em disco → procurar o padrão contíguo
+`[startwage, starttransfer, startplayerwages]` e ler o orçamento 24
+bytes antes. A data (`GJUr`) não está perto; precisa de outra sonda.
+
+### Localização por assinatura — FUNCIONANDO (orçamento vivo)
+
+`save_repo::locate` lê os saves recentes em `Documents\FIFA 16`, procura
+na memória o trio de início de temporada e lê o orçamento 20 bytes
+antes. 1º teste falhou: a DLL achou a assinatura na PRÓPRIA lista de
+saves (`0x5529D4`, entradas a cada 120 bytes) — corrigido excluindo a
+memória da DLL (lista, pilha, buffer único de leitura) e zerando as
+cópias. 2º teste: orçamento e salário vivos batendo com a tela e
+acompanhando mudanças sem relocalizar.
+
+### Data viva — candidatos (2026-09-30)
+
+- Sonda com âncora na data (`20260703`/`20260705`): 107–178 cópias,
+  nenhuma com os campos fixos de `GJUr` (startdate, enddate,
+  objectivecheckdate, setupdate, janelas de transferência) a ±1 KB →
+  a data viva NÃO está numa cópia decodificada de `GJUr`.
+- Scan de valor (CE e DLL) ao longo de vários dias: 3 endereços que
+  acompanham o calendário: `0x8CFA3E08` (campo isolado num objeto com
+  ponteiros para o mesmo bloco — melhor candidato), `0x8CE02BD4` e
+  `0x8CE03114` (listas de eventos com registros de 32 bytes).
+- **Layout repetido entre sessões**: struct do orçamento em
+  `0x8CD9E74C` numa sessão e `0x8CD1E74C` na outra (+`0x80000`), mesmo
+  offset `+0xEE74C` dentro da região. Hipótese: data =
+  orçamento + `0x2856BC` (ou `+0xE4488`/`+0xE49C8`). Implementado com
+  validação (data entre o último save e `GJUr.enddate`) e queda para a
+  data do último save.
+- **Validado numa sessão nova (s6-v7)**: orçamento de novo em
+  `0x8CD9E74C`; `+0x2856BC` e `+0xE49C8` = `20260630` logo após
+  carregar o save de 1/jul (um dia atrás), e depois de avançar dias o
+  campo bateu exatamente com a tela (`20260703` = 3/jul). `+0xE4488`
+  tinha lixo (`20240731`). Ajuste (s6-v8): aceitar o dia anterior ao
+  save e, nesse caso, devolver a data do save.
+- Injeção: v7 crashou o jogo 2× via `inject_dev.ps1` e carregou 1× pelo
+  injetor direto (mesmo binário). Causa não identificada — pode ser
+  corrida intermitente do hook do hudhook com o `Present` do jogo, não
+  necessariamente o script.
+
+### Troca de carreira na mesma sessão (s6-v8) — restos na memória
+
+Com "teste" carregada antes e depois a carreira Careca (save
+`17d87c6a`, 23/set/2028): a localização achou DUAS structs — a de
+"teste" intacta em `0x8CD9E74C` (resto, não liberada) e a da Careca em
+`0x8CD9AD3C` (região +`0xEAD3C`) — e escolheu "teste" (save mais
+recente). As 3 posições de data (relativas à struct de "teste") liam
+`20280923` = data da CARECA → a data fica num ponto fixo do bloco
+(região +`0x373E08`), não acompanha a struct de finanças.
+
+Correção (s6-v9): data lida de região + `0x373E08` (reservas
++`0x1D2BD4`/+`0x1D3114`); a carreira ativa é a struct cuja temporada
+(até 366 dias antes do `enddate`) contém a data viva; validação da data
+pela janela da temporada (o jogador pode carregar um save mais antigo).
+
+s6-v9 confirmada: com a Careca carregada escolheu a Careca (ignorou o
+resto de "teste"). Localização não engasga o jogo (FPS ok).
+
+### Menu principal (s6-v9) — data principal também é resto
+
+No menu, sem carreira: região +`0x373E08` ainda tinha `20280923` (data
+da última carreira) e as listas de eventos (+`0x1D2BD4`, +`0x1D3114`)
+estavam **zeradas** → v9 "confirmou" a Careca. Correção (s6-v10):
+data viva só vale se **2 das 3 posições concordam**; sem carreira
+confirmada → `CarreiraNaoCarregada` (removida a queda para o save mais
+recente); toda leitura revalida a data (menu → "carreira não
+carregada"; data que VOLTA → outro save carregado → cache descartado).
+
+### Ainda pendente (Story 1.1)
+
+1. ~~Confirmar s6-v10~~ **confirmado**: menu → `CarreiraNaoCarregada`;
+   carreira → valores vivos. Story 1.1 → review. Plano B: pointer scan do CE na data. Duas carreiras na MESMA
+   temporada não são distinguíveis pela data (vence o save mais
+   recente). Recarregar o MESMO save na mesma data pode deixar o cache
+   apontando para o resto da carga anterior — relocalizar resolve.
+2. Protocolo AC #3 em 3 sessões (mesma carreira 2×, outra 1×).
+3. Menu sem carreira carregada → `CarreiraNaoCarregada`; FPS liso
+   durante a localização.
+
+## Sessão 7 — Story 1.2: painel da Central de Scout (2026-10-01)
+
+- `fifa_overlay` agora é só o produto: F10 abre/fecha a Central de Scout
+  (tema do DESIGN.md, 4 abas, cabeçalho com orçamento/data vivos, estados
+  vazios). Validado no jogo pelo Felipe.
+- A janela de diagnóstico (sonda, scans, teste de escrita) foi arquivada em
+  `fifa_overlay_debug/` (compila e injeta sozinha; log
+  `fifa_overlay_debug.log`). Não injetar as duas juntas.
+- Fontes: Oswald (estática) e Inter (variável) do Google Fonts, OFL, em
+  `fifa_overlay/assets/fonts/`; Consolas lida do Windows.
+- A DLL nova não tem eject: para trocar de build, reabrir o jogo.
+- Observação visual: o jogo aparece mais através do painel do que a
+  opacidade de 93% sugere; reavaliar quando houver tabelas.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —
