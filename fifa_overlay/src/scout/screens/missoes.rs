@@ -41,6 +41,9 @@ pub fn nome_status(status: StatusMissao, progresso: Option<ProgressoMissao>) -> 
 
 /// O texto que acompanha a barra (UX-DR7: valores exatos, sem exclamação).
 pub fn texto_estimativa(linha: &MissaoNaLista) -> String {
+    if let (StatusMissao::Pendente, Some(falha)) = (linha.missao.status, &linha.falha) {
+        return format!("A busca falhou: {falha} Ela roda de novo quando o painel abrir.");
+    }
     match (linha.missao.status, linha.progresso) {
         (StatusMissao::Concluida, _) => "Concluída: Relatório disponível.".to_string(),
         (StatusMissao::EmExecucao, _) => "Gerando o Relatório…".to_string(),
@@ -125,7 +128,11 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) {
     }
     y += ALTURA_BARRA + theme::ESPACO_1;
     let pronta = linha.progresso.is_some_and(|p| p.prazo_atingido) || missao.status == StatusMissao::Concluida;
-    let cor = if pronta { theme::FIELD_GREEN } else { theme::TEXT_SECONDARY };
+    let cor = match (&linha.falha, pronta) {
+        (Some(_), _) if missao.status == StatusMissao::Pendente => theme::DANGER,
+        (_, true) => theme::FIELD_GREEN,
+        _ => theme::TEXT_SECONDARY,
+    };
     texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], cor, &texto_estimativa(linha));
 }
 
@@ -144,6 +151,7 @@ mod tests {
             progresso: hoje.map(|d| progresso_missao(missao.criada_em, missao.prazo_estimado, Date(d))),
             missao,
             olheiro: None,
+            falha: None,
         }
     }
 
@@ -159,6 +167,11 @@ mod tests {
         );
         assert_eq!(texto_estimativa(&linha(StatusMissao::Pendente, Some(20260801))), "Pronta: prazo cumprido em 11/07/2026.");
         assert_eq!(texto_estimativa(&linha(StatusMissao::Pendente, None)), MSG_SEM_DATA);
+        let falhou = MissaoNaLista { falha: Some("Não foi possível ler o save ativo.".to_string()), ..linha(StatusMissao::Pendente, Some(20260801)) };
+        assert_eq!(
+            texto_estimativa(&falhou),
+            "A busca falhou: Não foi possível ler o save ativo. Ela roda de novo quando o painel abrir."
+        );
         for status in [StatusMissao::Pendente, StatusMissao::EmExecucao, StatusMissao::Concluida] {
             assert!(!texto_estimativa(&linha(status, Some(20260704))).contains('!'));
         }

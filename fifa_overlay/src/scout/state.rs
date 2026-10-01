@@ -32,8 +32,9 @@
 //! Mutações só valem com a carreira PRONTA: sem carreira não há para
 //! qual arquivo escrever (trocar de aba no menu não persiste).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -41,10 +42,11 @@ use uuid::Uuid;
 
 use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
+pub use crate::save_repo::{Atributo, Funcao};
 
 use super::persistence::{self, EstadoPersistido};
 use super::quality;
-use super::search::{CareerSnapshot, CareerSource, SaveRepoSource};
+use super::search::{self, CareerSnapshot, CareerSource, SaveRepoSource};
 use super::Aba;
 
 /// Com a carreira pronta, relê o estado vivo nesse intervalo.
@@ -66,6 +68,10 @@ pub enum TipoAviso {
     Carregando,
     Pronta(CareerSnapshot),
     Falhou,
+    /// Uma Missão terminou a busca e o Relatório está pronto (Story 2.4).
+    RelatorioPronto { tipo: quality::TipoMissao, jogadores: usize },
+    /// A busca de uma Missão falhou; ela volta a `Pendente`.
+    BuscaFalhou,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,9 +154,10 @@ impl ModoBusca {
 /// Qualidade de um Relatório (PRD, Glossário): define precisão dos
 /// atributos, quantos atributos aparecem e quantos jogadores voltam. Em
 /// ordem: `Baixa < Media < Alta`. No JSON: `"baixa"` etc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Qualidade {
+    #[default]
     Baixa,
     Media,
     Alta,
@@ -348,6 +355,8 @@ pub struct MissaoNaLista {
     /// `None` quando a data da carreira não pôde ser lida (erro de leitura):
     /// a lista continua visível, só sem progresso (Story 2.3).
     pub progresso: Option<ProgressoMissao>,
+    /// Falha da última busca (Story 2.4); a Missão voltou a `Pendente`.
+    pub falha: Option<String>,
 }
 
 /// As 12 ofertas na ordem da tela (Tier crescente, depois a ordem do PRD),
@@ -365,7 +374,6 @@ pub fn ofertas_de_olheiros(orcamento: Option<i32>) -> Vec<OfertaOlheiro> {
 }
 
 /// Ciclo de vida de uma Missão (AD-8).
-#[allow(dead_code)] // `EmExecucao`/`Concluida` chegam no Épico 2
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StatusMissao {
     Pendente,
@@ -415,10 +423,73 @@ impl Missao {
     }
 }
 
+/// Um atributo que o Olheiro observou, como faixa (`min == max` = exato).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtributoRevelado {
+    pub atributo: Atributo,
+    pub valor: FaixaAtributo,
+}
+
+/// Um jogador de um Relatório (AD-12: chave `player_id`). Guarda SÓ o que
+/// foi revelado — o valor real nunca vai para o arquivo nem para a tela.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JogadorEncontrado {
+    pub player_id: u32,
+    pub nome: String,
+    pub idade: u8,
+    /// `preferredposition1` (ver `save_repo::nome_posicao`).
+    pub posicao: u8,
+    pub nacao_id: u16,
+    pub nacao: String,
+    pub clube: String,
+    pub overall: FaixaAtributo,
+    pub potencial: FaixaAtributo,
+    /// Na ordem em que o Olheiro observou (a função do jogador primeiro).
+    pub atributos: Vec<AtributoRevelado>,
+}
+
+impl JogadorEncontrado {
+    pub fn atributo(&self, atributo: Atributo) -> Option<FaixaAtributo> {
+        self.atributos.iter().find(|a| a.atributo == atributo).map(|a| a.valor)
+    }
+}
+
+/// Relatório de uma Missão (Story 2.4). Campos novos com `default`: um
+/// arquivo antigo continua válido (AD-7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relatorio {
     pub id: Uuid,
     pub missao_id: Uuid,
+    #[serde(default)]
+    pub gerado_em: Option<Date>,
+    #[serde(default)]
+    pub qualidade: Qualidade,
+    #[serde(default)]
+    pub precisao_mais_menos: u8,
+    #[serde(default)]
+    pub jogadores: Vec<JogadorEncontrado>,
+    /// Já foi aberto ao menos uma vez (some o "novo"; libera "Arquivar").
+    #[serde(default)]
+    pub aberto: bool,
+    #[serde(default)]
+    pub arquivado: bool,
+}
+
+#[cfg(test)]
+impl Relatorio {
+    /// Relatório vazio para testes.
+    pub fn de_teste(missao_id: Uuid) -> Relatorio {
+        Relatorio {
+            id: Uuid::new_v4(),
+            missao_id,
+            gerado_em: Some(Date(20260801)),
+            qualidade: Qualidade::Media,
+            precisao_mais_menos: 3,
+            jogadores: Vec::new(),
+            aberto: false,
+            arquivado: false,
+        }
+    }
 }
 
 /// O que o painel deve mostrar sobre a carreira.
@@ -433,8 +504,18 @@ pub enum CarreiraStatus {
     Pronta(CareerSnapshot),
 }
 
+/// Uma Missão na fila de busca (AD-9), com a carreira dona dela: o
+/// resultado é gravado no arquivo certo mesmo se o jogador trocar de
+/// carreira enquanto a busca roda.
+#[derive(Debug, Clone, PartialEq)]
+struct BuscaNaFila {
+    id_save: String,
+    missao: Missao,
+    hoje: Date,
+}
+
 pub struct ScoutState {
-    fonte: Box<dyn CareerSource>,
+    fonte: Arc<dyn CareerSource>,
     tarefa_localizar: AsyncTask<()>,
     status: CarreiraStatus,
     /// Uma localização automática por abertura do painel (evita loop).
@@ -471,6 +552,15 @@ pub struct ScoutState {
     /// O aviso "Central de Scout ativa" sai no primeiro `tick` (o primeiro
     /// frame pode vir segundos depois da injeção, com o jogo carregando).
     aviso_inicial_pendente: bool,
+    /// Missões `EmExecucao` esperando a vez, em ordem (AD-9: uma de cada
+    /// vez, nunca em paralelo).
+    fila_busca: VecDeque<BuscaNaFila>,
+    tarefa_busca: AsyncTask<Relatorio>,
+    /// A busca disparada e ainda não tratada (`poll` não consome).
+    busca_atual: Option<BuscaNaFila>,
+    /// Última falha de busca por Missão, para a aba Missões dizer.
+    falhas_busca: HashMap<Uuid, String>,
+    painel_aberto: bool,
 }
 
 impl ScoutState {
@@ -480,7 +570,7 @@ impl ScoutState {
 
     pub fn com_fonte(fonte: Box<dyn CareerSource>, diretorio_estado: Option<PathBuf>) -> Self {
         ScoutState {
-            fonte,
+            fonte: Arc::from(fonte),
             tarefa_localizar: AsyncTask::new(),
             status: CarreiraStatus::SemCarreira,
             localizacao_automatica_disponivel: false,
@@ -499,6 +589,11 @@ impl ScoutState {
             proximo_sinal: None,
             aviso: None,
             aviso_inicial_pendente: true,
+            fila_busca: VecDeque::new(),
+            tarefa_busca: AsyncTask::new(),
+            busca_atual: None,
+            falhas_busca: HashMap::new(),
+            painel_aberto: false,
         }
     }
 
@@ -525,6 +620,7 @@ impl ScoutState {
     /// carreira" e a releitura periódica recupera quando ele voltar à
     /// mesma carreira (trocar de carreira pede reabrir o painel).
     pub fn ao_abrir_painel(&mut self) {
+        self.painel_aberto = true;
         if matches!(self.tarefa_localizar.poll(), TaskState::Running) {
             return;
         }
@@ -532,8 +628,18 @@ impl ScoutState {
         self.reler();
         self.localizacao_automatica_disponivel = false;
         if let CarreiraStatus::Pronta(carreira) = &self.status {
-            self.data_progresso = Some(carreira.data_atual);
+            let hoje = carreira.data_atual;
+            self.data_progresso = Some(hoje);
+            self.despachar_missoes_vencidas(hoje);
         }
+    }
+
+    /// Fechar no meio da confirmação/formulário = cancelar (nada é
+    /// debitado nem gravado).
+    pub fn ao_fechar_painel(&mut self) {
+        self.painel_aberto = false;
+        self.cancelar_contratacao();
+        self.cancelar_nova_missao();
     }
 
     /// Botão "Tentar novamente": localiza a carreira de novo.
@@ -549,6 +655,7 @@ impl ScoutState {
             self.aviso_inicial_pendente = false;
             self.avisar(TipoAviso::Injetado);
         }
+        self.processar_buscas();
 
         match self.tarefa_localizar.poll() {
             TaskState::Running => {
@@ -653,7 +760,13 @@ impl ScoutState {
             self.sinal_consumido = false;
             self.ativar_save(snapshot.id_save.clone());
             self.data_progresso = Some(snapshot.data_atual);
-            self.avisar(TipoAviso::Pronta(snapshot));
+            self.avisar(TipoAviso::Pronta(snapshot.clone()));
+            // Carreira ficou pronta COM o painel aberto: vale como a
+            // abertura (AD-8) — senão a Missão vencida esperaria fechar e
+            // abrir de novo.
+            if self.painel_aberto {
+                self.despachar_missoes_vencidas(snapshot.data_atual);
+            }
         }
     }
 
@@ -661,10 +774,14 @@ impl ScoutState {
     /// primeira vez da sessão) e pede para restaurar a aba salva.
     fn ativar_save(&mut self, id_save: String) {
         let diretorio = self.diretorio_estado.as_deref();
+        let novo = !self.estados.contains_key(&id_save);
         let estado = self
             .estados
             .entry(id_save.clone())
             .or_insert_with(|| EstadoPersistido::carregar(diretorio, &id_save));
+        if novo {
+            destravar_missoes(estado);
+        }
         self.aba_restaurada = Some(estado.ler(|dados| dados.ui_prefs.aba_ativa));
         tracing::info!("[scout::state] Carreira ativa: estado {}…", id_save.get(..8).unwrap_or(&id_save));
         self.ultimo_save = Some(id_save.clone());
@@ -980,9 +1097,133 @@ impl ScoutState {
                     missao: m.clone(),
                     olheiro: dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned(),
                     progresso: hoje.map(|data| progresso_missao(m.criada_em, m.prazo_estimado, data)),
+                    falha: self.falhas_busca.get(&m.id).cloned(),
                 })
                 .collect()
         })
+    }
+
+    // -----------------------------------------------------------------
+    // Busca das Missões vencidas (Story 2.4, AD-8/AD-9)
+    // -----------------------------------------------------------------
+
+    /// Borda fechado→aberto do painel (nunca por polling): toda Missão
+    /// `Pendente` com o prazo cumprido vira `EmExecucao` ANTES de entrar na
+    /// fila — reabrir o painel não a despacha de novo (AD-8). Ordem da
+    /// fila: `prazo_estimado`, depois `criada_em` (AD-9).
+    fn despachar_missoes_vencidas(&mut self, hoje: Date) {
+        let (Some(id_save), Some(estado)) = (self.save_ativo.clone(), self.estado_ativo().cloned()) else {
+            return;
+        };
+        let mut vencidas: Vec<Missao> = estado.ler(|dados| {
+            dados
+                .missoes
+                .iter()
+                .filter(|m| m.status == StatusMissao::Pendente && hoje >= m.prazo_estimado)
+                .cloned()
+                .collect()
+        });
+        if vencidas.is_empty() {
+            return;
+        }
+        vencidas.sort_by_key(|m| (m.prazo_estimado, m.criada_em));
+        let ids: Vec<Uuid> = vencidas.iter().map(|m| m.id).collect();
+        let marcou = estado.mutar(|dados| {
+            for m in dados.missoes.iter_mut().filter(|m| ids.contains(&m.id)) {
+                m.status = StatusMissao::EmExecucao;
+            }
+        });
+        if let Err(err) = marcou {
+            // Sem gravar `EmExecucao` não há garantia contra despacho
+            // duplicado: a Missão espera a próxima abertura.
+            tracing::warn!("[scout::state] Não deu para marcar Missões em execução: {err:?}");
+            return;
+        }
+        for mut missao in vencidas {
+            missao.status = StatusMissao::EmExecucao;
+            tracing::info!("[scout::state] Missão {} na fila de busca (prazo {}).", missao.id, missao.prazo_estimado.0);
+            self.falhas_busca.remove(&missao.id);
+            self.fila_busca.push_back(BuscaNaFila { id_save: id_save.clone(), missao, hoje });
+        }
+    }
+
+    /// Roda a cada frame (painel aberto ou fechado): trata a busca que
+    /// terminou e dispara a próxima da fila. Uma de cada vez (AD-9).
+    fn processar_buscas(&mut self) {
+        match self.tarefa_busca.poll() {
+            TaskState::Running => return,
+            TaskState::Done(relatorio) => {
+                if let Some(busca) = self.busca_atual.take() {
+                    self.concluir_busca(busca, relatorio);
+                }
+            }
+            TaskState::Failed(err) => {
+                if let Some(busca) = self.busca_atual.take() {
+                    self.falhar_busca(busca, &err);
+                }
+            }
+            TaskState::Idle => {}
+        }
+        let Some(proxima) = self.fila_busca.pop_front() else {
+            return;
+        };
+        let fonte = Arc::clone(&self.fonte);
+        let (missao, hoje) = (proxima.missao.clone(), proxima.hoje);
+        if self.tarefa_busca.start(move || search::executar_missao(&missao, fonte.as_ref(), hoje)) {
+            self.busca_atual = Some(proxima);
+        } else {
+            self.fila_busca.push_front(proxima);
+        }
+    }
+
+    /// Grava o Relatório e conclui a Missão no arquivo da carreira DONA da
+    /// busca (pode não ser a ativa): o Olheiro volta a ficar disponível.
+    fn concluir_busca(&mut self, busca: BuscaNaFila, relatorio: Relatorio) {
+        let Some(estado) = self.estados.get(&busca.id_save).cloned() else {
+            return;
+        };
+        let jogadores = relatorio.jogadores.len();
+        let id = busca.missao.id;
+        let gravou = estado.mutar(move |dados| {
+            if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
+                m.status = StatusMissao::Concluida;
+            }
+            dados.relatorios.retain(|r| r.missao_id != id);
+            dados.relatorios.push(relatorio);
+        });
+        match gravou {
+            Ok(()) => {
+                tracing::info!("[scout::state] Missão {id} concluída: Relatório com {jogadores} jogadores.");
+                self.avisar(TipoAviso::RelatorioPronto { tipo: busca.missao.tipo, jogadores });
+            }
+            Err(err) => {
+                tracing::warn!("[scout::state] Relatório da Missão {id} não foi salvo: {err:?}");
+                self.falhar_busca(busca, &SaveRepoError::Interno(format!("{err:?}")));
+            }
+        }
+    }
+
+    /// A busca falhou: a Missão volta a `Pendente` (roda de novo na próxima
+    /// abertura do painel) e a falha aparece — nunca em silêncio.
+    fn falhar_busca(&mut self, busca: BuscaNaFila, err: &SaveRepoError) {
+        tracing::warn!("[scout::state] Busca da Missão {} falhou: {err:?}", busca.missao.id);
+        let id = busca.missao.id;
+        if let Some(estado) = self.estados.get(&busca.id_save) {
+            if let Err(e) = estado.mutar(|dados| {
+                for m in dados.missoes.iter_mut().filter(|m| m.id == id && m.status == StatusMissao::EmExecucao) {
+                    m.status = StatusMissao::Pendente;
+                }
+            }) {
+                tracing::warn!("[scout::state] Não deu para devolver a Missão {id} a Pendente: {e:?}");
+            }
+        }
+        self.falhas_busca.insert(id, err.to_string());
+        self.avisar(TipoAviso::BuscaFalhou);
+    }
+
+    /// Falha da última busca desta Missão (texto do `SaveRepoError`).
+    pub fn falha_da_busca(&self, missao: Uuid) -> Option<&str> {
+        self.falhas_busca.get(&missao).map(String::as_str)
     }
 
     /// Aba que a navegação deve assumir porque uma carreira acabou de
@@ -1007,6 +1248,24 @@ impl ScoutState {
     }
 }
 
+/// Ao carregar o arquivo de uma carreira (uma vez por sessão): Missão em
+/// `EmExecucao` aqui é sobra de uma busca interrompida (jogo fechado no
+/// meio) — volta a `Pendente` para não ficar presa (Story 2.4).
+fn destravar_missoes(estado: &EstadoPersistido) {
+    let presas = estado.ler(|dados| dados.missoes.iter().filter(|m| m.status == StatusMissao::EmExecucao).count());
+    if presas == 0 {
+        return;
+    }
+    match estado.mutar(|dados| {
+        for m in dados.missoes.iter_mut().filter(|m| m.status == StatusMissao::EmExecucao) {
+            m.status = StatusMissao::Pendente;
+        }
+    }) {
+        Ok(()) => tracing::info!("[scout::state] {presas} Missão(ões) interrompida(s) voltaram a Pendente."),
+        Err(err) => tracing::warn!("[scout::state] Missões presas em execução não foram destravadas: {err:?}"),
+    }
+}
+
 fn status_de_erro(err: &SaveRepoError) -> CarreiraStatus {
     match err {
         SaveRepoError::NaoLocalizado | SaveRepoError::CarreiraNaoCarregada => CarreiraStatus::SemCarreira,
@@ -1021,7 +1280,9 @@ fn status_de_erro(err: &SaveRepoError) -> CarreiraStatus {
 mod tests {
     use super::*;
     use crate::scout::persistence::tests::PastaTemporaria;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::save_repo::PlayerPool;
+    use crate::scout::search::tests::{jogador, pool};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// Fonte falsa: devolve as leituras de uma fila (a última se repete) e
@@ -1036,6 +1297,13 @@ mod tests {
         resultados_escrita: Mutex<Vec<Result<i32, SaveRepoError>>>,
         /// `(anterior, novo)` de cada escrita pedida.
         escritas: Arc<Mutex<Vec<(i32, i32)>>>,
+        /// Resposta de `read_all_players` (a busca de uma Missão).
+        jogadores: Arc<Mutex<Result<PlayerPool, SaveRepoError>>>,
+        /// Quantas buscas leram os jogadores.
+        buscas: Arc<AtomicUsize>,
+        /// Enquanto `false`, a busca fica "rodando" (para testar o despacho
+        /// com a tarefa em andamento).
+        liberar_busca: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl CareerSource for FonteFalsa {
@@ -1047,6 +1315,15 @@ mod tests {
             } else {
                 fila.remove(0)
             }
+        }
+
+        fn read_all_players(&self) -> Result<PlayerPool, SaveRepoError> {
+            self.buscas.fetch_add(1, Ordering::SeqCst);
+            let inicio = Instant::now();
+            while !self.liberar_busca.load(Ordering::SeqCst) && inicio.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            self.jogadores.lock().unwrap_or_else(|p| p.into_inner()).clone()
         }
 
         fn start_career_probe(&self, task: &AsyncTask<bool>) -> bool {
@@ -1116,6 +1393,9 @@ mod tests {
             sinal,
             resultados_escrita: Mutex::new(Vec::new()),
             escritas: Arc::new(Mutex::new(Vec::new())),
+            jogadores: Arc::new(Mutex::new(Ok(pool_de_teste()))),
+            buscas: Arc::new(AtomicUsize::new(0)),
+            liberar_busca: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         (ScoutState::com_fonte(Box::new(fonte), diretorio), localizacoes)
     }
@@ -1140,6 +1420,9 @@ mod tests {
             sinal: Arc::new(Mutex::new(false)),
             resultados_escrita: Mutex::new(resultados),
             escritas: Arc::clone(&escritas),
+            jogadores: Arc::new(Mutex::new(Ok(pool_de_teste()))),
+            buscas: Arc::new(AtomicUsize::new(0)),
+            liberar_busca: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         let mut st = ScoutState::com_fonte(Box::new(fonte), diretorio);
         st.ao_abrir_painel();
@@ -1797,6 +2080,9 @@ mod tests {
             sinal: Arc::new(Mutex::new(false)),
             resultados_escrita: Mutex::new(Vec::new()),
             escritas: Arc::new(Mutex::new(Vec::new())),
+            jogadores: Arc::new(Mutex::new(Ok(pool_de_teste()))),
+            buscas: Arc::new(AtomicUsize::new(0)),
+            liberar_busca: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         let mut st = ScoutState::com_fonte(Box::new(fonte), Some(pasta.0.clone()));
         st.ao_abrir_painel();
@@ -1831,6 +2117,9 @@ mod tests {
             sinal: Arc::new(Mutex::new(false)),
             resultados_escrita: Mutex::new(Vec::new()),
             escritas: Arc::new(Mutex::new(Vec::new())),
+            jogadores: Arc::new(Mutex::new(Ok(pool_de_teste()))),
+            buscas: Arc::new(AtomicUsize::new(0)),
+            liberar_busca: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         let mut st = ScoutState::com_fonte(Box::new(fonte), Some(pasta.0.clone()));
         st.ao_abrir_painel();
@@ -1848,5 +2137,176 @@ mod tests {
         assert_eq!(lista.len(), 1, "a lista não some");
         assert_eq!(lista[0].missao.id, m.id);
         assert_eq!(lista[0].progresso, None, "sem data, sem progresso");
+    }
+
+    // -----------------------------------------------------------------
+    // Story 2.4: busca das Missões vencidas
+    // -----------------------------------------------------------------
+
+    fn pool_de_teste() -> PlayerPool {
+        pool((1..=60).map(|i| jogador(i, 55 + (i % 40) as u8, 60 + (i % 39) as u8, (i % 27) as u8)).collect())
+    }
+
+    /// Pedaços da fonte que os testes de busca controlam.
+    struct Busca {
+        buscas: Arc<AtomicUsize>,
+        liberar: Arc<AtomicBool>,
+        jogadores: Arc<Mutex<Result<PlayerPool, SaveRepoError>>>,
+    }
+
+    /// Carreira pronta em `hoje`, com um Olheiro e as `missoes` gravadas.
+    fn estado_com_missoes(pasta: &PastaTemporaria, hoje: i32, missoes: Vec<Missao>, olheiro: &Olheiro) -> (ScoutState, Busca) {
+        let busca = Busca {
+            buscas: Arc::new(AtomicUsize::new(0)),
+            liberar: Arc::new(AtomicBool::new(true)),
+            jogadores: Arc::new(Mutex::new(Ok(pool_de_teste()))),
+        };
+        let fonte = FonteFalsa {
+            leituras: Mutex::new(vec![Ok(CareerSnapshot { data_atual: Date(hoje), ..snapshot() })]),
+            resultado_localizacao: Ok(()),
+            localizacoes: Arc::new(AtomicUsize::new(0)),
+            sinal: Arc::new(Mutex::new(false)),
+            resultados_escrita: Mutex::new(Vec::new()),
+            escritas: Arc::new(Mutex::new(Vec::new())),
+            jogadores: Arc::clone(&busca.jogadores),
+            buscas: Arc::clone(&busca.buscas),
+            liberar_busca: Arc::clone(&busca.liberar),
+        };
+        // grava o arquivo antes de a carreira ficar pronta
+        let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
+        let o = olheiro.clone();
+        estado.mutar(move |d| { d.olheiros = vec![o]; d.missoes = missoes; }).expect("gravou");
+        let st = ScoutState::com_fonte(Box::new(fonte), Some(pasta.0.clone()));
+        (st, busca)
+    }
+
+    fn missao_com_prazo(olheiro: &Olheiro, criada: i32, prazo: i32) -> Missao {
+        let mut m = Missao::de_teste(olheiro.id, StatusMissao::Pendente);
+        m.criada_em = Date(criada);
+        m.prazo_estimado = Date(prazo);
+        m
+    }
+
+    fn status_de(st: &ScoutState, id: Uuid) -> Option<StatusMissao> {
+        st.estado_ativo()?.ler(|d| d.missoes.iter().find(|m| m.id == id).map(|m| m.status))
+    }
+
+    /// `tick` até a fila esvaziar e a última busca ser tratada.
+    fn ticks_ate_buscar(st: &mut ScoutState) {
+        let inicio = Instant::now();
+        loop {
+            st.tick();
+            if st.fila_busca.is_empty() && st.busca_atual.is_none() {
+                return;
+            }
+            assert!(inicio.elapsed() < Duration::from_secs(5), "busca falsa travou");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_due_missao_runs_on_panel_open_and_produces_a_saved_report() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let vencida = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![vencida.clone()], &o);
+        busca.liberar.store(false, Ordering::SeqCst);
+
+        st.ao_abrir_painel();
+        // EmExecucao gravado ANTES de a busca rodar (AD-8)
+        assert_eq!(status_de(&st, vencida.id), Some(StatusMissao::EmExecucao));
+        assert!(st.olheiros_contratados()[0].em_missao);
+        st.tick();
+        assert!(matches!(st.tarefa_busca.poll(), TaskState::Running));
+
+        // fechar e reabrir com a busca rodando não despacha de novo
+        st.ao_fechar_painel();
+        st.ao_abrir_painel();
+        st.ao_fechar_painel();
+        busca.liberar.store(true, Ordering::SeqCst);
+        ticks_ate_buscar(&mut st);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 1, "uma busca só");
+
+        // concluiu com o painel FECHADO: Relatório gravado, Olheiro livre
+        assert_eq!(status_de(&st, vencida.id), Some(StatusMissao::Concluida));
+        assert!(!st.olheiros_contratados()[0].em_missao);
+        let relatorios = st.estado_ativo().map(|e| e.ler(|d| d.relatorios.clone())).unwrap_or_default();
+        assert_eq!(relatorios.len(), 1);
+        assert_eq!(relatorios[0].missao_id, vencida.id);
+        assert_eq!(relatorios[0].jogadores.len(), usize::from(vencida.estimativa.alvo_jogadores));
+        assert!(!relatorios[0].aberto);
+        assert!(matches!(st.aviso_visivel(Instant::now()), Some(TipoAviso::RelatorioPronto { .. })));
+
+        // reabrir depois de concluída não roda nada
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 1);
+        // e o Relatório sobrevive a reiniciar o jogo
+        let relido = EstadoPersistido::carregar(Some(&pasta.0), ID_A).ler(|d| d.relatorios.clone());
+        assert_eq!(relido, relatorios);
+    }
+
+    #[test]
+    fn a_missao_before_its_deadline_is_not_dispatched() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_prazo(&o, 20260701, 20260720);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Pendente));
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn due_missoes_run_one_at_a_time_in_deadline_then_creation_order() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let tardia = missao_com_prazo(&o, 20260601, 20260710);
+        let cedo_b = missao_com_prazo(&o, 20260605, 20260705);
+        let cedo_a = missao_com_prazo(&o, 20260602, 20260705);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![tardia.clone(), cedo_b.clone(), cedo_a.clone()], &o);
+        st.ao_abrir_painel();
+        let ordem: Vec<Uuid> = st.fila_busca.iter().map(|b| b.missao.id).collect();
+        assert_eq!(ordem, vec![cedo_a.id, cedo_b.id, tardia.id]);
+        ticks_ate_buscar(&mut st);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 3);
+        let relatorios: Vec<Uuid> = st.estado_ativo().map(|e| e.ler(|d| d.relatorios.iter().map(|r| r.missao_id).collect())).unwrap_or_default();
+        assert_eq!(relatorios, vec![cedo_a.id, cedo_b.id, tardia.id], "uma de cada vez, na ordem da fila");
+    }
+
+    #[test]
+    fn a_failed_search_goes_back_to_pendente_and_says_so() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![m.clone()], &o);
+        *busca.jogadores.lock().unwrap_or_else(|p| p.into_inner()) = Err(SaveRepoError::ProcessoInacessivel);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Pendente));
+        assert_eq!(st.falha_da_busca(m.id), Some("Não foi possível ler o save ativo."));
+        assert!(matches!(st.aviso_visivel(Instant::now()), Some(TipoAviso::BuscaFalhou)));
+
+        // na próxima abertura roda de novo (e agora funciona)
+        *busca.jogadores.lock().unwrap_or_else(|p| p.into_inner()) = Ok(pool_de_teste());
+        st.ao_fechar_painel();
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Concluida));
+        assert_eq!(st.falha_da_busca(m.id), None);
+    }
+
+    #[test]
+    fn a_missao_stuck_in_execution_is_reset_when_the_state_loads() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let mut presa = missao_com_prazo(&o, 20260701, 20260720);
+        presa.status = StatusMissao::EmExecucao;
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![presa.clone()], &o);
+        st.ao_abrir_painel();
+        assert_eq!(status_de(&st, presa.id), Some(StatusMissao::Pendente));
+        ticks_ate_buscar(&mut st);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 0, "ainda não venceu");
     }
 }

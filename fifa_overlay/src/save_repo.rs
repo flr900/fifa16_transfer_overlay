@@ -30,6 +30,8 @@
 //!   do disco não existe mais na memória → `CarreiraNaoCarregada` até
 //!   salvar.
 
+pub mod jogadores;
+
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -39,6 +41,11 @@ use sha2::{Digest, Sha256};
 use crate::async_task::AsyncTask;
 use crate::fifa_db::{self, TableDescriptor};
 use crate::memscan::{self, Region};
+
+pub use jogadores::{
+    funcao_da_posicao, nome_posicao, pasta_do_jogo, read_all_players, read_nations, Atributo, Confederacao, Funcao,
+    Nacao, PlayerPool, PlayerRaw, TOTAL_ATRIBUTOS,
+};
 
 /// Short names (4 chars) das tabelas/campos que o `save_repo` lê.
 ///
@@ -1225,6 +1232,7 @@ mod tests {
             short_name: *short,
             offset_abs: 0,
             record_size: 0,
+            compressed_string_length: 0,
             written_record_count: records,
             field_count: 0,
             fields: Vec::new(),

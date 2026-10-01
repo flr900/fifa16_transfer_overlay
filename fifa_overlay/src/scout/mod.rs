@@ -231,10 +231,7 @@ impl Scout {
         } else {
             tracing::info!("[scout] Painel fechado.");
             self.nav.reset_para_aba();
-            // Fechar no meio da confirmação/formulário = cancelar (nada é
-            // debitado nem gravado).
-            self.state.cancelar_contratacao();
-            self.state.cancelar_nova_missao();
+            self.state.ao_fechar_painel();
         }
     }
 
@@ -418,6 +415,9 @@ mod tests {
         }
         fn write_transfer_budget(&self, _anterior: i32, novo: i32) -> Result<i32, crate::save_repo::SaveRepoError> {
             Ok(novo)
+        }
+        fn read_all_players(&self) -> Result<crate::save_repo::PlayerPool, crate::save_repo::SaveRepoError> {
+            Err(crate::save_repo::SaveRepoError::NaoLocalizado)
         }
         fn read_snapshot(&self) -> Result<search::CareerSnapshot, crate::save_repo::SaveRepoError> {
             Ok(search::CareerSnapshot {

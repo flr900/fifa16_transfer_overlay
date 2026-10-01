@@ -385,7 +385,7 @@ pub(crate) mod tests {
             prazo_estimado: Date(20261015),
             ..Missao::de_teste(olheiro.id, StatusMissao::Pendente)
         };
-        let relatorio = Relatorio { id: Uuid::new_v4(), missao_id: missao.id };
+        let relatorio = Relatorio::de_teste(missao.id);
 
         let pasta = PastaTemporaria::nova();
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);

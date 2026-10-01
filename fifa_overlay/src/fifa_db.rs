@@ -21,9 +21,149 @@ pub struct TableDescriptor {
     pub short_name: [u8; 4],
     pub offset_abs: usize,
     pub record_size: u32,
+    /// Bytes do bloco de strings Huffman logo depois dos registros
+    /// (árvore + textos). 0 nas tabelas sem string comprimida.
+    pub compressed_string_length: u32,
     pub written_record_count: u16,
     pub field_count: u8,
     pub fields: Vec<FieldDescriptor>,
+}
+
+/// `storage_type` das strings Huffman com tamanho de 1 byte (13) e de 2
+/// bytes big-endian (14), como em `fifa16_db_parser.decode_table`.
+pub const HUFFMAN_STORAGE_TYPES: [u32; 2] = [13, 14];
+
+impl TableDescriptor {
+    /// Offset (no buffer) do primeiro registro.
+    pub fn records_start(&self) -> usize {
+        self.offset_abs + 36 + self.field_count as usize * 16
+    }
+
+    /// Bytes do registro `index`, ou `None` fora do buffer.
+    pub fn record<'a>(&self, data: &'a [u8], index: usize) -> Option<&'a [u8]> {
+        let size = self.record_size as usize;
+        let start = self.records_start().checked_add(index.checked_mul(size)?)?;
+        data.get(start..start.checked_add(size)?)
+    }
+
+    /// Registro apagado (bit mais alto do último byte), que o
+    /// `fifa16_db_parser` também pula.
+    pub fn is_deleted(record: &[u8]) -> bool {
+        record.last().is_some_and(|b| b & 0x80 != 0)
+    }
+}
+
+/// Lê um inteiro bit-packed de um registro já recortado, somando o
+/// `range_low` do metadata (o mesmo de `fifa16_db_parser.decode_table`).
+pub fn read_int_field(record: &[u8], field: &FieldDescriptor, range_low: i64) -> Option<i64> {
+    if field.storage_type != 3 || field.depth == 0 || field.depth > 32 {
+        return None;
+    }
+    read_packed_int(record, field.bit_offset, field.depth).map(|v| i64::from(v) + range_low)
+}
+
+/// String fixa inline (storage_type 0): corta no primeiro `\0`; bytes
+/// inválidos viram `�`.
+pub fn read_fixed_string(record: &[u8], field: &FieldDescriptor) -> Option<String> {
+    if field.storage_type != 0 || field.bit_offset % 8 != 0 {
+        return None;
+    }
+    let start = (field.bit_offset / 8) as usize;
+    let bytes = record.get(start..start + (field.depth / 8) as usize)?;
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    Some(String::from_utf8_lossy(bytes.get(..end)?).into_owned())
+}
+
+/// Bloco de strings Huffman de uma tabela (ex.: `BGwe.name` no banco
+/// estático): a árvore vem primeiro, em nós de 4 bytes
+/// `(filho0, folha0, filho1, folha1)`; os textos vêm depois, apontados por
+/// um i32 no registro. O fim da árvore é o menor ponteiro não negativo.
+pub struct HuffmanStrings<'a> {
+    data: &'a [u8],
+    start: usize,
+    end: usize,
+    nodes: Vec<[u8; 4]>,
+}
+
+impl<'a> HuffmanStrings<'a> {
+    pub fn for_table(data: &'a [u8], table: &TableDescriptor) -> Option<Self> {
+        let records = table.written_record_count as usize;
+        let start = table.records_start().checked_add(records.checked_mul(table.record_size as usize)?)?;
+        let end = start.checked_add(table.compressed_string_length as usize)?;
+        if end > data.len() {
+            return None;
+        }
+        let string_fields: Vec<&FieldDescriptor> =
+            table.fields.iter().filter(|f| HUFFMAN_STORAGE_TYPES.contains(&f.storage_type)).collect();
+        let mut first_pointer: Option<usize> = None;
+        for i in 0..records {
+            let record = table.record(data, i)?;
+            for field in &string_fields {
+                if let Some(ptr) = pointer_in(record, field).and_then(|p| usize::try_from(p).ok()) {
+                    first_pointer = Some(first_pointer.map_or(ptr, |m: usize| m.min(ptr)));
+                }
+            }
+        }
+        let tree_end = first_pointer.unwrap_or(0).min(end - start);
+        let nodes = data
+            .get(start..start + tree_end - tree_end % 4)?
+            .chunks_exact(4)
+            .map(|c| [c[0], c[1], c[2], c[3]])
+            .collect();
+        Some(HuffmanStrings { data, start, end, nodes })
+    }
+
+    /// Texto do campo `field` no `record` (`""` para ponteiro -1).
+    pub fn read(&self, record: &[u8], field: &FieldDescriptor) -> Option<String> {
+        let pointer = pointer_in(record, field)?;
+        if pointer == -1 {
+            return Some(String::new());
+        }
+        let mut cur = self.start.checked_add(usize::try_from(pointer).ok()?)?;
+        let length = if field.storage_type == 13 {
+            let l = *self.data.get(cur)? as usize;
+            cur += 1;
+            l
+        } else {
+            let l = u16::from_be_bytes([*self.data.get(cur)?, *self.data.get(cur + 1)?]) as usize;
+            cur += 2;
+            l
+        };
+        if self.nodes.is_empty() {
+            let bytes = self.data.get(cur..cur.checked_add(length)?.min(self.end))?;
+            return Some(String::from_utf8_lossy(bytes).into_owned());
+        }
+        let mut out = Vec::with_capacity(length);
+        let mut node = 0usize;
+        while out.len() < length {
+            if cur >= self.end {
+                return None;
+            }
+            let byte = *self.data.get(cur)?;
+            cur += 1;
+            for bit in (0..8).rev() {
+                if out.len() >= length {
+                    break;
+                }
+                let [child0, leaf0, child1, leaf1] = *self.nodes.get(node)?;
+                let (child, leaf) = if (byte >> bit) & 1 == 0 { (child0, leaf0) } else { (child1, leaf1) };
+                if child == 0 {
+                    out.push(leaf);
+                    node = 0;
+                } else {
+                    node = child as usize;
+                }
+            }
+        }
+        Some(String::from_utf8_lossy(&out).into_owned())
+    }
+}
+
+/// Ponteiro i32 de um campo Huffman dentro do registro.
+fn pointer_in(record: &[u8], field: &FieldDescriptor) -> Option<i32> {
+    let at = (field.bit_offset / 8) as usize;
+    let bytes: [u8; 4] = record.get(at..at + 4)?.try_into().ok()?;
+    Some(i32::from_le_bytes(bytes))
 }
 
 fn u32_at(data: &[u8], pos: usize) -> Option<u32> {
@@ -70,6 +210,7 @@ pub fn parse_database_tables(data: &[u8], start: usize) -> Option<Vec<TableDescr
         let off = start + table_data_base + rel as usize;
 
         let record_size = u32_at(data, off + 4)?;
+        let compressed_string_length = u32_at(data, off + 12)?;
         let written_record_count = u16_at(data, off + 18)?;
         let field_count = u8_at(data, off + 24)?;
 
@@ -95,6 +236,7 @@ pub fn parse_database_tables(data: &[u8], start: usize) -> Option<Vec<TableDescr
             short_name,
             offset_abs: off,
             record_size,
+            compressed_string_length,
             written_record_count,
             field_count,
             fields,
