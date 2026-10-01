@@ -98,15 +98,16 @@ impl Aba {
     }
 }
 
-/// Telas que abrem POR CIMA de uma aba (nomes do Structural Seed). Ainda
-/// sem conteúdo: chegam nas próximas stories.
-#[allow(dead_code)]
+/// Telas que abrem POR CIMA de uma aba (nomes do Structural Seed).
+#[allow(dead_code)] // FichaJogador chega no Épico 3
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Satelite {
     ConfirmacaoContratacao,
     NovaMissao,
     SelecaoGeografica,
     FichaJogador,
+    /// Relatório aberto (Story 2.5), a partir de Missões ou Relatórios.
+    Relatorio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +292,7 @@ impl Scout {
                 match satelite {
                     Satelite::ConfirmacaoContratacao => self.state.cancelar_contratacao(),
                     Satelite::NovaMissao => self.state.cancelar_nova_missao(),
+                    Satelite::Relatorio => self.state.fechar_relatorio(),
                     _ => {}
                 }
                 self.nav.pop();

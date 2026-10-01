@@ -120,6 +120,11 @@ pub fn badge_qualidade(qualidade: Qualidade) -> EstiloBadge {
     EstiloBadge { texto, ..base }
 }
 
+/// "NOVO" em verde-campo: Relatório ainda não aberto (UX-DR13).
+pub fn badge_novo() -> EstiloBadge {
+    EstiloBadge { texto: "NOVO", contorno: theme::FIELD_GREEN, fundo: theme::FIELD_GREEN_DIM, cor_texto: theme::FIELD_GREEN }
+}
+
 /// Desenha o badge em `pos`, centralizado na altura `altura_linha`, pelo
 /// draw list (sem criar item). Devolve o tamanho ocupado.
 pub fn desenhar_badge(

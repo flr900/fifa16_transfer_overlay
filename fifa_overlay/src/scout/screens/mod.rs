@@ -11,6 +11,7 @@ mod confirmacao_contratacao;
 mod missoes;
 mod nova_missao;
 mod olheiros;
+mod relatorio;
 mod relatorios;
 mod sonar;
 pub mod theme;
@@ -59,6 +60,10 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     } else if !na_nova_missao && state.tem_nova_missao() {
         state.cancelar_nova_missao();
     }
+    // A tela do Relatório fecha se ele deixou de existir.
+    if nav.tela_atual() == ScoutScreen::Satelite(Satelite::Relatorio) && state.relatorio_aberto().is_none() {
+        nav.pop();
+    }
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -104,6 +109,16 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         }
         Some(Pedido::FecharNovaMissao) => {
             state.cancelar_nova_missao();
+            nav.pop();
+        }
+        Some(Pedido::AbrirRelatorio(id)) => {
+            state.abrir_relatorio(id);
+            if state.relatorio_aberto().is_some() {
+                nav.push(Satelite::Relatorio);
+            }
+        }
+        Some(Pedido::FecharRelatorio) => {
+            state.fechar_relatorio();
             nav.pop();
         }
         _ => {}
@@ -226,6 +241,8 @@ enum Pedido {
     AbrirNovaMissao,
     /// Confirmou ou cancelou o formulário: volta para a aba.
     FecharNovaMissao,
+    AbrirRelatorio(uuid::Uuid),
+    FecharRelatorio,
 }
 
 fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState) -> Option<Pedido> {
@@ -250,7 +267,7 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
             // sem progresso e sem o botão "Nova Missão".
             if aba == Aba::Missoes {
                 ui.dummy([0.0, theme::ESPACO_4]);
-                missoes::render(ui, fonts, state, false);
+                let _ = missoes::render(ui, fonts, state, false);
             }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::NovaMissao) => {
@@ -258,16 +275,25 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
                 pedido = Some(Pedido::FecharNovaMissao);
             }
         }
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::Relatorio) => {
+            if relatorio::render(ui, fonts, state) == relatorio::Acao::Voltar {
+                pedido = Some(Pedido::FecharRelatorio);
+            }
+        }
         CarreiraStatus::Pronta(_) => match aba {
             Aba::Olheiros => {
                 pedido = olheiros::render(ui, fonts, state).map(|(e, t)| Pedido::Contratar(e, t));
             }
-            Aba::Missoes => {
-                if missoes::render(ui, fonts, state, true) {
-                    pedido = Some(Pedido::AbrirNovaMissao);
+            Aba::Missoes => match missoes::render(ui, fonts, state, true) {
+                missoes::Acao::NovaMissao => pedido = Some(Pedido::AbrirNovaMissao),
+                missoes::Acao::AbrirRelatorio(id) => pedido = Some(Pedido::AbrirRelatorio(id)),
+                missoes::Acao::Nenhuma => {}
+            },
+            Aba::Relatorios => {
+                if let Some(id) = relatorios::render(ui, fonts, state) {
+                    pedido = Some(Pedido::AbrirRelatorio(id));
                 }
             }
-            Aba::Relatorios => relatorios::render(ui, fonts),
             Aba::Sonar => sonar::render(ui, fonts),
         },
     });

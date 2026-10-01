@@ -9,8 +9,9 @@
 //! de leitura) a lista continua aparecendo, sem barra.
 
 use imgui::Ui;
+use uuid::Uuid;
 
-use super::componentes::{self, badge_qualidade, badge_tier, card, desenhar_badge, texto_em, EstiloBotao};
+use super::componentes::{self, badge_novo, badge_qualidade, badge_tier, card, desenhar_badge, texto_em, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data};
 use crate::scout::state::{MissaoNaLista, ModoBusca, ProgressoMissao, ScoutState, StatusMissao};
@@ -45,6 +46,7 @@ pub fn texto_estimativa(linha: &MissaoNaLista) -> String {
         return format!("A busca falhou: {falha} Ela roda de novo quando o painel abrir.");
     }
     match (linha.missao.status, linha.progresso) {
+        (StatusMissao::Concluida, _) if linha.relatorio_id.is_some() => "Concluída: ative para abrir o Relatório.".to_string(),
         (StatusMissao::Concluida, _) => "Concluída: Relatório disponível.".to_string(),
         (StatusMissao::EmExecucao, _) => "Gerando o Relatório…".to_string(),
         (StatusMissao::Pendente, None) => MSG_SEM_DATA.to_string(),
@@ -66,25 +68,42 @@ pub fn fracao_da_barra(linha: &MissaoNaLista) -> Option<f32> {
     }
 }
 
-/// Desenha a aba; `true` = "Nova Missão" pressionado. `pode_encomendar`
-/// é `false` no estado de erro de leitura (a lista aparece, sem o botão).
-pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, pode_encomendar: bool) -> bool {
-    let nova = pode_encomendar && componentes::botao(ui, fonts, "Nova Missão", EstiloBotao::Primario, true);
+/// O que a aba pediu neste frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acao {
+    Nenhuma,
+    NovaMissao,
+    /// Card de uma Missão com Relatório ativado (Story 2.5).
+    AbrirRelatorio(Uuid),
+}
+
+/// Desenha a aba. `pode_encomendar` é `false` no estado de erro de leitura
+/// (a lista aparece, sem o botão).
+pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, pode_encomendar: bool) -> Acao {
+    let mut acao = Acao::Nenhuma;
+    if pode_encomendar && componentes::botao(ui, fonts, "Nova Missão", EstiloBotao::Primario, true) {
+        acao = Acao::NovaMissao;
+    }
     ui.dummy([0.0, theme::ESPACO_3]);
 
     let missoes = state.missoes();
     if missoes.is_empty() {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_MISSOES));
-        return nova;
+        return acao;
     }
     com_fonte(ui, fonts.map(|f| f.heading), || ui.text_colored(theme::TEXT_SECONDARY, "Missões"));
     for linha in &missoes {
-        card_missao(ui, fonts, linha);
+        if card_missao(ui, fonts, linha) {
+            if let Some(id) = linha.relatorio_id {
+                acao = Acao::AbrirRelatorio(id);
+            }
+        }
     }
-    nova
+    acao
 }
 
-fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) {
+/// Card de uma Missão; `true` = ativado (só faz algo com Relatório pronto).
+fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) -> bool {
     let missao = &linha.missao;
     let c = card(ui, &missao.id.to_string(), ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
     let dl = ui.get_window_draw_list();
@@ -95,8 +114,12 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) {
     // Linha 1: Olheiro + Tier; Qualidade estimada à direita.
     let nome = linha.olheiro.as_ref().map_or("Olheiro removido", |o| o.especializacao.nome());
     let [largura_nome, altura_nome] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, nome);
+    let mut xb = x + largura_nome + theme::ESPACO_2;
     if let Some(o) = &linha.olheiro {
-        desenhar_badge(ui, fonts, &dl, &badge_tier(o.tier), [x + largura_nome + theme::ESPACO_2, y], altura_nome);
+        xb += desenhar_badge(ui, fonts, &dl, &badge_tier(o.tier), [xb, y], altura_nome)[0] + theme::ESPACO_2;
+    }
+    if linha.relatorio_novo {
+        desenhar_badge(ui, fonts, &dl, &badge_novo(), [xb, y], altura_nome);
     }
     let qualidade = badge_qualidade(missao.estimativa.qualidade);
     let largura_badge =
@@ -134,6 +157,7 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) {
         _ => theme::TEXT_SECONDARY,
     };
     texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], cor, &texto_estimativa(linha));
+    c.ativou
 }
 
 #[cfg(test)]
@@ -152,6 +176,8 @@ mod tests {
             missao,
             olheiro: None,
             falha: None,
+            relatorio_id: None,
+            relatorio_novo: false,
         }
     }
 

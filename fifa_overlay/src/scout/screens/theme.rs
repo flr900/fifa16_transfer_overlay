@@ -38,6 +38,10 @@ pub const TEXT_DISABLED: [f32; 4] = rgba(0x4d564f, 1.0);
 pub const ACCENT_PRIMARY: [f32; 4] = rgba(0xb45cff, 1.0);
 pub const ACCENT_PRIMARY_DIM: [f32; 4] = rgba(0xb45cff, 0.13);
 pub const FIELD_GREEN: [f32; 4] = rgba(0x3ecf6e, 1.0);
+/// Fundo tênue de badges verdes ("NOVO").
+pub const FIELD_GREEN_DIM: [f32; 4] = rgba(0x3ecf6e, 0.12);
+/// Linha alternada das tabelas (bem sutil, sem virar "card").
+pub const LINHA_ALTERNADA: [f32; 4] = rgba(0xffffff, 0.025);
 pub const DANGER: [f32; 4] = rgba(0xe5484d, 1.0);
 /// Status "Em Missão" (DESIGN.md `warning`).
 pub const WARNING: [f32; 4] = rgba(0xf5a623, 1.0);

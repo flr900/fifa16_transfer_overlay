@@ -357,6 +357,19 @@ pub struct MissaoNaLista {
     pub progresso: Option<ProgressoMissao>,
     /// Falha da última busca (Story 2.4); a Missão voltou a `Pendente`.
     pub falha: Option<String>,
+    /// Relatório desta Missão, se já existe (Story 2.5).
+    pub relatorio_id: Option<Uuid>,
+    /// O Relatório ainda não foi aberto: indicador "novo" (UX-DR13).
+    pub relatorio_novo: bool,
+}
+
+/// Um Relatório como a aba Relatórios e a tela do Relatório o mostram.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelatorioNaLista {
+    pub relatorio: Relatorio,
+    /// `None` se a Missão sumiu do arquivo (não deveria acontecer).
+    pub missao: Option<Missao>,
+    pub olheiro: Option<Olheiro>,
 }
 
 /// As 12 ofertas na ordem da tela (Tier crescente, depois a ordem do PRD),
@@ -561,6 +574,8 @@ pub struct ScoutState {
     /// Última falha de busca por Missão, para a aba Missões dizer.
     falhas_busca: HashMap<Uuid, String>,
     painel_aberto: bool,
+    /// Relatório na tela (Story 2.5).
+    relatorio_aberto: Option<Uuid>,
 }
 
 impl ScoutState {
@@ -594,6 +609,7 @@ impl ScoutState {
             busca_atual: None,
             falhas_busca: HashMap::new(),
             painel_aberto: false,
+            relatorio_aberto: None,
         }
     }
 
@@ -640,6 +656,7 @@ impl ScoutState {
         self.painel_aberto = false;
         self.cancelar_contratacao();
         self.cancelar_nova_missao();
+        self.fechar_relatorio();
     }
 
     /// Botão "Tentar novamente": localiza a carreira de novo.
@@ -1093,11 +1110,16 @@ impl ScoutState {
                 .missoes
                 .iter()
                 .rev()
-                .map(|m| MissaoNaLista {
-                    missao: m.clone(),
-                    olheiro: dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned(),
-                    progresso: hoje.map(|data| progresso_missao(m.criada_em, m.prazo_estimado, data)),
-                    falha: self.falhas_busca.get(&m.id).cloned(),
+                .map(|m| {
+                    let relatorio = dados.relatorios.iter().find(|r| r.missao_id == m.id);
+                    MissaoNaLista {
+                        missao: m.clone(),
+                        olheiro: dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned(),
+                        progresso: hoje.map(|data| progresso_missao(m.criada_em, m.prazo_estimado, data)),
+                        falha: self.falhas_busca.get(&m.id).cloned(),
+                        relatorio_id: relatorio.map(|r| r.id),
+                        relatorio_novo: relatorio.is_some_and(|r| !r.aberto),
+                    }
                 })
                 .collect()
         })
@@ -1224,6 +1246,67 @@ impl ScoutState {
     /// Falha da última busca desta Missão (texto do `SaveRepoError`).
     pub fn falha_da_busca(&self, missao: Uuid) -> Option<&str> {
         self.falhas_busca.get(&missao).map(String::as_str)
+    }
+
+    // -----------------------------------------------------------------
+    // Relatórios (Story 2.5)
+    // -----------------------------------------------------------------
+
+    fn montar_relatorio_na_lista(dados: &persistence::ScoutStateFile, r: &Relatorio) -> RelatorioNaLista {
+        let missao = dados.missoes.iter().find(|m| m.id == r.missao_id).cloned();
+        let olheiro = missao.as_ref().and_then(|m| dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned());
+        RelatorioNaLista { relatorio: r.clone(), missao, olheiro }
+    }
+
+    /// Relatórios da carreira pronta, mais novos primeiro. `arquivados`:
+    /// a lista principal (`false`) ou o filtro "Arquivados" (Story 2.7).
+    pub fn relatorios(&self, arquivados: bool) -> Vec<RelatorioNaLista> {
+        let Some(estado) = self.estado_ativo() else {
+            return Vec::new();
+        };
+        estado.ler(|dados| {
+            dados
+                .relatorios
+                .iter()
+                .rev()
+                .filter(|r| r.arquivado == arquivados)
+                .map(|r| Self::montar_relatorio_na_lista(dados, r))
+                .collect()
+        })
+    }
+
+    /// Abre um Relatório: a tela passa a mostrá-lo e o "novo" some
+    /// (gravado, para valer depois de reiniciar o jogo).
+    pub fn abrir_relatorio(&mut self, id: Uuid) {
+        let Some(estado) = self.estado_ativo() else {
+            return;
+        };
+        let existe = estado.ler(|dados| dados.relatorios.iter().any(|r| r.id == id));
+        if !existe {
+            return;
+        }
+        let ja_aberto = estado.ler(|dados| dados.relatorios.iter().any(|r| r.id == id && r.aberto));
+        if !ja_aberto {
+            if let Err(err) = estado.mutar(|dados| {
+                for r in dados.relatorios.iter_mut().filter(|r| r.id == id) {
+                    r.aberto = true;
+                }
+            }) {
+                tracing::warn!("[scout::state] Relatório aberto, mas o \"novo\" não foi salvo: {err:?}");
+            }
+        }
+        self.relatorio_aberto = Some(id);
+    }
+
+    pub fn fechar_relatorio(&mut self) {
+        self.relatorio_aberto = None;
+    }
+
+    /// O Relatório na tela, ou `None` (a tela deve fechar).
+    pub fn relatorio_aberto(&self) -> Option<RelatorioNaLista> {
+        let id = self.relatorio_aberto?;
+        let estado = self.estado_ativo()?;
+        estado.ler(|dados| dados.relatorios.iter().find(|r| r.id == id).map(|r| Self::montar_relatorio_na_lista(dados, r)))
     }
 
     /// Aba que a navegação deve assumir porque uma carreira acabou de
@@ -2308,5 +2391,36 @@ mod tests {
         assert_eq!(status_de(&st, presa.id), Some(StatusMissao::Pendente));
         ticks_ate_buscar(&mut st);
         assert_eq!(busca.buscas.load(Ordering::SeqCst), 0, "ainda não venceu");
+    }
+
+    #[test]
+    fn opening_a_report_clears_new_and_persists() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let linha = st.missoes().into_iter().next().expect("missão");
+        assert!(linha.relatorio_novo);
+        let id = linha.relatorio_id.expect("relatório");
+        let lista = st.relatorios(false);
+        assert_eq!(lista.len(), 1);
+        assert_eq!(lista[0].missao.as_ref().map(|x| x.id), Some(m.id));
+        assert_eq!(lista[0].olheiro.as_ref().map(|x| x.id), Some(o.id));
+        assert!(st.relatorios(true).is_empty());
+
+        st.abrir_relatorio(id);
+        assert_eq!(st.relatorio_aberto().map(|r| r.relatorio.id), Some(id));
+        assert!(!st.missoes()[0].relatorio_novo);
+        let relido = EstadoPersistido::carregar(Some(&pasta.0), ID_A).ler(|d| d.relatorios[0].aberto);
+        assert!(relido, "o \"novo\" some também depois de reiniciar");
+
+        // fechar o painel fecha a tela do Relatório
+        st.ao_fechar_painel();
+        assert_eq!(st.relatorio_aberto(), None);
+        // id que não existe não abre nada
+        st.abrir_relatorio(Uuid::new_v4());
+        assert_eq!(st.relatorio_aberto(), None);
     }
 }

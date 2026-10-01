@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 hudhook = { version = "0.9", features = ["dx11"] }
-imgui = "0.12"
+imgui = { version = "0.12", features = ["tables-api"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
