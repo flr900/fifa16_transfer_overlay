@@ -314,6 +314,42 @@ impl PreviaMissao {
     }
 }
 
+/// Andamento de uma Missão numa data (Story 2.3, FR-8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProgressoMissao {
+    /// 0.0 a 1.0 — nunca negativo nem acima de 100%.
+    pub fracao: f32,
+    /// Dias de carreira até o prazo (0 quando já chegou).
+    pub dias_restantes: u32,
+    pub prazo_atingido: bool,
+}
+
+/// Progresso de `criada` até `prazo` na data `hoje`. Datas fora da janela
+/// ficam presas nas pontas: antes da criação (ex.: carregou um save mais
+/// antigo) = 0%; no prazo ou depois = 100% e `prazo_atingido`.
+pub fn progresso_missao(criada: Date, prazo: Date, hoje: Date) -> ProgressoMissao {
+    let total = (prazo.day_number() - criada.day_number()).max(1);
+    let passados = (hoje.day_number() - criada.day_number()).clamp(0, total);
+    let restantes = (prazo.day_number() - hoje.day_number()).max(0);
+    let prazo_atingido = hoje >= prazo;
+    ProgressoMissao {
+        // Prazo cumprido é sempre barra cheia (inclusive prazo = criação).
+        fracao: if prazo_atingido { 1.0 } else { passados as f32 / total as f32 },
+        dias_restantes: u32::try_from(restantes).unwrap_or(u32::MAX),
+        prazo_atingido,
+    }
+}
+
+/// Uma linha da aba Missões.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MissaoNaLista {
+    pub missao: Missao,
+    pub olheiro: Option<Olheiro>,
+    /// `None` quando a data da carreira não pôde ser lida (erro de leitura):
+    /// a lista continua visível, só sem progresso (Story 2.3).
+    pub progresso: Option<ProgressoMissao>,
+}
+
 /// As 12 ofertas na ordem da tela (Tier crescente, depois a ordem do PRD),
 /// com o que falta para cada uma diante de `orcamento`.
 pub fn ofertas_de_olheiros(orcamento: Option<i32>) -> Vec<OfertaOlheiro> {
@@ -414,6 +450,13 @@ pub struct ScoutState {
     estados: HashMap<String, EstadoPersistido>,
     /// Hash da carreira pronta agora (`None` fora de `Pronta`).
     save_ativo: Option<String>,
+    /// Última carreira que esteve pronta: com erro de leitura a aba
+    /// Missões continua mostrando a lista dela (Story 2.3).
+    ultimo_save: Option<String>,
+    /// Data usada para o progresso das Missões. Fica FIXA enquanto o painel
+    /// está aberto: só muda ao abrir o painel ou quando uma carreira fica
+    /// pronta (FR-8: "recalculado ao abrir o painel, sem polling").
+    data_progresso: Option<Date>,
     /// Aba salva da carreira que acabou de ficar ativa, para o `Scout`
     /// aplicar na navegação (ver `tomar_aba_restaurada`).
     aba_restaurada: Option<Aba>,
@@ -447,6 +490,8 @@ impl ScoutState {
             diretorio_estado,
             estados: HashMap::new(),
             save_ativo: None,
+            ultimo_save: None,
+            data_progresso: None,
             aba_restaurada: None,
             tarefa_sinal: AsyncTask::new(),
             sinal_pendente: false,
@@ -486,6 +531,9 @@ impl ScoutState {
         self.localizacao_automatica_disponivel = true;
         self.reler();
         self.localizacao_automatica_disponivel = false;
+        if let CarreiraStatus::Pronta(carreira) = &self.status {
+            self.data_progresso = Some(carreira.data_atual);
+        }
     }
 
     /// Botão "Tentar novamente": localiza a carreira de novo.
@@ -604,6 +652,7 @@ impl ScoutState {
             // pelo menu precisa poder disparar outra localização).
             self.sinal_consumido = false;
             self.ativar_save(snapshot.id_save.clone());
+            self.data_progresso = Some(snapshot.data_atual);
             self.avisar(TipoAviso::Pronta(snapshot));
         }
     }
@@ -618,6 +667,7 @@ impl ScoutState {
             .or_insert_with(|| EstadoPersistido::carregar(diretorio, &id_save));
         self.aba_restaurada = Some(estado.ler(|dados| dados.ui_prefs.aba_ativa));
         tracing::info!("[scout::state] Carreira ativa: estado {}…", id_save.get(..8).unwrap_or(&id_save));
+        self.ultimo_save = Some(id_save.clone());
         self.save_ativo = Some(id_save);
     }
 
@@ -909,10 +959,16 @@ impl ScoutState {
         }
     }
 
-    /// Missões desta carreira, mais novas primeiro, com o Olheiro de cada
-    /// uma (a aba Missões; a Story 2.3 acrescenta o progresso).
-    pub fn missoes(&self) -> Vec<(Missao, Option<Olheiro>)> {
-        let Some(estado) = self.estado_ativo() else {
+    /// Missões desta carreira, mais novas primeiro, com o Olheiro e o
+    /// progresso de cada uma (aba Missões). Com erro de leitura, a lista da
+    /// última carreira pronta continua aparecendo, sem progresso.
+    pub fn missoes(&self) -> Vec<MissaoNaLista> {
+        let (estado, hoje) = match &self.status {
+            CarreiraStatus::Pronta(_) => (self.estado_ativo(), self.data_progresso),
+            CarreiraStatus::ErroLeitura => (self.ultimo_save.as_deref().and_then(|id| self.estados.get(id)), None),
+            _ => (None, None),
+        };
+        let Some(estado) = estado else {
             return Vec::new();
         };
         estado.ler(|dados| {
@@ -920,7 +976,11 @@ impl ScoutState {
                 .missoes
                 .iter()
                 .rev()
-                .map(|m| (m.clone(), dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned()))
+                .map(|m| MissaoNaLista {
+                    missao: m.clone(),
+                    olheiro: dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned(),
+                    progresso: hoje.map(|data| progresso_missao(m.criada_em, m.prazo_estimado, data)),
+                })
                 .collect()
         })
     }
@@ -1652,7 +1712,7 @@ mod tests {
 
         let missoes = st.missoes();
         assert_eq!(missoes.len(), 1);
-        let (m, dono) = &missoes[0];
+        let (m, dono) = (&missoes[0].missao, &missoes[0].olheiro);
         assert_eq!(m.status, StatusMissao::Pendente, "nenhuma busca roda agora");
         assert_eq!(m.olheiro_id, o.id);
         assert_eq!(dono.as_ref().map(|d| d.id), Some(o.id));
@@ -1700,5 +1760,93 @@ mod tests {
         assert_eq!(st.previa_missao().and_then(|p| p.rascunho.erro), Some(ErroCompra::EscritaFalhou));
         assert!(st.missoes().is_empty());
         assert!(st.olheiros_contratados().iter().all(|c| !c.em_missao));
+    }
+
+    #[test]
+    fn progress_is_clamped_between_creation_and_deadline() {
+        let (criada, prazo) = (Date(20260701), Date(20260711)); // 10 dias
+        let p = |hoje| progresso_missao(criada, prazo, hoje);
+        assert_eq!(p(Date(20260701)), ProgressoMissao { fracao: 0.0, dias_restantes: 10, prazo_atingido: false });
+        assert_eq!(p(Date(20260706)), ProgressoMissao { fracao: 0.5, dias_restantes: 5, prazo_atingido: false });
+        assert_eq!(p(Date(20260711)), ProgressoMissao { fracao: 1.0, dias_restantes: 0, prazo_atingido: true });
+        // depois do prazo: nada acima de 100% nem dias negativos
+        assert_eq!(p(Date(20260901)), ProgressoMissao { fracao: 1.0, dias_restantes: 0, prazo_atingido: true });
+        // antes da criação (save mais antigo carregado): 0%, nada negativo
+        let antes = p(Date(20260620));
+        assert_eq!((antes.fracao, antes.prazo_atingido), (0.0, false));
+        assert_eq!(antes.dias_restantes, 21);
+        // prazo no mesmo dia da criação não divide por zero
+        assert_eq!(progresso_missao(criada, criada, criada).fracao, 1.0);
+        // atravessa mês/ano
+        let virada = progresso_missao(Date(20281220), Date(20290109), Date(20281230));
+        assert_eq!((virada.fracao, virada.dias_restantes), (0.5, 10));
+    }
+
+    #[test]
+    fn progress_uses_the_date_from_when_the_panel_opened() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let mut m = Missao::de_teste(o.id, StatusMissao::Pendente);
+        m.criada_em = Date(20260701);
+        m.prazo_estimado = Date(20260711);
+        let dia = |d| CareerSnapshot { data_atual: Date(d), ..snapshot() };
+        let fonte = FonteFalsa {
+            leituras: Mutex::new(vec![Ok(dia(20260706)), Ok(dia(20260709)), Ok(dia(20260709))]),
+            resultado_localizacao: Ok(()),
+            localizacoes: Arc::new(AtomicUsize::new(0)),
+            sinal: Arc::new(Mutex::new(false)),
+            resultados_escrita: Mutex::new(Vec::new()),
+            escritas: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut st = ScoutState::com_fonte(Box::new(fonte), Some(pasta.0.clone()));
+        st.ao_abrir_painel();
+        let (om, mm) = (o.clone(), m.clone());
+        st.estado_ativo()
+            .map(|e| e.mutar(move |d| { d.olheiros = vec![om]; d.missoes = vec![mm]; }))
+            .expect("ativa")
+            .expect("gravou");
+        let fracao = |st: &ScoutState| st.missoes().first().and_then(|l| l.progresso).map(|p| p.fracao);
+        assert_eq!(fracao(&st), Some(0.5));
+
+        // a releitura periódica traz um dia novo, mas o progresso não anda
+        st.ultima_leitura = Some(Instant::now() - INTERVALO_RELEITURA * 2);
+        st.tick();
+        assert_eq!(st.orcamento(), Some(63_999_988));
+        assert_eq!(fracao(&st), Some(0.5), "sem polling com o painel aberto");
+
+        // reabrir o painel recalcula
+        st.ao_abrir_painel();
+        assert_eq!(fracao(&st), Some(0.8));
+    }
+
+    #[test]
+    fn a_read_error_keeps_the_missao_list_without_progress() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = Missao::de_teste(o.id, StatusMissao::Pendente);
+        let fonte = FonteFalsa {
+            leituras: Mutex::new(vec![Ok(snapshot()), Err(SaveRepoError::ProcessoInacessivel)]),
+            resultado_localizacao: Ok(()),
+            localizacoes: Arc::new(AtomicUsize::new(0)),
+            sinal: Arc::new(Mutex::new(false)),
+            resultados_escrita: Mutex::new(Vec::new()),
+            escritas: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut st = ScoutState::com_fonte(Box::new(fonte), Some(pasta.0.clone()));
+        st.ao_abrir_painel();
+        let (om, mm) = (o.clone(), m.clone());
+        st.estado_ativo()
+            .map(|e| e.mutar(move |d| { d.olheiros = vec![om]; d.missoes = vec![mm]; }))
+            .expect("ativa")
+            .expect("gravou");
+        assert!(st.missoes().first().is_some_and(|l| l.progresso.is_some()));
+
+        st.ultima_leitura = Some(Instant::now() - INTERVALO_RELEITURA * 2);
+        st.tick();
+        assert_eq!(st.status(), &CarreiraStatus::ErroLeitura);
+        let lista = st.missoes();
+        assert_eq!(lista.len(), 1, "a lista não some");
+        assert_eq!(lista[0].missao.id, m.id);
+        assert_eq!(lista[0].progresso, None, "sem data, sem progresso");
     }
 }

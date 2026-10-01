@@ -246,6 +246,12 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
             if componentes::botao(ui, fonts, "Tentar novamente", componentes::EstiloBotao::Primario, true) {
                 state.tentar_novamente();
             }
+            // A lista de Missões não some com o erro (Story 2.3): aparece
+            // sem progresso e sem o botão "Nova Missão".
+            if aba == Aba::Missoes {
+                ui.dummy([0.0, theme::ESPACO_4]);
+                missoes::render(ui, fonts, state, false);
+            }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::NovaMissao) => {
             if nova_missao::render(ui, fonts, state) != nova_missao::Acao::Nenhuma {
@@ -257,7 +263,7 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
                 pedido = olheiros::render(ui, fonts, state).map(|(e, t)| Pedido::Contratar(e, t));
             }
             Aba::Missoes => {
-                if missoes::render(ui, fonts, state) {
+                if missoes::render(ui, fonts, state, true) {
                     pedido = Some(Pedido::AbrirNovaMissao);
                 }
             }
