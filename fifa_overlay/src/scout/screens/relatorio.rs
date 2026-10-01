@@ -34,6 +34,8 @@ const ATRIBUTOS_NO_CARD: usize = 3;
 pub const MSG_BAIXA: &str =
     "Relatório de Qualidade baixa: os valores aparecem em faixas largas e só alguns atributos foram observados.";
 pub const MSG_SEM_JOGADORES: &str = "O Olheiro não encontrou nenhum jogador com esses filtros.";
+pub const MSG_PARCIAL: &str = "Relatório parcial: mais jogadores aparecem conforme os dias de carreira passam.";
+pub const MSG_PARCIAL_VAZIO: &str = "O Olheiro ainda não enviou nenhum nome. Volte em alguns dias de carreira.";
 const NAO_OBSERVADO: &str = "—";
 
 /// O que o jogador fez na tela neste frame.
@@ -117,7 +119,11 @@ pub fn detalhe(item: &RelatorioNaLista) -> String {
     if let Some(data) = r.gerado_em {
         partes.push(format!("gerado em {}", formatar_data(data)));
     }
-    partes.push(super::aviso::texto_jogadores(r.jogadores.len()));
+    partes.push(if item.parcial {
+        format!("parcial: {} de {} jogadores até agora", r.jogadores.len(), item.previstos)
+    } else {
+        super::aviso::texto_jogadores(r.jogadores.len())
+    });
     partes.push(if r.precisao_mais_menos == 0 {
         "valores exatos".to_string()
     } else {
@@ -157,8 +163,12 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     if r.qualidade == Qualidade::Baixa {
         com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::WARNING, MSG_BAIXA));
     }
+    if item.parcial {
+        com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, MSG_PARCIAL));
+    }
     if r.jogadores.is_empty() {
-        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_JOGADORES));
+        let msg = if item.parcial { MSG_PARCIAL_VAZIO } else { MSG_SEM_JOGADORES };
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, msg));
         return acao;
     }
     match state.densidade() {

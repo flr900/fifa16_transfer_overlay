@@ -45,6 +45,13 @@ pub fn texto_estimativa(linha: &MissaoNaLista) -> String {
     if let (StatusMissao::Pendente, Some(falha)) = (linha.missao.status, &linha.falha) {
         return format!("A busca falhou: {falha} Ela roda de novo quando o painel abrir.");
     }
+    if linha.missao.continua && linha.missao.status == StatusMissao::Pendente {
+        return texto_continua(linha);
+    }
+    let parcial = match linha.revelados {
+        0 => String::new(),
+        n => format!("Relatório parcial: {} de {}. ", n, linha.previstos),
+    };
     match (linha.missao.status, linha.progresso) {
         (StatusMissao::Concluida, _) if linha.relatorio_id.is_some() => "Concluída: ative para abrir o Relatório.".to_string(),
         (StatusMissao::Concluida, _) => "Concluída: Relatório disponível.".to_string(),
@@ -55,8 +62,22 @@ pub fn texto_estimativa(linha: &MissaoNaLista) -> String {
         }
         (StatusMissao::Pendente, Some(p)) => {
             let dias = if p.dias_restantes == 1 { "~1 dia".to_string() } else { format!("~{} dias", p.dias_restantes) };
-            format!("Relatório pronto em {dias} de carreira ({}).", formatar_data(linha.missao.prazo_estimado))
+            format!("{parcial}Relatório pronto em {dias} de carreira ({}).", formatar_data(linha.missao.prazo_estimado))
         }
+    }
+}
+
+/// Texto de uma Missão contínua em andamento (Story 2.10).
+pub fn texto_continua(linha: &MissaoNaLista) -> String {
+    let m = &linha.missao;
+    let achados = super::aviso::texto_jogadores(linha.revelados);
+    match linha.progresso {
+        Some(p) if p.prazo_atingido => format!(
+            "Bloco {} encerrado em {} ({achados} até agora). Renove para continuar ou encerre a Missão.",
+            m.blocos,
+            formatar_data(m.prazo_estimado)
+        ),
+        _ => format!("Contínua · bloco {} até {} · {achados} até agora.", m.blocos, formatar_data(m.prazo_estimado)),
     }
 }
 
@@ -78,8 +99,8 @@ pub enum Acao {
 }
 
 /// Desenha a aba. `pode_encomendar` é `false` no estado de erro de leitura
-/// (a lista aparece, sem o botão).
-pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, pode_encomendar: bool) -> Acao {
+/// (a lista aparece, sem o botão nem as ações das Missões contínuas).
+pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pode_encomendar: bool) -> Acao {
     let mut acao = Acao::Nenhuma;
     if pode_encomendar && componentes::botao(ui, fonts, "Nova Missão", EstiloBotao::Primario, true) {
         acao = Acao::NovaMissao;
@@ -98,8 +119,43 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, pode_encomenda
                 acao = Acao::AbrirRelatorio(id);
             }
         }
+        if pode_encomendar && linha.missao.continua && linha.missao.status == StatusMissao::Pendente {
+            acoes_continua(ui, fonts, state, linha);
+        }
     }
     acao
+}
+
+/// Renovar / Encerrar de uma Missão contínua (Story 2.10). Renovar é uma
+/// compra como as outras: só com confirmação explícita, o valor exato no
+/// botão e as mesmas mensagens de falha.
+fn acoes_continua(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, linha: &MissaoNaLista) {
+    let m = &linha.missao;
+    let _id = ui.push_id(m.id.to_string());
+    let custo = ScoutState::custo_do_bloco(m);
+    let encerrado = state.bloco_encerrado(m);
+    let falta = state.orcamento().map(|saldo| custo.saturating_sub(saldo)).filter(|f| *f > 0);
+    let rotulo = format!("Renovar por {}", super::formatar_milhar(custo));
+    if componentes::botao(ui, fonts, &rotulo, EstiloBotao::Primario, encerrado && falta.is_none()) {
+        state.renovar_missao(m.id);
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+    if componentes::botao(ui, fonts, "Encerrar Missão", EstiloBotao::Secundario, true) {
+        state.encerrar_missao(m.id);
+    }
+    let aviso = match (state.erro_da_missao(m.id), falta) {
+        (Some(erro), _) => Some(super::nova_missao::texto_erro(erro)),
+        (None, Some(f)) if encerrado => Some(super::olheiros::texto_faltam(f)),
+        _ => None,
+    };
+    if let Some(texto) = aviso {
+        com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::DANGER, texto));
+    } else if !encerrado {
+        com_fonte(ui, fonts.map(|f| f.meta), || {
+            ui.text_colored(theme::TEXT_SECONDARY, "Renovar fica disponível quando o bloco terminar.")
+        });
+    }
+    ui.dummy([0.0, theme::ESPACO_2]);
 }
 
 /// Card de uma Missão; `true` = ativado (só faz algo com Relatório pronto).
@@ -181,6 +237,8 @@ mod tests {
             falha: None,
             relatorio_id: None,
             relatorio_novo: false,
+            revelados: 0,
+            previstos: 17,
         }
     }
 
@@ -196,6 +254,18 @@ mod tests {
         );
         assert_eq!(texto_estimativa(&linha(StatusMissao::Pendente, Some(20260801))), "Pronta: prazo cumprido em 11/07/2026.");
         assert_eq!(texto_estimativa(&linha(StatusMissao::Pendente, None)), MSG_SEM_DATA);
+        let parcial = MissaoNaLista { revelados: 9, ..linha(StatusMissao::Pendente, Some(20260706)) };
+        assert_eq!(
+            texto_estimativa(&parcial),
+            "Relatório parcial: 9 de 17. Relatório pronto em ~5 dias de carreira (11/07/2026)."
+        );
+        let mut continua = linha(StatusMissao::Pendente, Some(20260711));
+        continua.missao.continua = true;
+        continua.revelados = 17;
+        assert_eq!(
+            texto_estimativa(&continua),
+            "Bloco 1 encerrado em 11/07/2026 (17 jogadores até agora). Renove para continuar ou encerre a Missão."
+        );
         let falhou = MissaoNaLista { falha: Some("Não foi possível ler o save ativo.".to_string()), ..linha(StatusMissao::Pendente, Some(20260801)) };
         assert_eq!(
             texto_estimativa(&falhou),

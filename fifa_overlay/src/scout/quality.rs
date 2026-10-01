@@ -360,6 +360,26 @@ pub fn estimar_missao(pedido: &PedidoMissao) -> EstimativaMissao {
 }
 
 // ---------------------------------------------------------------------
+// Relatório parcial e Missão contínua (Story 2.10)
+// ---------------------------------------------------------------------
+
+/// Uma Missão contínua ("sem prazo") é paga em blocos de tantos dias de
+/// carreira; cada bloco custa o mesmo que a Missão de prazo fixo com os
+/// mesmos filtros e traz o mesmo número de jogadores, só que espalhados
+/// pelo bloco. Nada é cobrado sozinho: cada bloco novo é confirmado pelo
+/// jogador (FR-3/NFR1).
+pub const DIAS_BLOCO_CONTINUO: u32 = 30;
+
+/// Quantos jogadores do Relatório já apareceram com o progresso `fracao`
+/// (0–1): `ceil(fracao × alvo)`, nunca mais que os `encontrados` pela
+/// busca. Prazo cumprido (`fracao` 1) mostra todos.
+pub fn revelados(fracao: f32, alvo: usize, encontrados: usize) -> usize {
+    let fracao = fracao.clamp(0.0, 1.0);
+    let n = (fracao * alvo as f32).ceil() as usize;
+    n.min(encontrados)
+}
+
+// ---------------------------------------------------------------------
 // Como o Relatório revela cada jogador (Story 2.4)
 // ---------------------------------------------------------------------
 //
@@ -733,5 +753,16 @@ mod tests {
         assert_eq!(amplitude_da_selecao(&[AmericaDoSul, AmericaDoSul], total), AmplitudeGeografica::VariosPaises);
         assert_eq!(amplitude_da_selecao(&[AmericaDoSul; 3], total), AmplitudeGeografica::Continente);
         assert_eq!(amplitude_da_selecao(&[Europa, AmericaDoSul], total), AmplitudeGeografica::Mundo);
+    }
+
+    #[test]
+    fn partial_reports_grow_with_progress_and_never_exceed_what_was_found() {
+        assert_eq!(revelados(0.0, 17, 17), 0);
+        assert_eq!(revelados(0.01, 17, 17), 1, "arredonda para cima: logo aparece o primeiro");
+        assert_eq!(revelados(0.5, 17, 17), 9);
+        assert_eq!(revelados(1.0, 17, 17), 17);
+        assert_eq!(revelados(1.0, 17, 5), 5, "pool pequeno");
+        assert_eq!(revelados(2.0, 17, 17), 17);
+        assert_eq!(revelados(-1.0, 17, 17), 0);
     }
 }

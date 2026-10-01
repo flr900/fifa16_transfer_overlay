@@ -614,7 +614,7 @@ So that I can target regions and see how breadth affects quality.
 
 ### Story 2.10: Follow a partial Relatório and run continuous Missões
 
-*(Added 2026-10-01 at Felipe's request after testing Story 2.3. Not designed yet; the defaults below are proposals to confirm when the story starts.)*
+*(Added 2026-10-01 at Felipe's request after testing Story 2.3. Implemented the same day with the proposed defaults; see the AD-8 amendment in the Architecture Spine.)*
 
 As Felipe,
 I want to see the players an Olheiro has already found while the Missão is still running, keep an Olheiro on an open-ended search, and be told when the Relatório gets new names,

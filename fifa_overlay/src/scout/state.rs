@@ -72,6 +72,8 @@ pub enum TipoAviso {
     Falhou,
     /// Uma Missão terminou a busca e o Relatório está pronto (Story 2.4).
     RelatorioPronto { tipo: quality::TipoMissao, jogadores: usize },
+    /// Apareceram jogadores novos num Relatório (Story 2.10).
+    RelatorioAtualizado { tipo: quality::TipoMissao, novos: usize },
     /// A busca de uma Missão falhou; ela volta a `Pendente`.
     BuscaFalhou,
 }
@@ -299,6 +301,8 @@ pub struct RascunhoMissao {
     pub olheiro_id: Option<Uuid>,
     pub filtros: FiltrosMissao,
     pub modo: ModoBusca,
+    /// "Sem prazo": blocos de `quality::DIAS_BLOCO_CONTINUO` dias (2.10).
+    pub continua: bool,
     pub erro: Option<ErroCompra>,
 }
 
@@ -329,9 +333,16 @@ pub struct PreviaMissao {
 }
 
 impl PreviaMissao {
-    /// Data em que a Missão fica pronta, se confirmada agora.
+    /// Dias até o prazo (ou até o fim do primeiro bloco, se contínua).
+    pub fn duracao_dias(&self) -> Option<u32> {
+        let e = self.estimativa?;
+        Some(if self.rascunho.continua { quality::DIAS_BLOCO_CONTINUO } else { e.duracao_dias })
+    }
+
+    /// Data em que a Missão fica pronta (ou o primeiro bloco termina), se
+    /// confirmada agora.
     pub fn prazo(&self) -> Option<Date> {
-        self.estimativa.map(|e| self.data_atual.mais_dias(e.duracao_dias))
+        self.duracao_dias().map(|d| self.data_atual.mais_dias(d))
     }
 }
 
@@ -373,14 +384,25 @@ pub struct MissaoNaLista {
     pub falha: Option<String>,
     /// Relatório desta Missão, se já existe (Story 2.5).
     pub relatorio_id: Option<Uuid>,
-    /// O Relatório ainda não foi aberto: indicador "novo" (UX-DR13).
+    /// Há jogadores que o jogador ainda não viu: indicador "novo"
+    /// (UX-DR13; volta quando o Relatório parcial cresce — Story 2.10).
     pub relatorio_novo: bool,
+    /// Jogadores já revelados / previstos ao fim dos blocos pagos.
+    pub revelados: usize,
+    pub previstos: usize,
 }
 
 /// Um Relatório como a aba Relatórios e a tela do Relatório o mostram.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelatorioNaLista {
+    /// `jogadores` traz SÓ os já revelados (Relatório parcial, Story 2.10).
     pub relatorio: Relatorio,
+    /// Jogadores que o Relatório terá quando a Missão terminar.
+    pub previstos: usize,
+    /// A Missão ainda está rodando: mais jogadores vão aparecer.
+    pub parcial: bool,
+    /// Há jogadores que o jogador ainda não viu.
+    pub novo: bool,
     /// `None` se a Missão sumiu do arquivo (não deveria acontecer).
     pub missao: Option<Missao>,
     pub olheiro: Option<Olheiro>,
@@ -420,7 +442,43 @@ pub struct Missao {
     pub tipo: quality::TipoMissao,
     pub amplitude: quality::AmplitudeGeografica,
     /// O que o jogador viu e pagou ao confirmar (custo, Qualidade, ...).
+    /// Numa Missão contínua: o custo e os jogadores de UM bloco.
     pub estimativa: quality::EstimativaMissao,
+    /// Missão "sem prazo" (Story 2.10): o Olheiro fica nela, bloco a bloco
+    /// de `quality::DIAS_BLOCO_CONTINUO` dias, até ser encerrada.
+    #[serde(default)]
+    pub continua: bool,
+    /// Blocos pagos (sempre 1 numa Missão de prazo fixo).
+    #[serde(default = "um_bloco")]
+    pub blocos: u16,
+    /// Para quantos blocos a busca já rodou: menor que `blocos` = falta
+    /// buscar os jogadores do bloco novo.
+    #[serde(default)]
+    pub blocos_buscados: u16,
+}
+
+fn um_bloco() -> u16 {
+    1
+}
+
+impl Missao {
+    /// Jogadores que o Relatório terá ao fim dos blocos pagos.
+    pub fn alvo_total(&self) -> usize {
+        usize::from(self.estimativa.alvo_jogadores) * usize::from(self.blocos.max(1))
+    }
+
+    /// Quantos jogadores de `encontrados` já apareceram em `hoje`
+    /// (Story 2.10). Concluída mostra todos; sem data, nenhum novo.
+    pub fn revelados(&self, encontrados: usize, hoje: Option<Date>) -> usize {
+        match (self.status, hoje) {
+            (StatusMissao::Concluida, _) => encontrados,
+            (_, None) => 0,
+            (_, Some(hoje)) => {
+                let fracao = progresso_missao(self.criada_em, self.prazo_estimado, hoje).fracao;
+                quality::revelados(fracao, self.alvo_total(), encontrados)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +504,9 @@ impl Missao {
             tipo: quality::TipoMissao::Geral,
             amplitude: quality::AmplitudeGeografica::Mundo,
             estimativa: quality::estimar_missao(&pedido),
+            continua: false,
+            blocos: 1,
+            blocos_buscados: 0,
         }
     }
 }
@@ -500,6 +561,13 @@ pub struct Relatorio {
     pub aberto: bool,
     #[serde(default)]
     pub arquivado: bool,
+    /// Jogadores revelados da última vez que o Relatório foi aberto: o
+    /// "novo" volta quando aparecem mais (Story 2.10).
+    #[serde(default)]
+    pub vistos: u16,
+    /// Jogadores já anunciados no banner "Relatório atualizado".
+    #[serde(default)]
+    pub notificados: u16,
 }
 
 #[cfg(test)]
@@ -515,6 +583,8 @@ impl Relatorio {
             jogadores: Vec::new(),
             aberto: false,
             arquivado: false,
+            vistos: 0,
+            notificados: 0,
         }
     }
 }
@@ -539,6 +609,9 @@ struct BuscaNaFila {
     id_save: String,
     missao: Missao,
     hoje: Date,
+    /// Jogadores já no Relatório (bloco anterior): a busca traz outros.
+    excluir: std::collections::HashSet<u32>,
+    quantos: usize,
 }
 
 pub struct ScoutState {
@@ -582,7 +655,7 @@ pub struct ScoutState {
     /// Missões `EmExecucao` esperando a vez, em ordem (AD-9: uma de cada
     /// vez, nunca em paralelo).
     fila_busca: VecDeque<BuscaNaFila>,
-    tarefa_busca: AsyncTask<Relatorio>,
+    tarefa_busca: AsyncTask<Vec<JogadorEncontrado>>,
     /// A busca disparada e ainda não tratada (`poll` não consome).
     busca_atual: Option<BuscaNaFila>,
     /// Última falha de busca por Missão, para a aba Missões dizer.
@@ -597,6 +670,10 @@ pub struct ScoutState {
     /// Aba Relatórios mostrando o filtro "Arquivados" (Story 2.7; não
     /// persiste: reabrir o painel volta à lista principal).
     vendo_arquivados: bool,
+    /// Última data viva conferida para o banner "Relatório atualizado".
+    data_avisos: Option<Date>,
+    /// Falha da última renovação/encerramento, por Missão (Story 2.10).
+    erros_missao: HashMap<Uuid, ErroCompra>,
 }
 
 impl ScoutState {
@@ -634,6 +711,8 @@ impl ScoutState {
             minifaces: Minifaces::new(crate::save_repo::ler_miniface),
             tarefa_nacoes: AsyncTask::new(),
             vendo_arquivados: false,
+            data_avisos: None,
+            erros_missao: HashMap::new(),
         }
     }
 
@@ -670,7 +749,7 @@ impl ScoutState {
         if let CarreiraStatus::Pronta(carreira) = &self.status {
             let hoje = carreira.data_atual;
             self.data_progresso = Some(hoje);
-            self.despachar_missoes_vencidas(hoje);
+            self.despachar_missoes(hoje);
         }
     }
 
@@ -727,6 +806,7 @@ impl ScoutState {
         let acompanhando = matches!(self.status, CarreiraStatus::Pronta(_) | CarreiraStatus::SemCarreira);
         if acompanhando && releitura_devida {
             self.reler();
+            self.avisar_jogadores_novos();
         }
 
         if !matches!(self.status, CarreiraStatus::Pronta(_) | CarreiraStatus::Localizando) {
@@ -808,7 +888,7 @@ impl ScoutState {
             // abertura (AD-8) — senão a Missão vencida esperaria fechar e
             // abrir de novo.
             if self.painel_aberto {
-                self.despachar_missoes_vencidas(snapshot.data_atual);
+                self.despachar_missoes(snapshot.data_atual);
             }
         }
     }
@@ -976,8 +1056,13 @@ impl ScoutState {
     /// já escolhido e faixas amplas.
     pub fn abrir_nova_missao(&mut self) {
         let olheiro_id = self.olheiros_contratados().into_iter().find(|c| !c.em_missao).map(|c| c.olheiro.id);
-        self.rascunho_missao =
-            Some(RascunhoMissao { olheiro_id, filtros: FiltrosMissao::default(), modo: ModoBusca::Rapida, erro: None });
+        self.rascunho_missao = Some(RascunhoMissao {
+            olheiro_id,
+            filtros: FiltrosMissao::default(),
+            modo: ModoBusca::Rapida,
+            continua: false,
+            erro: None,
+        });
     }
 
     pub fn cancelar_nova_missao(&mut self) {
@@ -1077,6 +1162,14 @@ impl ScoutState {
         }
     }
 
+    /// Prazo fixo ou contínua (Story 2.10).
+    pub fn definir_continua_da_missao(&mut self, continua: bool) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.continua = continua;
+            r.erro = None;
+        }
+    }
+
     pub fn definir_modo_da_missao(&mut self, modo: ModoBusca) {
         if let Some(r) = self.rascunho_missao.as_mut() {
             r.modo = modo;
@@ -1146,7 +1239,8 @@ impl ScoutState {
         if previa.bloqueio.is_some() {
             return false;
         }
-        let (Some(olheiro_id), Some(estimativa)) = (previa.rascunho.olheiro_id, previa.estimativa) else {
+        let (Some(olheiro_id), Some(estimativa), Some(prazo)) = (previa.rascunho.olheiro_id, previa.estimativa, previa.prazo())
+        else {
             return false;
         };
         let missao = Missao {
@@ -1154,12 +1248,15 @@ impl ScoutState {
             olheiro_id,
             status: StatusMissao::Pendente,
             criada_em: previa.data_atual,
-            prazo_estimado: previa.data_atual.mais_dias(estimativa.duracao_dias),
+            prazo_estimado: prazo,
             filtros: previa.rascunho.filtros.clone(),
             modo_busca: previa.rascunho.modo,
             tipo: previa.tipo,
             amplitude: previa.amplitude,
             estimativa,
+            continua: previa.rascunho.continua,
+            blocos: 1,
+            blocos_buscados: 0,
         };
         let nova = missao.clone();
         match self.comprar(estimativa.custo, move |dados| dados.missoes.push(nova)) {
@@ -1209,13 +1306,16 @@ impl ScoutState {
                 .filter(|m| !dados.relatorios.iter().any(|r| r.missao_id == m.id && r.arquivado))
                 .map(|m| {
                     let relatorio = dados.relatorios.iter().find(|r| r.missao_id == m.id);
+                    let revelados = relatorio.map_or(0, |r| m.revelados(r.jogadores.len(), hoje));
                     MissaoNaLista {
                         missao: m.clone(),
                         olheiro: dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned(),
                         progresso: hoje.map(|data| progresso_missao(m.criada_em, m.prazo_estimado, data)),
                         falha: self.falhas_busca.get(&m.id).cloned(),
-                        relatorio_id: relatorio.map(|r| r.id),
-                        relatorio_novo: relatorio.is_some_and(|r| !r.aberto),
+                        relatorio_id: relatorio.filter(|_| revelados > 0 || m.status == StatusMissao::Concluida).map(|r| r.id),
+                        relatorio_novo: relatorio.is_some_and(|r| revelados > usize::from(r.vistos) || (!r.aberto && revelados > 0)),
+                        revelados,
+                        previstos: m.alvo_total(),
                     }
                 })
                 .collect()
@@ -1226,27 +1326,56 @@ impl ScoutState {
     // Busca das Missões vencidas (Story 2.4, AD-8/AD-9)
     // -----------------------------------------------------------------
 
-    /// Borda fechado→aberto do painel (nunca por polling): toda Missão
-    /// `Pendente` com o prazo cumprido vira `EmExecucao` ANTES de entrar na
-    /// fila — reabrir o painel não a despacha de novo (AD-8). Ordem da
-    /// fila: `prazo_estimado`, depois `criada_em` (AD-9).
-    fn despachar_missoes_vencidas(&mut self, hoje: Date) {
+    /// Borda fechado→aberto do painel (nunca por polling — AD-8, com a
+    /// mudança da Story 2.10):
+    /// - Missão `Pendente` que ainda não buscou para os blocos pagos vira
+    ///   `EmExecucao` ANTES de entrar na fila — logo na primeira abertura
+    ///   depois de criada (ou renovada), para o Relatório parcial existir;
+    ///   reabrir o painel não a despacha de novo;
+    /// - Missão de prazo fixo com a busca feita e o prazo cumprido vira
+    ///   `Concluida` (a contínua espera renovação ou encerramento).
+    ///
+    /// Ordem da fila: `prazo_estimado`, depois `criada_em` (AD-9).
+    fn despachar_missoes(&mut self, hoje: Date) {
         let (Some(id_save), Some(estado)) = (self.save_ativo.clone(), self.estado_ativo().cloned()) else {
             return;
         };
-        let mut vencidas: Vec<Missao> = estado.ler(|dados| {
-            dados
-                .missoes
-                .iter()
-                .filter(|m| m.status == StatusMissao::Pendente && hoje >= m.prazo_estimado)
-                .cloned()
-                .collect()
+        let (mut a_buscar, a_concluir): (Vec<(Missao, Vec<u32>)>, Vec<Uuid>) = estado.ler(|dados| {
+            let pendentes = dados.missoes.iter().filter(|m| m.status == StatusMissao::Pendente);
+            let buscar = pendentes
+                .clone()
+                .filter(|m| m.blocos_buscados < m.blocos.max(1))
+                .map(|m| {
+                    let ja = dados
+                        .relatorios
+                        .iter()
+                        .find(|r| r.missao_id == m.id)
+                        .map(|r| r.jogadores.iter().map(|j| j.player_id).collect())
+                        .unwrap_or_default();
+                    (m.clone(), ja)
+                })
+                .collect();
+            let concluir = pendentes
+                .filter(|m| !m.continua && m.blocos_buscados >= m.blocos.max(1) && hoje >= m.prazo_estimado)
+                .map(|m| m.id)
+                .collect();
+            (buscar, concluir)
         });
-        if vencidas.is_empty() {
+        if !a_concluir.is_empty() {
+            match estado.mutar(|dados| {
+                for m in dados.missoes.iter_mut().filter(|m| a_concluir.contains(&m.id)) {
+                    m.status = StatusMissao::Concluida;
+                }
+            }) {
+                Ok(()) => tracing::info!("[scout::state] {} Missão(ões) concluída(s) no prazo.", a_concluir.len()),
+                Err(err) => tracing::warn!("[scout::state] Missões não foram concluídas: {err:?}"),
+            }
+        }
+        if a_buscar.is_empty() {
             return;
         }
-        vencidas.sort_by_key(|m| (m.prazo_estimado, m.criada_em));
-        let ids: Vec<Uuid> = vencidas.iter().map(|m| m.id).collect();
+        a_buscar.sort_by_key(|(m, _)| (m.prazo_estimado, m.criada_em));
+        let ids: Vec<Uuid> = a_buscar.iter().map(|(m, _)| m.id).collect();
         let marcou = estado.mutar(|dados| {
             for m in dados.missoes.iter_mut().filter(|m| ids.contains(&m.id)) {
                 m.status = StatusMissao::EmExecucao;
@@ -1258,11 +1387,18 @@ impl ScoutState {
             tracing::warn!("[scout::state] Não deu para marcar Missões em execução: {err:?}");
             return;
         }
-        for mut missao in vencidas {
+        for (mut missao, ja) in a_buscar {
             missao.status = StatusMissao::EmExecucao;
-            tracing::info!("[scout::state] Missão {} na fila de busca (prazo {}).", missao.id, missao.prazo_estimado.0);
+            let quantos = missao.alvo_total().saturating_sub(ja.len());
+            tracing::info!("[scout::state] Missão {} na fila de busca ({quantos} jogadores).", missao.id);
             self.falhas_busca.remove(&missao.id);
-            self.fila_busca.push_back(BuscaNaFila { id_save: id_save.clone(), missao, hoje });
+            self.fila_busca.push_back(BuscaNaFila {
+                id_save: id_save.clone(),
+                missao,
+                hoje,
+                excluir: ja.into_iter().collect(),
+                quantos,
+            });
         }
     }
 
@@ -1271,9 +1407,9 @@ impl ScoutState {
     fn processar_buscas(&mut self) {
         match self.tarefa_busca.poll() {
             TaskState::Running => return,
-            TaskState::Done(relatorio) => {
+            TaskState::Done(encontrados) => {
                 if let Some(busca) = self.busca_atual.take() {
-                    self.concluir_busca(busca, relatorio);
+                    self.concluir_busca(busca, encontrados);
                 }
             }
             TaskState::Failed(err) => {
@@ -1287,33 +1423,55 @@ impl ScoutState {
             return;
         };
         let fonte = Arc::clone(&self.fonte);
-        let (missao, hoje) = (proxima.missao.clone(), proxima.hoje);
-        if self.tarefa_busca.start(move || search::executar_missao(&missao, fonte.as_ref(), hoje)) {
+        let (missao, hoje, excluir, quantos) =
+            (proxima.missao.clone(), proxima.hoje, proxima.excluir.clone(), proxima.quantos);
+        if self
+            .tarefa_busca
+            .start(move || search::executar_missao(&missao, fonte.as_ref(), hoje, &excluir, quantos))
+        {
             self.busca_atual = Some(proxima);
         } else {
             self.fila_busca.push_front(proxima);
         }
     }
 
-    /// Grava o Relatório e conclui a Missão no arquivo da carreira DONA da
-    /// busca (pode não ser a ativa): o Olheiro volta a ficar disponível.
-    fn concluir_busca(&mut self, busca: BuscaNaFila, relatorio: Relatorio) {
+    /// Junta os jogadores encontrados ao Relatório da Missão (cria se não
+    /// existe) no arquivo da carreira DONA da busca (pode não ser a ativa).
+    /// Prazo fixo já cumprido → `Concluida` (o Olheiro fica livre); senão a
+    /// Missão segue `Pendente`, com o Relatório parcial crescendo.
+    fn concluir_busca(&mut self, busca: BuscaNaFila, encontrados: Vec<JogadorEncontrado>) {
         let Some(estado) = self.estados.get(&busca.id_save).cloned() else {
             return;
         };
-        let jogadores = relatorio.jogadores.len();
         let id = busca.missao.id;
-        let gravou = estado.mutar(move |dados| {
+        let novos = encontrados.len();
+        let concluida = !busca.missao.continua && busca.hoje >= busca.missao.prazo_estimado;
+        let base = search::relatorio_vazio(&busca.missao, busca.hoje);
+        let mut total = 0;
+        let gravou = estado.mutar(|dados| {
             if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
-                m.status = StatusMissao::Concluida;
+                m.status = if concluida { StatusMissao::Concluida } else { StatusMissao::Pendente };
+                m.blocos_buscados = m.blocos.max(1);
             }
-            dados.relatorios.retain(|r| r.missao_id != id);
-            dados.relatorios.push(relatorio);
+            let indice = match dados.relatorios.iter().position(|r| r.missao_id == id) {
+                Some(i) => i,
+                None => {
+                    dados.relatorios.push(base);
+                    dados.relatorios.len() - 1
+                }
+            };
+            if let Some(r) = dados.relatorios.get_mut(indice) {
+                r.jogadores.extend(encontrados);
+                r.gerado_em = Some(busca.hoje);
+                total = r.jogadores.len();
+            }
         });
         match gravou {
             Ok(()) => {
-                tracing::info!("[scout::state] Missão {id} concluída: Relatório com {jogadores} jogadores.");
-                self.avisar(TipoAviso::RelatorioPronto { tipo: busca.missao.tipo, jogadores });
+                tracing::info!("[scout::state] Busca da Missão {id}: +{novos} jogadores (total {total}).");
+                if concluida {
+                    self.avisar(TipoAviso::RelatorioPronto { tipo: busca.missao.tipo, jogadores: total });
+                }
             }
             Err(err) => {
                 tracing::warn!("[scout::state] Relatório da Missão {id} não foi salvo: {err:?}");
@@ -1340,19 +1498,26 @@ impl ScoutState {
         self.avisar(TipoAviso::BuscaFalhou);
     }
 
-    /// Falha da última busca desta Missão (texto do `SaveRepoError`).
-    pub fn falha_da_busca(&self, missao: Uuid) -> Option<&str> {
-        self.falhas_busca.get(&missao).map(String::as_str)
-    }
 
     // -----------------------------------------------------------------
     // Relatórios (Story 2.5)
     // -----------------------------------------------------------------
 
-    fn montar_relatorio_na_lista(dados: &persistence::ScoutStateFile, r: &Relatorio) -> RelatorioNaLista {
+    fn montar_relatorio_na_lista(dados: &persistence::ScoutStateFile, r: &Relatorio, hoje: Option<Date>) -> RelatorioNaLista {
         let missao = dados.missoes.iter().find(|m| m.id == r.missao_id).cloned();
         let olheiro = missao.as_ref().and_then(|m| dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned());
-        RelatorioNaLista { relatorio: r.clone(), missao, olheiro }
+        let revelados = missao.as_ref().map_or(r.jogadores.len(), |m| m.revelados(r.jogadores.len(), hoje));
+        let mut relatorio = r.clone();
+        relatorio.jogadores.truncate(revelados);
+        let parcial = missao.as_ref().is_some_and(|m| m.status != StatusMissao::Concluida);
+        RelatorioNaLista {
+            novo: revelados > usize::from(r.vistos) || (!r.aberto && revelados > 0),
+            previstos: missao.as_ref().map_or(revelados, Missao::alvo_total),
+            parcial,
+            relatorio,
+            missao,
+            olheiro,
+        }
     }
 
     /// Relatórios da carreira pronta, mais novos primeiro. `arquivados`:
@@ -1367,7 +1532,7 @@ impl ScoutState {
                 .iter()
                 .rev()
                 .filter(|r| r.arquivado == arquivados)
-                .map(|r| Self::montar_relatorio_na_lista(dados, r))
+                .map(|r| Self::montar_relatorio_na_lista(dados, r, self.data_progresso))
                 .collect()
         })
     }
@@ -1382,11 +1547,18 @@ impl ScoutState {
         if !existe {
             return;
         }
-        let ja_aberto = estado.ler(|dados| dados.relatorios.iter().any(|r| r.id == id && r.aberto));
-        if !ja_aberto {
+        // vistos = o que está revelado agora (o "novo" some até crescer)
+        let revelados = estado
+            .ler(|dados| dados.relatorios.iter().find(|r| r.id == id).map(|r| Self::montar_relatorio_na_lista(dados, r, self.data_progresso)))
+            .map_or(0, |item| item.relatorio.jogadores.len());
+        let vistos = u16::try_from(revelados).unwrap_or(u16::MAX);
+        let mudou = estado.ler(|dados| dados.relatorios.iter().any(|r| r.id == id && (!r.aberto || r.vistos < vistos)));
+        if mudou {
             if let Err(err) = estado.mutar(|dados| {
                 for r in dados.relatorios.iter_mut().filter(|r| r.id == id) {
                     r.aberto = true;
+                    r.vistos = r.vistos.max(vistos);
+                    r.notificados = r.notificados.max(vistos);
                 }
             }) {
                 tracing::warn!("[scout::state] Relatório aberto, mas o \"novo\" não foi salvo: {err:?}");
@@ -1476,7 +1648,157 @@ impl ScoutState {
     pub fn relatorio_aberto(&self) -> Option<RelatorioNaLista> {
         let id = self.relatorio_aberto?;
         let estado = self.estado_ativo()?;
-        estado.ler(|dados| dados.relatorios.iter().find(|r| r.id == id).map(|r| Self::montar_relatorio_na_lista(dados, r)))
+        estado.ler(|dados| {
+            dados.relatorios.iter().find(|r| r.id == id).map(|r| Self::montar_relatorio_na_lista(dados, r, self.data_progresso))
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Relatório parcial, Missão contínua e aviso (Story 2.10)
+    // -----------------------------------------------------------------
+
+    /// Com o painel FECHADO e a data da carreira mudando: se um Relatório
+    /// ganhou jogadores desde o último anúncio, o banner do canto avisa
+    /// ("Relatório atualizado: +2 jogadores · Missão Jovens"). Barato: só
+    /// quando a data muda (a leitura de 1 s já acontece de todo jeito).
+    fn avisar_jogadores_novos(&mut self) {
+        let CarreiraStatus::Pronta(carreira) = &self.status else {
+            return;
+        };
+        let hoje = carreira.data_atual;
+        if self.painel_aberto || self.data_avisos == Some(hoje) {
+            return;
+        }
+        self.data_avisos = Some(hoje);
+        let Some(estado) = self.estado_ativo().cloned() else {
+            return;
+        };
+        let novidades: Vec<(Uuid, u16, quality::TipoMissao, usize)> = estado.ler(|dados| {
+            dados
+                .relatorios
+                .iter()
+                .filter(|r| !r.arquivado)
+                .filter_map(|r| {
+                    let m = dados.missoes.iter().find(|m| m.id == r.missao_id)?;
+                    let revelados = m.revelados(r.jogadores.len(), Some(hoje));
+                    let novos = revelados.checked_sub(usize::from(r.notificados)).filter(|n| *n > 0)?;
+                    Some((r.id, u16::try_from(revelados).unwrap_or(u16::MAX), m.tipo, novos))
+                })
+                .collect()
+        });
+        let Some(&(_, _, tipo, _)) = novidades.first() else {
+            return;
+        };
+        let total: usize = novidades.iter().map(|(_, _, _, n)| n).sum();
+        let marcas: Vec<(Uuid, u16)> = novidades.iter().map(|(id, n, _, _)| (*id, *n)).collect();
+        if let Err(err) = estado.mutar(|dados| {
+            for r in dados.relatorios.iter_mut() {
+                if let Some((_, n)) = marcas.iter().find(|(id, _)| *id == r.id) {
+                    r.notificados = r.notificados.max(*n);
+                }
+            }
+        }) {
+            tracing::warn!("[scout::state] Aviso de jogadores novos não foi salvo: {err:?}");
+        }
+        tracing::info!("[scout::state] Relatório(s) atualizado(s): +{total} jogadores.");
+        self.avisar(TipoAviso::RelatorioAtualizado { tipo, novos: total });
+    }
+
+    /// Custo de mais um bloco de uma Missão contínua (o mesmo do primeiro).
+    pub fn custo_do_bloco(missao: &Missao) -> i32 {
+        missao.estimativa.custo
+    }
+
+    /// O bloco pago de uma Missão contínua acabou (na data do painel).
+    pub fn bloco_encerrado(&self, missao: &Missao) -> bool {
+        missao.continua
+            && missao.status == StatusMissao::Pendente
+            && self.data_progresso.is_some_and(|hoje| hoje >= missao.prazo_estimado)
+    }
+
+    /// "Renovar": paga mais um bloco de `DIAS_BLOCO_CONTINUO` dias, com
+    /// as garantias de toda compra (débito confirmado + gravação; nada
+    /// automático — FR-3/NFR1). O novo bloco busca mais jogadores na
+    /// próxima abertura do painel.
+    pub fn renovar_missao(&mut self, id: Uuid) -> bool {
+        let Some(missao) = self.estado_ativo().and_then(|e| e.ler(|d| d.missoes.iter().find(|m| m.id == id).cloned())) else {
+            return false;
+        };
+        if !self.bloco_encerrado(&missao) {
+            return false;
+        }
+        let hoje = self.data_progresso.unwrap_or(missao.prazo_estimado);
+        let resultado = self.comprar(Self::custo_do_bloco(&missao), move |dados| {
+            if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
+                m.blocos = m.blocos.saturating_add(1);
+                // o bloco novo começa hoje (ou no fim do anterior, se antes)
+                let inicio = hoje.max(m.prazo_estimado);
+                m.prazo_estimado = inicio.mais_dias(quality::DIAS_BLOCO_CONTINUO);
+            }
+        });
+        match resultado {
+            Ok(()) => {
+                tracing::info!("[scout::state] Missão contínua {id} renovada por mais um bloco.");
+                self.erros_missao.remove(&id);
+                self.reler();
+                // a busca do bloco novo roda já (o painel está aberto)
+                if let Some(hoje) = self.data_progresso {
+                    self.despachar_missoes(hoje);
+                }
+                true
+            }
+            Err(erro) => {
+                tracing::warn!("[scout::state] Renovação não concluída: {erro:?}");
+                if matches!(erro, ErroCompra::OrcamentoMudou { .. }) {
+                    self.reler();
+                }
+                self.erros_missao.insert(id, erro);
+                false
+            }
+        }
+    }
+
+    /// "Encerrar" uma Missão contínua: o Olheiro fica livre e os jogadores
+    /// JÁ REVELADOS viram o Relatório final (os que ainda não tinham
+    /// aparecido são descartados). Não mexe no orçamento.
+    pub fn encerrar_missao(&mut self, id: Uuid) -> bool {
+        let Some(estado) = self.estado_ativo().cloned() else {
+            return false;
+        };
+        let hoje = self.data_progresso;
+        let pode = estado.ler(|d| d.missoes.iter().any(|m| m.id == id && m.continua && m.status == StatusMissao::Pendente));
+        if !pode {
+            return false;
+        }
+        match estado.mutar(|dados| {
+            let revelados = dados.missoes.iter().find(|m| m.id == id).map(|m| {
+                let encontrados = dados.relatorios.iter().find(|r| r.missao_id == id).map_or(0, |r| r.jogadores.len());
+                m.revelados(encontrados, hoje)
+            });
+            if let Some(r) = dados.relatorios.iter_mut().find(|r| r.missao_id == id) {
+                r.jogadores.truncate(revelados.unwrap_or(0));
+            }
+            if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
+                m.status = StatusMissao::Concluida;
+                m.prazo_estimado = hoje.map_or(m.prazo_estimado, |h| h.min(m.prazo_estimado));
+            }
+        }) {
+            Ok(()) => {
+                tracing::info!("[scout::state] Missão contínua {id} encerrada.");
+                self.erros_missao.remove(&id);
+                true
+            }
+            Err(err) => {
+                tracing::warn!("[scout::state] Missão não foi encerrada: {err:?}");
+                self.erros_missao.insert(id, ErroCompra::NaoSalvo);
+                false
+            }
+        }
+    }
+
+    /// Falha da última renovação desta Missão (o card mostra).
+    pub fn erro_da_missao(&self, id: Uuid) -> Option<&ErroCompra> {
+        self.erros_missao.get(&id)
     }
 
     /// Aba que a navegação deve assumir porque uma carreira acabou de
@@ -2508,7 +2830,9 @@ mod tests {
     }
 
     #[test]
-    fn a_missao_before_its_deadline_is_not_dispatched() {
+    fn a_missao_before_its_deadline_searches_early_and_stays_pending() {
+        // Story 2.10 mudou o AD-8: a busca roda na primeira abertura depois
+        // de criada, para o Relatório parcial existir.
         let pasta = PastaTemporaria::nova();
         let o = olheiro(Especializacao::Generalista, Tier::Junior);
         let m = missao_com_prazo(&o, 20260701, 20260720);
@@ -2516,7 +2840,13 @@ mod tests {
         st.ao_abrir_painel();
         ticks_ate_buscar(&mut st);
         assert_eq!(status_de(&st, m.id), Some(StatusMissao::Pendente));
-        assert_eq!(busca.buscas.load(Ordering::SeqCst), 0);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 1);
+        assert!(st.olheiros_contratados()[0].em_missao, "o Olheiro segue na Missão");
+        // reabrir não busca de novo
+        st.ao_fechar_painel();
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -2546,7 +2876,7 @@ mod tests {
         st.ao_abrir_painel();
         ticks_ate_buscar(&mut st);
         assert_eq!(status_de(&st, m.id), Some(StatusMissao::Pendente));
-        assert_eq!(st.falha_da_busca(m.id), Some("Não foi possível ler o save ativo."));
+        assert_eq!(st.missoes()[0].falha.as_deref(), Some("Não foi possível ler o save ativo."));
         assert!(matches!(st.aviso_visivel(Instant::now()), Some(TipoAviso::BuscaFalhou)));
 
         // na próxima abertura roda de novo (e agora funciona)
@@ -2555,7 +2885,7 @@ mod tests {
         st.ao_abrir_painel();
         ticks_ate_buscar(&mut st);
         assert_eq!(status_de(&st, m.id), Some(StatusMissao::Concluida));
-        assert_eq!(st.falha_da_busca(m.id), None);
+        assert_eq!(st.missoes()[0].falha, None);
     }
 
     #[test]
@@ -2565,10 +2895,12 @@ mod tests {
         let mut presa = missao_com_prazo(&o, 20260701, 20260720);
         presa.status = StatusMissao::EmExecucao;
         let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![presa.clone()], &o);
+        // ao carregar o arquivo ela volta a Pendente; a abertura do painel
+        // (mesmo frame) a despacha de novo, uma vez
         st.ao_abrir_painel();
-        assert_eq!(status_de(&st, presa.id), Some(StatusMissao::Pendente));
         ticks_ate_buscar(&mut st);
-        assert_eq!(busca.buscas.load(Ordering::SeqCst), 0, "ainda não venceu");
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 1);
+        assert_eq!(status_de(&st, presa.id), Some(StatusMissao::Pendente));
     }
 
     #[test]
@@ -2672,5 +3004,158 @@ mod tests {
         assert_eq!(st.previa_missao().map(|x| x.rascunho.filtros.paises), Some(vec![52]), "clicar de novo tira");
         st.limpar_paises_da_missao();
         assert_eq!(st.previa_missao().map(|x| x.amplitude), Some(quality::AmplitudeGeografica::Mundo));
+    }
+
+    // -----------------------------------------------------------------
+    // Story 2.10: Relatório parcial, Missão contínua, aviso
+    // -----------------------------------------------------------------
+
+    /// Carreira que vai lendo `datas` (uma por leitura; a última se repete).
+    fn estado_com_datas(pasta: &PastaTemporaria, datas: &[i32], missoes: Vec<Missao>, olheiro: &Olheiro) -> (ScoutState, Busca, Escritas) {
+        let busca = Busca {
+            buscas: Arc::new(AtomicUsize::new(0)),
+            liberar: Arc::new(AtomicBool::new(true)),
+            jogadores: Arc::new(Mutex::new(Ok(pool_de_teste()))),
+        };
+        let escritas: Escritas = Arc::new(Mutex::new(Vec::new()));
+        let fonte = FonteFalsa {
+            leituras: Mutex::new(datas.iter().map(|&d| Ok(CareerSnapshot { data_atual: Date(d), ..snapshot() })).collect()),
+            resultado_localizacao: Ok(()),
+            localizacoes: Arc::new(AtomicUsize::new(0)),
+            sinal: Arc::new(Mutex::new(false)),
+            resultados_escrita: Mutex::new(Vec::new()),
+            escritas: Arc::clone(&escritas),
+            jogadores: Arc::clone(&busca.jogadores),
+            buscas: Arc::clone(&busca.buscas),
+            liberar_busca: Arc::clone(&busca.liberar),
+        };
+        let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
+        let o = olheiro.clone();
+        estado.mutar(move |d| { d.olheiros = vec![o]; d.missoes = missoes; }).expect("gravou");
+        (ScoutState::com_fonte(Box::new(fonte), Some(pasta.0.clone())), busca, escritas)
+    }
+
+    fn reabrir(st: &mut ScoutState) {
+        st.ao_fechar_painel();
+        st.ao_abrir_painel();
+        ticks_ate_buscar(st);
+    }
+
+    #[test]
+    fn a_partial_report_grows_with_the_career_days_until_the_deadline() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_prazo(&o, 20260701, 20260711);
+        let alvo = m.alvo_total();
+        let (mut st, _busca, _) = estado_com_datas(&pasta, &[20260706, 20260709, 20260711], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+
+        // metade do caminho: metade dos jogadores (arredondado para cima)
+        let linha = st.missoes().into_iter().next().expect("missão");
+        assert_eq!(linha.revelados, alvo.div_ceil(2));
+        assert_eq!(linha.previstos, alvo);
+        assert!(linha.relatorio_novo);
+        let id = linha.relatorio_id.expect("Relatório parcial");
+        st.abrir_relatorio(id);
+        let aberto = st.relatorio_aberto().expect("aberto");
+        assert!(aberto.parcial);
+        assert_eq!(aberto.relatorio.jogadores.len(), alvo.div_ceil(2), "só os revelados");
+        let primeiros: Vec<u32> = aberto.relatorio.jogadores.iter().map(|j| j.player_id).collect();
+        assert!(!st.missoes()[0].relatorio_novo, "visto");
+
+        // dias depois: aparecem mais, os primeiros continuam lá, o "novo" volta
+        reabrir(&mut st);
+        let linha = st.missoes().into_iter().next().expect("missão");
+        assert_eq!(linha.revelados, (alvo * 8).div_ceil(10));
+        assert!(linha.relatorio_novo);
+        st.abrir_relatorio(id);
+        let depois: Vec<u32> = st.relatorio_aberto().expect("aberto").relatorio.jogadores.iter().map(|j| j.player_id).collect();
+        assert_eq!(&depois[..primeiros.len()], &primeiros[..]);
+
+        // prazo: Concluída com todos, Olheiro livre
+        reabrir(&mut st);
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Concluida));
+        assert_eq!(st.missoes()[0].revelados, alvo);
+        assert!(!st.olheiros_contratados()[0].em_missao);
+    }
+
+    #[test]
+    fn a_continuous_missao_renews_by_explicit_purchase_and_can_be_ended() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let mut m = missao_com_prazo(&o, 20260701, 20260731);
+        m.continua = true;
+        let alvo = m.alvo_total();
+        let (mut st, busca, escritas) = estado_com_datas(&pasta, &[20260801, 20260816], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+
+        // fim do bloco: segue Pendente (sem cobrança automática), todos do bloco à mostra
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Pendente));
+        let atual = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("missão");
+        assert!(st.bloco_encerrado(&atual));
+        assert_eq!(st.missoes()[0].revelados, alvo);
+        assert!(escritas_de(&escritas).is_empty(), "nada cobrado sem confirmar");
+
+        // renovar = compra confirmada; o bloco novo busca mais jogadores
+        assert!(st.renovar_missao(m.id));
+        assert_eq!(escritas_de(&escritas), vec![(63_999_988, 63_999_988 - m.estimativa.custo)]);
+        ticks_ate_buscar(&mut st);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), 2);
+        let (blocos, prazo, encontrados) = st
+            .estado_ativo()
+            .map(|e| e.ler(|d| (d.missoes[0].blocos, d.missoes[0].prazo_estimado, d.relatorios[0].jogadores.len())))
+            .expect("estado");
+        assert_eq!((blocos, prazo), (2, Date(20260831)));
+        assert_eq!(encontrados, 2 * alvo, "sem repetir jogadores");
+        let ids: std::collections::HashSet<u32> =
+            st.estado_ativo().map(|e| e.ler(|d| d.relatorios[0].jogadores.iter().map(|j| j.player_id).collect())).unwrap_or_default();
+        assert_eq!(ids.len(), 2 * alvo);
+
+        // no meio do segundo bloco, encerrar: fica só o que já apareceu
+        reabrir(&mut st);
+        let revelados = st.missoes()[0].revelados;
+        assert!(revelados > alvo && revelados < 2 * alvo, "{revelados}");
+        assert!(st.encerrar_missao(m.id));
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Concluida));
+        assert!(!st.olheiros_contratados()[0].em_missao);
+        let final_ = st.estado_ativo().map(|e| e.ler(|d| d.relatorios[0].jogadores.len())).expect("estado");
+        assert_eq!(final_, revelados);
+        assert!(!st.renovar_missao(m.id), "encerrada não renova");
+    }
+
+    #[test]
+    fn new_players_are_announced_on_the_banner_with_the_panel_closed() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_prazo(&o, 20260701, 20260711);
+        let (mut st, _busca, _) = estado_com_datas(&pasta, &[20260702, 20260702, 20260706], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        st.abrir_relatorio(st.missoes()[0].relatorio_id.expect("parcial"));
+        st.ao_fechar_painel();
+
+        // mesma data: nada a anunciar
+        st.ultima_leitura = Some(Instant::now() - INTERVALO_RELEITURA * 2);
+        st.aviso = None;
+        st.tick();
+        assert_eq!(st.aviso_visivel(Instant::now()), None);
+
+        // dias depois, painel fechado: banner com os novos
+        st.ultima_leitura = Some(Instant::now() - INTERVALO_RELEITURA * 2);
+        st.tick();
+        let alvo = m.alvo_total();
+        let antes = crate::scout::quality::revelados(0.1, alvo, alvo);
+        match st.aviso_visivel(Instant::now()) {
+            Some(TipoAviso::RelatorioAtualizado { novos, .. }) => assert_eq!(*novos, alvo.div_ceil(2) - antes),
+            outro => panic!("esperava o aviso de Relatório atualizado, veio {outro:?}"),
+        }
+        // anunciado uma vez só
+        st.aviso = None;
+        st.data_avisos = None;
+        st.ultima_leitura = Some(Instant::now() - INTERVALO_RELEITURA * 2);
+        st.tick();
+        assert_eq!(st.aviso_visivel(Instant::now()), None);
     }
 }

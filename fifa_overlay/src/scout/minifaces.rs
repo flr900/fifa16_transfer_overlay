@@ -210,7 +210,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn leitor_falso(id: u32) -> Option<Imagem> {
-        (id % 2 == 0).then(|| Imagem { largura: 1, altura: 1, rgba: vec![id as u8, 0, 0, 255] })
+        id.is_multiple_of(2).then(|| Imagem { largura: 1, altura: 1, rgba: vec![id as u8, 0, 0, 255] })
     }
 
     fn ate_ler(m: &Minifaces) {

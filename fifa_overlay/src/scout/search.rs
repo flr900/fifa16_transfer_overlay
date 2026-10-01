@@ -92,29 +92,46 @@ impl CareerSource for SaveRepoSource {
 // Busca de uma Missão (Story 2.4)
 // ---------------------------------------------------------------------
 
-/// Roda a Missão: lê os jogadores e monta o Relatório. `hoje` é a data da
-/// carreira (idade dos jogadores, data do Relatório).
-pub fn executar_missao(missao: &Missao, fonte: &dyn CareerSource, hoje: Date) -> Result<Relatorio, SaveRepoError> {
+/// Roda a Missão: lê os jogadores e escolhe até `quantos` novos (fora de
+/// `excluir`, os já encontrados), já na ORDEM DE DESCOBERTA — o Relatório
+/// parcial (Story 2.10) revela essa lista aos poucos, então ela é
+/// embaralhada (determinística pela Missão) para os melhores não virem
+/// sempre primeiro. `hoje` é a data da carreira (idade dos jogadores).
+pub fn executar_missao(
+    missao: &Missao,
+    fonte: &dyn CareerSource,
+    hoje: Date,
+    excluir: &HashSet<u32>,
+    quantos: usize,
+) -> Result<Vec<JogadorEncontrado>, SaveRepoError> {
     let inicio = std::time::Instant::now();
     let pool = fonte.read_all_players()?;
-    let quantos = usize::from(missao.estimativa.alvo_jogadores);
-    let jogadores = escolher_jogadores(missao, &pool, hoje, &HashSet::new(), quantos);
+    let mut jogadores = escolher_jogadores(missao, &pool, hoje, excluir, quantos);
+    let id = missao.id.as_u128();
+    jogadores.sort_by_key(|j| quality::semente(id, j.player_id, 3));
     tracing::info!(
-        "[scout::search] Missão {}: {} jogadores no Relatório ({} ms, render não bloqueado).",
+        "[scout::search] Missão {}: {} jogadores encontrados ({} ms, render não bloqueado).",
         missao.id,
         jogadores.len(),
         inicio.elapsed().as_millis()
     );
-    Ok(Relatorio {
+    Ok(jogadores)
+}
+
+/// Relatório novo, vazio, de uma Missão.
+pub fn relatorio_vazio(missao: &Missao, hoje: Date) -> Relatorio {
+    Relatorio {
         id: Uuid::new_v4(),
         missao_id: missao.id,
         gerado_em: Some(hoje),
         qualidade: missao.estimativa.qualidade,
         precisao_mais_menos: missao.estimativa.precisao_mais_menos,
-        jogadores,
+        jogadores: Vec::new(),
         aberto: false,
         arquivado: false,
-    })
+        vistos: 0,
+        notificados: 0,
+    }
 }
 
 /// O jogador passa nos filtros da Missão (todos combinados com E)?
@@ -210,7 +227,8 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::save_repo::{Confederacao, Nacao, TOTAL_ATRIBUTOS};
+    use crate::save_repo::jogadores::TOTAL_ATRIBUTOS;
+    use crate::save_repo::{Confederacao, Nacao};
     use crate::scout::state::{FaixaAtributo, StatusMissao};
 
     /// Jogador sintético com todos os atributos em `nivel`.

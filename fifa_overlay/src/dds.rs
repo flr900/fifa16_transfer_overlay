@@ -47,7 +47,7 @@ pub fn decodificar(dados: &[u8]) -> Option<Imagem> {
         let n = (largura * altura) as usize;
         let origem = corpo.get(..n * 4)?;
         let mut rgba = Vec::with_capacity(n * 4);
-        for px in origem.chunks_exact(4) {
+        for px in origem.as_chunks::<4>().0 {
             // 0x00ff0000 em R = BGRA na memória; senão RGBA
             let (r, g, b) = if mascara_r == 0x00ff_0000 { (px[2], px[1], px[0]) } else { (px[0], px[1], px[2]) };
             rgba.extend_from_slice(&[r, g, b, px[3]]);
@@ -175,7 +175,7 @@ mod tests {
         let img = decodificar(&d).expect("decodifica");
         assert_eq!((img.largura, img.altura), (4, 4));
         assert_eq!(img.rgba.len(), 64);
-        assert!(img.rgba.chunks_exact(4).all(|px| px == [255, 0, 0, 200]));
+        assert!(img.rgba.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 200]));
     }
 
     #[test]
@@ -199,13 +199,13 @@ mod tests {
 
     #[test]
     fn a_real_miniface_from_the_game_decodes() {
-        let caminho = crate::save_repo::pasta_do_jogo().join("data").join("ui").join("imgAssets").join("heads").join("p231747.dds");
+        let caminho = crate::save_repo::jogadores::pasta_do_jogo().join("data").join("ui").join("imgAssets").join("heads").join("p231747.dds");
         let Ok(dados) = std::fs::read(&caminho) else {
             eprintln!("minifaces do FIFA 16 não instalados; teste pulado");
             return;
         };
         let img = decodificar(&dados).expect("rosto do Mbappé");
         assert_eq!((img.largura, img.altura), (128, 128));
-        assert!(img.rgba.chunks_exact(4).any(|px| px[3] > 0), "não é tudo transparente");
+        assert!(img.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0), "não é tudo transparente");
     }
 }

@@ -19,9 +19,15 @@ pub const MSG_SEM_ARQUIVADOS: &str = "Nenhum Relatório arquivado.";
 pub const MSG_SEM_RELATORIOS: &str =
     "Nenhum Relatório ainda. Quando o prazo de uma Missão passar, o Relatório aparece aqui.";
 
-/// Linha de detalhes do card: "17 jogadores · gerado em 03/07/2026 · Rápida".
+/// Linha de detalhes do card: "17 jogadores · gerado em 03/07/2026 · Rápida"
+/// (ou "parcial: 9 de 17 jogadores" com a Missão ainda rodando).
 pub fn detalhe_card(item: &RelatorioNaLista) -> String {
-    let mut partes = vec![super::aviso::texto_jogadores(item.relatorio.jogadores.len())];
+    let n = item.relatorio.jogadores.len();
+    let mut partes = vec![if item.parcial {
+        format!("parcial: {n} de {} jogadores", item.previstos)
+    } else {
+        super::aviso::texto_jogadores(n)
+    }];
     if let Some(data) = item.relatorio.gerado_em {
         partes.push(format!("gerado em {}", formatar_data(data)));
     }
@@ -39,9 +45,8 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Option<
     // Lista principal / "Arquivados" (Story 2.7).
     ui.same_line_with_spacing(0.0, theme::ESPACO_5);
     let arquivados = state.vendo_arquivados();
-    match componentes::alternador(ui, fonts, &["Ativos", "Arquivados"], usize::from(arquivados), 130.0) {
-        Some(indice) => state.ver_arquivados(indice == 1),
-        None => {}
+    if let Some(indice) = componentes::alternador(ui, fonts, &["Ativos", "Arquivados"], usize::from(arquivados), 130.0) {
+        state.ver_arquivados(indice == 1);
     }
     ui.dummy([0.0, theme::ESPACO_2]);
     let arquivados = state.vendo_arquivados();
@@ -91,7 +96,7 @@ pub fn card_relatorio(ui: &Ui, fonts: Option<&Fonts>, item: &RelatorioNaLista) -
     if let Some(o) = &item.olheiro {
         xb += desenhar_badge(ui, fonts, &dl, &badge_tier(o.tier), [xb, y], altura)[0] + theme::ESPACO_2;
     }
-    if !item.relatorio.aberto {
+    if item.novo {
         desenhar_badge(ui, fonts, &dl, &badge_novo(), [xb, y], altura);
     }
     let qualidade = badge_qualidade(item.relatorio.qualidade);
@@ -117,8 +122,10 @@ mod tests {
         let missao = Missao::de_teste(Uuid::new_v4(), StatusMissao::Concluida);
         let mut relatorio = Relatorio::de_teste(missao.id);
         relatorio.gerado_em = Some(Date(20260703));
-        let item = RelatorioNaLista { relatorio, missao: Some(missao), olheiro: None };
+        let item = RelatorioNaLista { relatorio, missao: Some(missao), olheiro: None, previstos: 17, parcial: false, novo: false };
         assert_eq!(detalhe_card(&item), "nenhum jogador · gerado em 03/07/2026 · Rápida");
+        let parcial = RelatorioNaLista { parcial: true, ..item };
+        assert_eq!(detalhe_card(&parcial), "parcial: 0 de 17 jogadores · gerado em 03/07/2026 · Rápida");
         assert!(!MSG_SEM_RELATORIOS.contains('!'));
         assert_eq!(MSG_SEM_ARQUIVADOS, "Nenhum Relatório arquivado.");
     }
