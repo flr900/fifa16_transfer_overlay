@@ -9,8 +9,9 @@
 //! de leitura) a lista continua aparecendo, sem barra.
 
 use imgui::Ui;
+use uuid::Uuid;
 
-use super::componentes::{self, badge_qualidade, badge_tier, card, desenhar_badge, texto_em, EstiloBotao};
+use super::componentes::{self, badge_novo, badge_qualidade, badge_tier, card, desenhar_badge, texto_em, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data};
 use crate::scout::state::{MissaoNaLista, ModoBusca, ProgressoMissao, ScoutState, StatusMissao};
@@ -41,7 +42,18 @@ pub fn nome_status(status: StatusMissao, progresso: Option<ProgressoMissao>) -> 
 
 /// O texto que acompanha a barra (UX-DR7: valores exatos, sem exclamação).
 pub fn texto_estimativa(linha: &MissaoNaLista) -> String {
+    if let (StatusMissao::Pendente, Some(falha)) = (linha.missao.status, &linha.falha) {
+        return format!("A busca falhou: {falha} Ela roda de novo quando o painel abrir.");
+    }
+    if linha.missao.continua && linha.missao.status == StatusMissao::Pendente {
+        return texto_continua(linha);
+    }
+    let parcial = match linha.revelados {
+        0 => String::new(),
+        n => format!("Relatório parcial: {} de {}. ", n, linha.previstos),
+    };
     match (linha.missao.status, linha.progresso) {
+        (StatusMissao::Concluida, _) if linha.relatorio_id.is_some() => "Concluída: ative para abrir o Relatório.".to_string(),
         (StatusMissao::Concluida, _) => "Concluída: Relatório disponível.".to_string(),
         (StatusMissao::EmExecucao, _) => "Gerando o Relatório…".to_string(),
         (StatusMissao::Pendente, None) => MSG_SEM_DATA.to_string(),
@@ -50,8 +62,22 @@ pub fn texto_estimativa(linha: &MissaoNaLista) -> String {
         }
         (StatusMissao::Pendente, Some(p)) => {
             let dias = if p.dias_restantes == 1 { "~1 dia".to_string() } else { format!("~{} dias", p.dias_restantes) };
-            format!("Relatório pronto em {dias} de carreira ({}).", formatar_data(linha.missao.prazo_estimado))
+            format!("{parcial}Relatório pronto em {dias} de carreira ({}).", formatar_data(linha.missao.prazo_estimado))
         }
+    }
+}
+
+/// Texto de uma Missão contínua em andamento (Story 2.10).
+pub fn texto_continua(linha: &MissaoNaLista) -> String {
+    let m = &linha.missao;
+    let achados = super::aviso::texto_jogadores(linha.revelados);
+    match linha.progresso {
+        Some(p) if p.prazo_atingido => format!(
+            "Bloco {} encerrado em {} ({achados} até agora). Renove para continuar ou encerre a Missão.",
+            m.blocos,
+            formatar_data(m.prazo_estimado)
+        ),
+        _ => format!("Contínua · bloco {} até {} · {achados} até agora.", m.blocos, formatar_data(m.prazo_estimado)),
     }
 }
 
@@ -63,25 +89,77 @@ pub fn fracao_da_barra(linha: &MissaoNaLista) -> Option<f32> {
     }
 }
 
-/// Desenha a aba; `true` = "Nova Missão" pressionado. `pode_encomendar`
-/// é `false` no estado de erro de leitura (a lista aparece, sem o botão).
-pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, pode_encomendar: bool) -> bool {
-    let nova = pode_encomendar && componentes::botao(ui, fonts, "Nova Missão", EstiloBotao::Primario, true);
+/// O que a aba pediu neste frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acao {
+    Nenhuma,
+    NovaMissao,
+    /// Card de uma Missão com Relatório ativado (Story 2.5).
+    AbrirRelatorio(Uuid),
+}
+
+/// Desenha a aba. `pode_encomendar` é `false` no estado de erro de leitura
+/// (a lista aparece, sem o botão nem as ações das Missões contínuas).
+pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pode_encomendar: bool) -> Acao {
+    let mut acao = Acao::Nenhuma;
+    if pode_encomendar && componentes::botao(ui, fonts, "Nova Missão", EstiloBotao::Primario, true) {
+        acao = Acao::NovaMissao;
+    }
     ui.dummy([0.0, theme::ESPACO_3]);
 
     let missoes = state.missoes();
     if missoes.is_empty() {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_MISSOES));
-        return nova;
+        return acao;
     }
     com_fonte(ui, fonts.map(|f| f.heading), || ui.text_colored(theme::TEXT_SECONDARY, "Missões"));
     for linha in &missoes {
-        card_missao(ui, fonts, linha);
+        if card_missao(ui, fonts, linha) {
+            if let Some(id) = linha.relatorio_id {
+                acao = Acao::AbrirRelatorio(id);
+            }
+        }
+        if pode_encomendar && linha.missao.continua && linha.missao.status == StatusMissao::Pendente {
+            acoes_continua(ui, fonts, state, linha);
+        }
     }
-    nova
+    acao
 }
 
-fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) {
+/// Renovar / Encerrar de uma Missão contínua (Story 2.10). Renovar é uma
+/// compra como as outras: só com confirmação explícita, o valor exato no
+/// botão e as mesmas mensagens de falha.
+fn acoes_continua(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, linha: &MissaoNaLista) {
+    let m = &linha.missao;
+    let _id = ui.push_id(m.id.to_string());
+    let custo = ScoutState::custo_do_bloco(m);
+    let encerrado = state.bloco_encerrado(m);
+    let falta = state.orcamento().map(|saldo| custo.saturating_sub(saldo)).filter(|f| *f > 0);
+    let rotulo = format!("Renovar por {}", super::formatar_milhar(custo));
+    if componentes::botao(ui, fonts, &rotulo, EstiloBotao::Primario, encerrado && falta.is_none()) {
+        state.renovar_missao(m.id);
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+    if componentes::botao(ui, fonts, "Encerrar Missão", EstiloBotao::Secundario, true) {
+        state.encerrar_missao(m.id);
+    }
+    let aviso = match (state.erro_da_missao(m.id), falta) {
+        (Some(erro), _) => Some(super::nova_missao::texto_erro(erro)),
+        (None, Some(f)) if encerrado => Some(super::olheiros::texto_faltam(f)),
+        _ => None,
+    };
+    if let Some(texto) = aviso {
+        com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::DANGER, texto));
+    } else if !encerrado {
+        com_fonte(ui, fonts.map(|f| f.meta), || {
+            ui.text_colored(theme::TEXT_SECONDARY, "Renovar fica disponível quando o bloco terminar.")
+        });
+    }
+    ui.dummy([0.0, theme::ESPACO_2]);
+}
+
+/// Card de uma Missão; `true` = ativado (só faz algo com Relatório pronto).
+fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) -> bool {
     let missao = &linha.missao;
     let c = card(ui, &missao.id.to_string(), ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
     let dl = ui.get_window_draw_list();
@@ -92,8 +170,12 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) {
     // Linha 1: Olheiro + Tier; Qualidade estimada à direita.
     let nome = linha.olheiro.as_ref().map_or("Olheiro removido", |o| o.especializacao.nome());
     let [largura_nome, altura_nome] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, nome);
+    let mut xb = x + largura_nome + theme::ESPACO_2;
     if let Some(o) = &linha.olheiro {
-        desenhar_badge(ui, fonts, &dl, &badge_tier(o.tier), [x + largura_nome + theme::ESPACO_2, y], altura_nome);
+        xb += desenhar_badge(ui, fonts, &dl, &badge_tier(o.tier), [xb, y], altura_nome)[0] + theme::ESPACO_2;
+    }
+    if linha.relatorio_novo {
+        desenhar_badge(ui, fonts, &dl, &badge_novo(), [xb, y], altura_nome);
     }
     let qualidade = badge_qualidade(missao.estimativa.qualidade);
     let largura_badge =
@@ -102,12 +184,15 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) {
     y += altura_nome + theme::ESPACO_1;
 
     // Linha 2: Modo · status · prazo.
-    let detalhe = format!(
+    let mut detalhe = format!(
         "{} · {} · prazo {}",
         nome_modo(missao.modo_busca),
         nome_status(missao.status, linha.progresso),
         formatar_data(missao.prazo_estimado)
     );
+    if let Some(a) = missao.filtros.atributo_dominante {
+        detalhe.push_str(&format!(" · foco em {}", a.nome()));
+    }
     let [_, altura_detalhe] = texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::TEXT_SECONDARY, &detalhe);
     y += altura_detalhe + theme::ESPACO_2;
 
@@ -125,8 +210,13 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) {
     }
     y += ALTURA_BARRA + theme::ESPACO_1;
     let pronta = linha.progresso.is_some_and(|p| p.prazo_atingido) || missao.status == StatusMissao::Concluida;
-    let cor = if pronta { theme::FIELD_GREEN } else { theme::TEXT_SECONDARY };
+    let cor = match (&linha.falha, pronta) {
+        (Some(_), _) if missao.status == StatusMissao::Pendente => theme::DANGER,
+        (_, true) => theme::FIELD_GREEN,
+        _ => theme::TEXT_SECONDARY,
+    };
     texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], cor, &texto_estimativa(linha));
+    c.ativou
 }
 
 #[cfg(test)]
@@ -144,6 +234,11 @@ mod tests {
             progresso: hoje.map(|d| progresso_missao(missao.criada_em, missao.prazo_estimado, Date(d))),
             missao,
             olheiro: None,
+            falha: None,
+            relatorio_id: None,
+            relatorio_novo: false,
+            revelados: 0,
+            previstos: 17,
         }
     }
 
@@ -159,6 +254,23 @@ mod tests {
         );
         assert_eq!(texto_estimativa(&linha(StatusMissao::Pendente, Some(20260801))), "Pronta: prazo cumprido em 11/07/2026.");
         assert_eq!(texto_estimativa(&linha(StatusMissao::Pendente, None)), MSG_SEM_DATA);
+        let parcial = MissaoNaLista { revelados: 9, ..linha(StatusMissao::Pendente, Some(20260706)) };
+        assert_eq!(
+            texto_estimativa(&parcial),
+            "Relatório parcial: 9 de 17. Relatório pronto em ~5 dias de carreira (11/07/2026)."
+        );
+        let mut continua = linha(StatusMissao::Pendente, Some(20260711));
+        continua.missao.continua = true;
+        continua.revelados = 17;
+        assert_eq!(
+            texto_estimativa(&continua),
+            "Bloco 1 encerrado em 11/07/2026 (17 jogadores até agora). Renove para continuar ou encerre a Missão."
+        );
+        let falhou = MissaoNaLista { falha: Some("Não foi possível ler o save ativo.".to_string()), ..linha(StatusMissao::Pendente, Some(20260801)) };
+        assert_eq!(
+            texto_estimativa(&falhou),
+            "A busca falhou: Não foi possível ler o save ativo. Ela roda de novo quando o painel abrir."
+        );
         for status in [StatusMissao::Pendente, StatusMissao::EmExecucao, StatusMissao::Concluida] {
             assert!(!texto_estimativa(&linha(status, Some(20260704))).contains('!'));
         }

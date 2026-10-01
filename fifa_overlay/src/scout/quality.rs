@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{Especializacao, FaixaAtributo, ModoBusca, Qualidade, Tier};
+use super::state::{Atributo, Confederacao, Especializacao, FaixaAtributo, Funcao, ModoBusca, Qualidade, Tier};
 
 // ---------------------------------------------------------------------
 // Contratação (Story 1.4)
@@ -80,14 +80,13 @@ pub enum TipoMissao {
 }
 
 impl TipoMissao {
-    #[allow(dead_code)] // Tática ainda não é derivada (Story 2.8); usado nos testes
+    #[allow(dead_code)] // usado nos testes
     pub const TODOS: [TipoMissao; 4] = [TipoMissao::Jovens, TipoMissao::Medalhoes, TipoMissao::Tatica, TipoMissao::Geral];
 }
 
-/// Amplitude do filtro geográfico. Até a Story 2.9 (filtro por país) toda
-/// Missão é `Mundo`. Em ordem: `Pais < VariosPaises < Continente < Mundo`.
+/// Amplitude do filtro geográfico (Story 2.9, `amplitude_da_selecao`).
+/// Em ordem: `Pais < VariosPaises < Continente < Mundo`.
 /// No JSON: `"pais"`, `"varios_paises"`, `"continente"`, `"mundo"`.
-#[allow(dead_code)] // as demais amplitudes chegam com o filtro geográfico (Story 2.9)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AmplitudeGeografica {
@@ -101,7 +100,7 @@ pub enum AmplitudeGeografica {
 }
 
 impl AmplitudeGeografica {
-    #[allow(dead_code)] // usado nos testes e pela Story 2.9
+    #[allow(dead_code)] // usado nos testes
     pub const TODAS: [AmplitudeGeografica; 4] = [
         AmplitudeGeografica::Pais,
         AmplitudeGeografica::VariosPaises,
@@ -182,15 +181,17 @@ fn qualidade_da_pontuacao(pontos: u8) -> Qualidade {
     }
 }
 
-/// Atributos revelados por pontuação (o save tem 29 atributos de linha +
-/// 5 de goleiro; Alta máxima revela o perfil de linha inteiro).
+/// Atributos revelados por pontuação (o save tem 28 atributos de linha +
+/// 5 de goleiro; Alta máxima revela 28: o perfil de linha inteiro, ou os 5
+/// de goleiro + 23 de linha para um goleiro). Era 29 na Story 2.1, antes
+/// de a Story 2.4 contar os campos reais do `CZUM`.
 fn atributos_da_pontuacao(pontos: u8) -> u8 {
     match pontos {
         0 | 1 => 6,
         2 => 10,
         3 => 15,
         4 => 22,
-        _ => 29,
+        _ => 28,
     }
 }
 
@@ -276,6 +277,55 @@ pub fn tipo_por_faixas(overall: FaixaAtributo, potencial: FaixaAtributo) -> Tipo
     }
 }
 
+/// Tipo da Missão a partir de todos os filtros (Story 2.8): pedir um
+/// atributo dominante ("o melhor driblador") é uma Missão **Tática** — a
+/// especialidade do Tático; sem ele, valem as faixas.
+pub fn tipo_por_filtros(overall: FaixaAtributo, potencial: FaixaAtributo, dominante: Option<Atributo>) -> TipoMissao {
+    match dominante {
+        Some(_) => TipoMissao::Tatica,
+        None => tipo_por_faixas(overall, potencial),
+    }
+}
+
+/// Um jogador "tem" um atributo dominante quando ele está entre os seus
+/// `TOP_DOMINANTE` maiores atributos (empates contam). Só o maior seria
+/// raro demais (muitos jogadores têm Velocidade ou Força no topo).
+pub const TOP_DOMINANTE: usize = 3;
+
+/// `valores`: os atributos do jogador que contam para a função dele (os de
+/// goleiro só para goleiros). Verdadeiro se `alvo` está no top
+/// `TOP_DOMINANTE` (empates incluídos).
+pub fn eh_dominante(valores: &[(Atributo, u8)], alvo: Atributo) -> bool {
+    let Some(&(_, valor_alvo)) = valores.iter().find(|(a, _)| *a == alvo) else {
+        return false;
+    };
+    let maiores = valores.iter().filter(|(_, v)| *v > valor_alvo).count();
+    maiores < TOP_DOMINANTE
+}
+
+/// Amplitude de uma seleção de países (Story 2.9). `selecao`: a
+/// confederação de cada país escolhido; `total_da`: quantos países a
+/// confederação tem no mapa.
+/// - nenhum país = todos os países → `Mundo`;
+/// - um país → `Pais`;
+/// - vários, todos do mesmo continente: o continente inteiro → `Continente`,
+///   senão `VariosPaises`;
+/// - países de mais de um continente → `Mundo`.
+pub fn amplitude_da_selecao(selecao: &[Confederacao], total_da: impl Fn(Confederacao) -> usize) -> AmplitudeGeografica {
+    match selecao {
+        [] => AmplitudeGeografica::Mundo,
+        [_] => AmplitudeGeografica::Pais,
+        [primeira, resto @ ..] if resto.iter().all(|c| c == primeira) => {
+            if selecao.len() >= total_da(*primeira) {
+                AmplitudeGeografica::Continente
+            } else {
+                AmplitudeGeografica::VariosPaises
+            }
+        }
+        _ => AmplitudeGeografica::Mundo,
+    }
+}
+
 /// A Especialização do Olheiro combina com o tipo da Missão (bônus de
 /// Qualidade)? O formulário mostra isso ao jogador.
 pub fn combina(especializacao: Especializacao, tipo: TipoMissao) -> bool {
@@ -307,6 +357,119 @@ pub fn estimar_missao(pedido: &PedidoMissao) -> EstimativaMissao {
         precisao_mais_menos: precisao_base(pontos) + precisao_extra_amplitude(pedido.amplitude),
         alvo_jogadores: alvo_jogadores(pedido.modo, pontos),
     }
+}
+
+// ---------------------------------------------------------------------
+// Relatório parcial e Missão contínua (Story 2.10)
+// ---------------------------------------------------------------------
+
+/// Uma Missão contínua ("sem prazo") é paga em blocos de tantos dias de
+/// carreira; cada bloco custa o mesmo que a Missão de prazo fixo com os
+/// mesmos filtros e traz o mesmo número de jogadores, só que espalhados
+/// pelo bloco. Nada é cobrado sozinho: cada bloco novo é confirmado pelo
+/// jogador (FR-3/NFR1).
+pub const DIAS_BLOCO_CONTINUO: u32 = 30;
+
+/// Quantos jogadores do Relatório já apareceram com o progresso `fracao`
+/// (0–1): `ceil(fracao × alvo)`, nunca mais que os `encontrados` pela
+/// busca. Prazo cumprido (`fracao` 1) mostra todos.
+pub fn revelados(fracao: f32, alvo: usize, encontrados: usize) -> usize {
+    let fracao = fracao.clamp(0.0, 1.0);
+    let n = (fracao * alvo as f32).ceil() as usize;
+    n.min(encontrados)
+}
+
+// ---------------------------------------------------------------------
+// Como o Relatório revela cada jogador (Story 2.4)
+// ---------------------------------------------------------------------
+//
+// Nada aqui inventa valor: o Relatório mostra uma FAIXA que sempre contém
+// o valor real, com largura `2 × precisão`, e só para os atributos que o
+// Olheiro observou. A posição do valor real dentro da faixa é sorteada
+// (determinística, pela semente), senão o meio da faixa entregaria o
+// número exato.
+
+/// Ordem em que o Olheiro observa os atributos de um jogador, pela função
+/// dele em campo. O Relatório revela os N primeiros (N =
+/// `atributos_revelados`). Um atributo dominante pedido na Missão (Story
+/// 2.8) é sempre o primeiro.
+pub fn ordem_de_observacao(funcao: Funcao, dominante: Option<Atributo>) -> Vec<Atributo> {
+    use Atributo::*;
+    let prioridade: &[Atributo] = match funcao {
+        Funcao::Goleiro => &[GkReflexos, GkMergulho, GkColocacao, GkManejo, GkReposicao, Reacao, Impulsao, Forca],
+        Funcao::Defensor => &[Marcacao, DesarmeEmPe, Carrinho, Interceptacao, Cabeceio, Forca, Velocidade, Reacao],
+        Funcao::MeioCampo => &[PasseCurto, Visao, ControleDeBola, PasseLongo, Drible, Reacao, Folego, Interceptacao],
+        Funcao::Atacante => &[Finalizacao, PosicionamentoOfensivo, Velocidade, Aceleracao, Drible, ControleDeBola, ForcaDoChute, Reacao],
+    };
+    let goleiro = funcao == Funcao::Goleiro;
+    let mut ordem: Vec<Atributo> = Vec::with_capacity(Atributo::TODOS.len());
+    for &a in dominante.iter().chain(prioridade).chain(Atributo::TODOS.iter()) {
+        // Atributos de goleiro só entram na observação de goleiros.
+        if (a.goleiro() && !goleiro && Some(a) != dominante) || ordem.contains(&a) {
+            continue;
+        }
+        ordem.push(a);
+    }
+    ordem
+}
+
+/// Faixa revelada para um valor `real` (1–99) com precisão ± `precisao`:
+/// largura `2 × precisao`, sempre contendo o real, dentro de 1–99.
+pub fn faixa_revelada(real: u8, precisao: u8, semente: u64) -> FaixaAtributo {
+    let real = real.clamp(FaixaAtributo::MENOR, FaixaAtributo::MAIOR);
+    if precisao == 0 {
+        return FaixaAtributo { min: real, max: real };
+    }
+    let largura = u16::from(precisao) * 2;
+    let deslocamento = u16::try_from(semente % (u64::from(largura) + 1)).unwrap_or(0);
+    let menor = u16::from(FaixaAtributo::MENOR);
+    let maior = u16::from(FaixaAtributo::MAIOR);
+    let min = u16::from(real).saturating_sub(deslocamento).max(menor);
+    // empurra a janela para dentro de 1–99 sem perder o valor real
+    let min = min.min(maior.saturating_sub(largura).max(menor));
+    let max = (min + largura).min(maior);
+    FaixaAtributo { min: u8::try_from(min).unwrap_or(real), max: u8::try_from(max).unwrap_or(real) }
+}
+
+/// Quanto o Olheiro "erra" na hora de escolher quem entra no Relatório: a
+/// relevância de cada candidato recebe um ruído de até este número de
+/// pontos. Qualidade alta escolhe quase sempre os melhores; baixa traz
+/// nomes bem mais aleatórios.
+pub fn ruido_de_escolha(qualidade: Qualidade) -> u32 {
+    match qualidade {
+        Qualidade::Alta => 3,
+        Qualidade::Media => 8,
+        Qualidade::Baixa => 15,
+    }
+}
+
+/// Nota de um candidato: relevância (0–99) + ruído da Qualidade. Maior =
+/// entra antes no Relatório.
+pub fn nota_de_escolha(relevancia: u8, qualidade: Qualidade, semente: u64) -> u32 {
+    let ruido = ruido_de_escolha(qualidade) * 100;
+    u32::from(relevancia) * 100 + u32::try_from(semente % (u64::from(ruido) + 1)).unwrap_or(0)
+}
+
+/// Relevância de um jogador para o tipo de Missão (0–99).
+pub fn relevancia(tipo: TipoMissao, overall: u8, potencial: u8, dominante: Option<u8>) -> u8 {
+    match (tipo, dominante) {
+        (_, Some(valor)) => valor,
+        (TipoMissao::Jovens, None) => potencial,
+        (TipoMissao::Medalhoes, None) => overall,
+        (TipoMissao::Tatica | TipoMissao::Geral, None) => {
+            u8::try_from((u16::from(overall) + u16::from(potencial)) / 2).unwrap_or(overall)
+        }
+    }
+}
+
+/// Semente determinística (SplitMix64) a partir da Missão, do jogador e de
+/// um "canal" (atributo, escolha…): o mesmo Relatório sai sempre igual.
+pub fn semente(missao: u128, jogador: u32, canal: u32) -> u64 {
+    let mut x = (missao as u64) ^ ((missao >> 64) as u64).rotate_left(17) ^ (u64::from(jogador) << 20) ^ u64::from(canal);
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
 }
 
 #[cfg(test)]
@@ -463,7 +626,7 @@ mod tests {
                 custo: 880_000,
                 duracao_dias: 18,
                 qualidade: Qualidade::Alta,
-                atributos_revelados: 29,
+                atributos_revelados: 28,
                 precisao_mais_menos: 1,
                 alvo_jogadores: 10,
             }
@@ -502,8 +665,104 @@ mod tests {
             assert_eq!(e, estimar_missao(&pedido));
             assert!(e.custo > 0 && e.custo % 10_000 == 0, "{pedido:?} {e:?}");
             assert!((5..=60).contains(&e.duracao_dias), "{pedido:?} {e:?}");
-            assert!((6..=29).contains(&e.atributos_revelados), "{pedido:?} {e:?}");
+            assert!((6..=28).contains(&e.atributos_revelados), "{pedido:?} {e:?}");
             assert!(e.alvo_jogadores > 0, "{pedido:?} {e:?}");
         }
+    }
+
+    #[test]
+    fn revealed_ranges_always_contain_the_real_value_and_stay_in_bounds() {
+        for real in 1..=99u8 {
+            for precisao in 0..=14u8 {
+                for s in 0..40u64 {
+                    let f = faixa_revelada(real, precisao, semente(7, u32::from(real), s as u32));
+                    assert!(f.min <= real && real <= f.max, "{real} ±{precisao}: {f:?}");
+                    assert!(f.min >= 1 && f.max <= 99, "{f:?}");
+                    if precisao == 0 {
+                        assert_eq!(f.min, f.max);
+                    } else if real > 2 * precisao && real < 99 - 2 * precisao {
+                        assert_eq!(f.max - f.min, 2 * precisao, "largura fixa longe das pontas");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_real_value_is_not_always_the_middle_of_the_range() {
+        let meios = (0..50u32).filter(|&c| {
+            let f = faixa_revelada(70, 5, semente(1, 2, c));
+            f.min + 5 == 70
+        });
+        assert!(meios.count() < 20);
+    }
+
+    #[test]
+    fn observation_order_starts_with_the_role_and_the_dominant_attribute() {
+        let atacante = ordem_de_observacao(Funcao::Atacante, None);
+        assert_eq!(atacante.first(), Some(&Atributo::Finalizacao));
+        assert_eq!(atacante.len(), 28, "sem atributos de goleiro");
+        assert!(atacante.iter().all(|a| !a.goleiro()));
+        let goleiro = ordem_de_observacao(Funcao::Goleiro, None);
+        assert_eq!(goleiro.len(), 33);
+        assert!(goleiro.iter().take(5).all(|a| a.goleiro()));
+        let drible = ordem_de_observacao(Funcao::Defensor, Some(Atributo::Drible));
+        assert_eq!(drible.first(), Some(&Atributo::Drible));
+        let mut sem_repetir = drible.clone();
+        sem_repetir.sort_unstable();
+        sem_repetir.dedup();
+        assert_eq!(sem_repetir.len(), drible.len());
+    }
+
+    #[test]
+    fn better_quality_picks_more_faithfully() {
+        // um candidato 10 pontos melhor quase sempre vence com Alta e nem
+        // sempre com Baixa
+        let vence = |q| (0..200u32).filter(|&c| nota_de_escolha(80, q, semente(3, c, 0)) > nota_de_escolha(70, q, semente(3, c, 1))).count();
+        assert_eq!(vence(Qualidade::Alta), 200);
+        assert!(vence(Qualidade::Baixa) < 200);
+        assert_eq!(relevancia(TipoMissao::Jovens, 60, 88, None), 88);
+        assert_eq!(relevancia(TipoMissao::Medalhoes, 82, 84, None), 82);
+        assert_eq!(relevancia(TipoMissao::Geral, 70, 80, None), 75);
+        assert_eq!(relevancia(TipoMissao::Tatica, 70, 80, Some(91)), 91);
+        assert_eq!(semente(9, 9, 9), semente(9, 9, 9));
+        assert_ne!(semente(9, 9, 9), semente(9, 9, 8));
+    }
+
+    #[test]
+    fn a_dominant_attribute_makes_a_tactical_missao_and_counts_the_top_three() {
+        let faixa = |min, max| FaixaAtributo { min, max };
+        assert_eq!(tipo_por_filtros(faixa(50, 70), faixa(80, 99), Some(Atributo::Drible)), TipoMissao::Tatica);
+        assert_eq!(tipo_por_filtros(faixa(50, 70), faixa(80, 99), None), TipoMissao::Jovens);
+        assert!(combina(Especializacao::Tatico, TipoMissao::Tatica));
+        let valores = [(Atributo::Velocidade, 90), (Atributo::Drible, 88), (Atributo::Forca, 88), (Atributo::Finalizacao, 85), (Atributo::Marcacao, 40)];
+        assert!(eh_dominante(&valores, Atributo::Velocidade));
+        assert!(eh_dominante(&valores, Atributo::Drible));
+        assert!(eh_dominante(&valores, Atributo::Forca), "empate conta");
+        assert!(!eh_dominante(&valores, Atributo::Finalizacao), "4º maior");
+        assert!(!eh_dominante(&valores, Atributo::Marcacao));
+        assert!(!eh_dominante(&valores, Atributo::GkReflexos), "fora da função");
+    }
+
+    #[test]
+    fn breadth_comes_from_the_selected_countries() {
+        let total = |c| if c == Confederacao::AmericaDoSul { 3 } else { 50 };
+        use Confederacao::*;
+        assert_eq!(amplitude_da_selecao(&[], total), AmplitudeGeografica::Mundo);
+        assert_eq!(amplitude_da_selecao(&[Europa], total), AmplitudeGeografica::Pais);
+        assert_eq!(amplitude_da_selecao(&[AmericaDoSul, AmericaDoSul], total), AmplitudeGeografica::VariosPaises);
+        assert_eq!(amplitude_da_selecao(&[AmericaDoSul; 3], total), AmplitudeGeografica::Continente);
+        assert_eq!(amplitude_da_selecao(&[Europa, AmericaDoSul], total), AmplitudeGeografica::Mundo);
+    }
+
+    #[test]
+    fn partial_reports_grow_with_progress_and_never_exceed_what_was_found() {
+        assert_eq!(revelados(0.0, 17, 17), 0);
+        assert_eq!(revelados(0.01, 17, 17), 1, "arredonda para cima: logo aparece o primeiro");
+        assert_eq!(revelados(0.5, 17, 17), 9);
+        assert_eq!(revelados(1.0, 17, 17), 17);
+        assert_eq!(revelados(1.0, 17, 5), 5, "pool pequeno");
+        assert_eq!(revelados(2.0, 17, 17), 17);
+        assert_eq!(revelados(-1.0, 17, 17), 0);
     }
 }

@@ -18,6 +18,7 @@ use super::componentes::{self, badge_qualidade, badge_tier, card, desenhar_badge
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar, olheiros};
 use crate::scout::quality::TipoMissao;
+use crate::scout::Satelite;
 use crate::scout::state::{
     BloqueioMissao, CampoFaixa, ErroCompra, FaixaAtributo, ModoBusca, OlheiroContratado, PreviaMissao, ScoutState,
 };
@@ -28,6 +29,7 @@ const ALTURA_OLHEIRO: f32 = 52.0;
 const LARGURA_VALOR: f32 = 44.0;
 const LARGURA_MODO: f32 = 150.0;
 const RAIO_RADIO: f32 = 7.0;
+const LARGURA_VALOR_CAMPO: f32 = 320.0;
 
 pub const MSG_SEM_OLHEIRO: &str = "Nenhum Olheiro disponível.";
 
@@ -37,6 +39,8 @@ pub enum Acao {
     Nenhuma,
     Confirmou,
     Cancelou,
+    /// Abrir um painel de campo (Atributo dominante, Filtro geográfico).
+    AbrirCampo(Satelite),
 }
 
 /// Rótulo do tipo de Missão derivado das faixas.
@@ -113,6 +117,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         return Acao::Cancelou;
     };
 
+    let mut campo = None;
     let altura_campos = (ui.content_region_avail()[1] - ALTURA_RODAPE).max(120.0);
     ui.child_window("##campos_nova_missao")
         .size([0.0, altura_campos])
@@ -135,10 +140,53 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 CampoFaixa::PotencialMax,
             );
             divisor(ui);
+            let nacoes = state.nacoes();
+            let paises = super::selecao_geografica::resumo_paises(
+                &previa.rascunho.filtros.paises,
+                nacoes.as_deref().map(Vec::as_slice).unwrap_or_default(),
+            );
+            if campo_painel(ui, fonts, "Filtro geográfico", &paises) {
+                campo = Some(Satelite::SelecaoGeografica);
+            }
+            if previa.rascunho.filtros.paises.is_empty() {
+                ui.set_cursor_pos([ui.cursor_pos()[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+                com_fonte(ui, fonts.map(|f| f.meta), || {
+                    ui.text_colored(theme::TEXT_SECONDARY, super::selecao_geografica::MSG_TODOS)
+                });
+            }
+            divisor(ui);
+            if campo_painel(ui, fonts, "Atributo dominante", &texto_atributo(previa.rascunho.filtros.atributo_dominante)) {
+                campo = Some(Satelite::CampoAtributo);
+            }
+            divisor(ui);
             campo_modo(ui, fonts, state, previa.rascunho.modo);
+            divisor(ui);
+            campo_duracao(ui, fonts, state, previa.rascunho.continua);
         });
 
-    rodape(ui, fonts, state, &previa)
+    match (rodape(ui, fonts, state, &previa), campo) {
+        (Acao::Nenhuma, Some(satelite)) => Acao::AbrirCampo(satelite),
+        (acao, _) => acao,
+    }
+}
+
+/// Valor da linha "Atributo dominante".
+pub fn texto_atributo(atributo: Option<crate::scout::state::Atributo>) -> String {
+    match atributo {
+        Some(a) => a.nome().to_string(),
+        None => "Qualquer um".to_string(),
+    }
+}
+
+/// Linha que abre um painel de campo em tela cheia (UX-DR11): rótulo à
+/// esquerda e um botão com o valor atual. `true` = ativada.
+fn campo_painel(ui: &Ui, fonts: Option<&Fonts>, nome: &str, valor: &str) -> bool {
+    let _id = ui.push_id(nome);
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, nome);
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let texto = format!("{valor}  ›");
+    componentes::botao_com_largura(ui, fonts, &texto, EstiloBotao::Secundario, true, Some(LARGURA_VALOR_CAMPO))
 }
 
 fn rotulo(ui: &Ui, fonts: Option<&Fonts>, texto: &str) {
@@ -161,7 +209,9 @@ fn campo_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa:
     }
     for contratado in &previa.olheiros {
         let escolhido = previa.rascunho.olheiro_id == Some(contratado.olheiro.id);
-        if linha_olheiro(ui, fonts, contratado, escolhido) && !contratado.em_missao {
+        // clicar ou focar com o controle escolhe (foco = escolha)
+        let ativou = linha_olheiro(ui, fonts, contratado, escolhido);
+        if (ativou || componentes::focado_pelo_controle(ui)) && !escolhido && !contratado.em_missao {
             state.escolher_olheiro_da_missao(contratado.olheiro.id);
         }
     }
@@ -263,7 +313,8 @@ fn campo_modo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: Modo
             ui.same_line_with_spacing(0.0, theme::ESPACO_2);
         }
         let estilo = if opcao == modo { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
-        if componentes::botao_com_largura(ui, fonts, super::missoes::nome_modo(opcao), estilo, true, Some(LARGURA_MODO)) {
+        let clicou = componentes::botao_com_largura(ui, fonts, super::missoes::nome_modo(opcao), estilo, true, Some(LARGURA_MODO));
+        if (clicou || componentes::focado_pelo_controle(ui)) && opcao != modo {
             state.definir_modo_da_missao(opcao);
         }
     }
@@ -271,8 +322,56 @@ fn campo_modo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: Modo
     com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, descricao_modo(modo)));
 }
 
+/// Prazo fixo ou contínua (Story 2.10).
+fn campo_duracao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, continua: bool) {
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Duração");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    for (indice, (nome, valor)) in [("Prazo fixo", false), ("Contínua", true)].into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        let estilo = if valor == continua { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        let clicou = componentes::botao_com_largura(ui, fonts, nome, estilo, true, Some(LARGURA_MODO));
+        if (clicou || componentes::focado_pelo_controle(ui)) && valor != continua {
+            state.definir_continua_da_missao(valor);
+        }
+    }
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, descricao_duracao(continua)));
+}
+
+pub fn descricao_duracao(continua: bool) -> String {
+    if continua {
+        format!(
+            "O Olheiro fica na Missão até você encerrar. Cada bloco de {} dias de carreira é pago na confirmação; ao fim do bloco, você decide se renova.",
+            crate::scout::quality::DIAS_BLOCO_CONTINUO
+        )
+    } else {
+        "O Relatório chega aos poucos e fica completo no prazo.".to_string()
+    }
+}
+
 /// Rodapé fixo: resumo ao vivo, motivo do bloqueio e os botões.
 fn rodape(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) -> Acao {
+    resumo(ui, fonts, previa);
+
+    let mut acao = Acao::Nenhuma;
+    let habilitado = previa.bloqueio.is_none();
+    let rotulo_confirmar = if previa.rascunho.erro.is_some() { "Tentar novamente" } else { "Confirmar Missão" };
+    if componentes::botao(ui, fonts, rotulo_confirmar, EstiloBotao::Primario, habilitado) && state.confirmar_nova_missao() {
+        acao = Acao::Confirmou;
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+    if componentes::botao(ui, fonts, "Cancelar", EstiloBotao::Secundario, true) {
+        acao = Acao::Cancelou;
+    }
+    acao
+}
+
+/// Resumo ao vivo (custo, prazo, Qualidade, tipo, aviso). Também aparece
+/// nos painéis de campo, que não têm os botões (UX-DR11).
+pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
     {
         let _c = ui.push_style_color(StyleColor::Separator, theme::BORDER_HAIRLINE);
         ui.separator();
@@ -280,9 +379,17 @@ fn rodape(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &Previ
     ui.dummy([0.0, theme::ESPACO_1]);
 
     let estimativa = previa.estimativa;
-    let custo = estimativa.map_or("—".to_string(), |e| formatar_milhar(e.custo));
-    let prazo = match (estimativa, previa.prazo()) {
-        (Some(e), Some(data)) => format!("~{} dias de carreira (pronta em {})", e.duracao_dias, formatar_data(data)),
+    let continua = previa.rascunho.continua;
+    let custo = estimativa.map_or("—".to_string(), |e| {
+        if continua {
+            format!("{} por bloco", formatar_milhar(e.custo))
+        } else {
+            formatar_milhar(e.custo)
+        }
+    });
+    let prazo = match (previa.duracao_dias(), previa.prazo()) {
+        (Some(dias), Some(data)) if continua => format!("blocos de {dias} dias (o 1º termina em {})", formatar_data(data)),
+        (Some(dias), Some(data)) => format!("~{dias} dias de carreira (pronta em {})", formatar_data(data)),
         _ => "—".to_string(),
     };
 
@@ -312,8 +419,11 @@ fn rodape(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &Previ
             ui.text_colored(
                 theme::TEXT_SECONDARY,
                 format!(
-                    "Relatório: até {} jogadores, {} atributos por jogador, precisão de ±{}.",
-                    e.alvo_jogadores, e.atributos_revelados, e.precisao_mais_menos
+                    "Relatório: até {} jogadores{}, {} atributos por jogador, precisão de ±{}.",
+                    e.alvo_jogadores,
+                    if continua { " por bloco" } else { "" },
+                    e.atributos_revelados,
+                    e.precisao_mais_menos
                 ),
             );
         }
@@ -328,19 +438,10 @@ fn rodape(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &Previ
         Some(texto) => com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::DANGER, texto)),
         None => ui.dummy([0.0, ui.text_line_height()]),
     }
-
-    let mut acao = Acao::Nenhuma;
-    let habilitado = previa.bloqueio.is_none();
-    let rotulo_confirmar = if previa.rascunho.erro.is_some() { "Tentar novamente" } else { "Confirmar Missão" };
-    if componentes::botao(ui, fonts, rotulo_confirmar, EstiloBotao::Primario, habilitado) && state.confirmar_nova_missao() {
-        acao = Acao::Confirmou;
-    }
-    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
-    if componentes::botao(ui, fonts, "Cancelar", EstiloBotao::Secundario, true) {
-        acao = Acao::Cancelou;
-    }
-    acao
 }
+
+/// Altura reservada para o resumo no rodapé de um painel de campo.
+pub const ALTURA_RESUMO: f32 = 120.0;
 
 #[cfg(test)]
 mod tests {
@@ -350,9 +451,16 @@ mod tests {
 
     fn previa(tipo: TipoMissao, combina: bool) -> PreviaMissao {
         PreviaMissao {
-            rascunho: RascunhoMissao { olheiro_id: None, filtros: FiltrosMissao::default(), modo: ModoBusca::Rapida, erro: None },
+            rascunho: RascunhoMissao {
+                olheiro_id: None,
+                filtros: FiltrosMissao::default(),
+                modo: ModoBusca::Rapida,
+                continua: false,
+                erro: None,
+            },
             olheiros: Vec::new(),
             tipo,
+            amplitude: crate::scout::quality::AmplitudeGeografica::Mundo,
             combina,
             estimativa: None,
             orcamento_atual: 0,

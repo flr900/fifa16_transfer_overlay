@@ -11,6 +11,7 @@
 use imgui::{Condition, StyleColor, StyleVar, Ui, WindowFlags};
 
 use super::theme::{self, Fonts};
+use super::nova_missao::nome_tipo;
 use super::{com_fonte, formatar_data};
 use crate::scout::state::TipoAviso;
 
@@ -42,6 +43,38 @@ pub fn textos(aviso: &TipoAviso) -> (String, String, [f32; 4]) {
             "F10 abre o painel para tentar de novo.".to_string(),
             theme::DANGER,
         ),
+        TipoAviso::RelatorioPronto { tipo, jogadores } => (
+            "Relatório pronto".to_string(),
+            format!("Missão {}: {} · F10 abre o painel.", nome_tipo(*tipo), texto_jogadores(*jogadores)),
+            theme::FIELD_GREEN,
+        ),
+        TipoAviso::RelatorioAtualizado { tipo, novos } => (
+            format!("Relatório atualizado: +{} · Missão {}", texto_jogadores(*novos), nome_tipo(*tipo)),
+            "F10 abre o painel.".to_string(),
+            theme::ACCENT_PRIMARY,
+        ),
+        TipoAviso::BuscaFalhou => (
+            "A busca de uma Missão falhou.".to_string(),
+            "Ela roda de novo quando o painel abrir.".to_string(),
+            theme::DANGER,
+        ),
+    }
+}
+
+/// "1 país selecionado" / "3 países selecionados".
+pub fn texto_paises(n: usize) -> String {
+    match n {
+        1 => "1 país selecionado".to_string(),
+        n => format!("{n} países selecionados"),
+    }
+}
+
+/// "1 jogador" / "12 jogadores" / "nenhum jogador".
+pub fn texto_jogadores(n: usize) -> String {
+    match n {
+        0 => "nenhum jogador".to_string(),
+        1 => "1 jogador".to_string(),
+        n => format!("{n} jogadores"),
     }
 }
 
@@ -100,7 +133,11 @@ mod tests {
         });
         assert_eq!(textos(&pronta).1, "Senhor Manager · 01/07/2026 · F10 abre o painel.");
         assert_eq!(textos(&TipoAviso::Injetado).0, "Central de Scout ativa");
-        for aviso in [TipoAviso::Injetado, TipoAviso::Carregando, pronta, TipoAviso::Falhou] {
+        let relatorio = TipoAviso::RelatorioPronto { tipo: crate::scout::quality::TipoMissao::Jovens, jogadores: 12 };
+        let atualizado = TipoAviso::RelatorioAtualizado { tipo: crate::scout::quality::TipoMissao::Jovens, novos: 2 };
+        assert_eq!(textos(&atualizado).0, "Relatório atualizado: +2 jogadores · Missão Jovens");
+        assert_eq!(textos(&relatorio).1, "Missão Jovens: 12 jogadores · F10 abre o painel.");
+        for aviso in [TipoAviso::Injetado, TipoAviso::Carregando, pronta, TipoAviso::Falhou, relatorio, atualizado, TipoAviso::BuscaFalhou] {
             let (titulo, detalhe, _) = textos(&aviso);
             assert!(!titulo.contains('!') && !detalhe.contains('!'), "{titulo} / {detalhe}");
         }

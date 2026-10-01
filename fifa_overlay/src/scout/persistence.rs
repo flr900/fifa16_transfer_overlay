@@ -77,18 +77,28 @@ fn versao_atual() -> u32 {
     VERSAO_FORMATO
 }
 
-/// Preferências de UI persistidas por carreira (AD-7). A densidade
-/// Tabular/Cards entra aqui na Story 2.6.
+/// Preferências de UI persistidas por carreira (AD-7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiPrefs {
     pub aba_ativa: Aba,
+    /// Visão dos Relatórios (Story 2.6). No JSON: `"tabular"` / `"cards"`.
+    pub densidade: Densidade,
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        UiPrefs { aba_ativa: Aba::Olheiros }
+        UiPrefs { aba_ativa: Aba::Olheiros, densidade: Densidade::Tabular }
     }
+}
+
+/// Tabular (linhas densas, números alinhados) ou Cards (rostos).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Densidade {
+    #[default]
+    Tabular,
+    Cards,
 }
 
 /// Desserializa `T`; se o valor não servir, usa `T::default()` e avisa.
@@ -349,7 +359,7 @@ pub(crate) mod tests {
                 "olheiros": [],
                 "missoes": [],
                 "relatorios": [],
-                "ui_prefs": { "aba_ativa": "olheiros" }
+                "ui_prefs": { "aba_ativa": "olheiros", "densidade": "tabular" }
             })
         );
     }
@@ -385,7 +395,7 @@ pub(crate) mod tests {
             prazo_estimado: Date(20261015),
             ..Missao::de_teste(olheiro.id, StatusMissao::Pendente)
         };
-        let relatorio = Relatorio { id: Uuid::new_v4(), missao_id: missao.id };
+        let relatorio = Relatorio::de_teste(missao.id);
 
         let pasta = PastaTemporaria::nova();
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
