@@ -6,6 +6,7 @@
 //! exibição (milhar, data dd/mm/aaaa) é responsabilidade desta camada.
 
 pub mod aviso;
+mod confirmacao_contratacao;
 mod missoes;
 mod olheiros;
 mod relatorios;
@@ -14,8 +15,8 @@ pub mod theme;
 
 use imgui::{Condition, FontId, StyleColor, StyleVar, Ui, WindowFlags};
 
-use super::state::{CarreiraStatus, ScoutState};
-use super::{Aba, Navigation};
+use super::state::{CarreiraStatus, Especializacao, ScoutState, Tier};
+use super::{Aba, Navigation, Satelite, ScoutScreen};
 use crate::save_repo::Date;
 use theme::Fonts;
 
@@ -39,6 +40,16 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     let tamanho = [largura_tela * FRACAO_LARGURA, altura_tela * FRACAO_ALTURA];
     let posicao = [(largura_tela - tamanho[0]) * 0.5, (altura_tela - tamanho[1]) * 0.5];
 
+    // A Confirmação de Contratação some se a contratação deixou de valer
+    // (ex.: carreira saiu de "pronta" com o modal aberto).
+    let mut confirmando = nav.tela_atual() == ScoutScreen::Satelite(Satelite::ConfirmacaoContratacao);
+    if confirmando && state.previa_contratacao().is_none() {
+        state.cancelar_contratacao();
+        nav.pop();
+        confirmando = false;
+    }
+    let mut pedido = None;
+
     ui.window("Central de Scout##painel")
         .position(posicao, Condition::Always)
         .size(tamanho, Condition::Always)
@@ -52,12 +63,41 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
                 | WindowFlags::NO_SCROLL_WITH_MOUSE,
         )
         .build(|| {
+            // Com o modal aberto o painel fica inerte e escurecido por baixo.
+            let desabilitado = ui.begin_disabled(confirmando);
             cabecalho(ui, fonts, state.status());
             ui.dummy([0.0, theme::ESPACO_2]);
             barra_de_abas(ui, fonts, nav, state);
             ui.dummy([0.0, theme::ESPACO_4]);
-            conteudo(ui, fonts, nav.aba_ativa(), state);
+            pedido = conteudo(ui, fonts, nav.aba_ativa(), state);
+            drop(desabilitado);
+            if confirmando {
+                let canto = ui.window_pos();
+                let [w, h] = ui.window_size();
+                ui.get_window_draw_list()
+                    .add_rect(canto, [canto[0] + w, canto[1] + h], theme::FUNDO_MODAL)
+                    .filled(true)
+                    .rounding(theme::RAIO_LG)
+                    .build();
+            }
         });
+
+    if let Some((especializacao, tier)) = pedido {
+        if !confirmando {
+            state.preparar_contratacao(especializacao, tier);
+            nav.push(Satelite::ConfirmacaoContratacao);
+        }
+    }
+    if confirmando {
+        match confirmacao_contratacao::render(ui, fonts, state) {
+            confirmacao_contratacao::Acao::Nenhuma => {}
+            confirmacao_contratacao::Acao::Contratou => nav.pop(),
+            confirmacao_contratacao::Acao::Cancelou => {
+                state.cancelar_contratacao();
+                nav.pop();
+            }
+        }
+    }
 }
 
 /// Empilha uma fonte do tema (se as fontes já foram carregadas).
@@ -128,9 +168,10 @@ fn barra_de_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: &m
 
 /// Área de conteúdo: um child window por aba, para cada aba guardar o
 /// próprio scroll (o ImGui mantém o estado por ID mesmo sem desenhar).
-fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, state: &mut ScoutState) {
+fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, state: &mut ScoutState) -> Option<(Especializacao, Tier)> {
     let status = state.status().clone();
     let id = format!("##conteudo_{:?}", aba);
+    let mut pedido = None;
     ui.child_window(id).size([0.0, 0.0]).border(false).build(|| match status {
         CarreiraStatus::Localizando => {
             mensagem(ui, fonts, MSG_LOCALIZANDO);
@@ -147,12 +188,13 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, state: &mut ScoutState) {
             }
         }
         CarreiraStatus::Pronta(_) => match aba {
-            Aba::Olheiros => olheiros::render(ui, fonts, state),
+            Aba::Olheiros => pedido = olheiros::render(ui, fonts, state),
             Aba::Missoes => missoes::render(ui, fonts),
             Aba::Relatorios => relatorios::render(ui, fonts),
             Aba::Sonar => sonar::render(ui, fonts),
         },
     });
+    pedido
 }
 
 fn mensagem(ui: &Ui, fonts: Option<&Fonts>, texto: &str) {

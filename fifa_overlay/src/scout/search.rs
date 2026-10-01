@@ -29,6 +29,9 @@ pub trait CareerSource: Send + Sync {
     fn read_snapshot(&self) -> Result<CareerSnapshot, SaveRepoError>;
     /// Dispara o sinal barato "parece haver carreira carregada?" (Story 1.7).
     fn start_career_probe(&self, task: &AsyncTask<bool>) -> bool;
+    /// Escreve o orçamento vivo se ele ainda for `anterior`; devolve o
+    /// valor relido (Story 1.5, ver `save_repo::write_transfer_budget`).
+    fn write_transfer_budget(&self, anterior: i32, novo: i32) -> Result<i32, SaveRepoError>;
 }
 
 /// Fonte real: o `save_repo` da Story 1.1.
@@ -41,6 +44,10 @@ impl CareerSource for SaveRepoSource {
 
     fn start_career_probe(&self, task: &AsyncTask<bool>) -> bool {
         save_repo::start_career_probe(task)
+    }
+
+    fn write_transfer_budget(&self, anterior: i32, novo: i32) -> Result<i32, SaveRepoError> {
+        save_repo::write_transfer_budget(anterior, novo)
     }
 
     fn read_snapshot(&self) -> Result<CareerSnapshot, SaveRepoError> {

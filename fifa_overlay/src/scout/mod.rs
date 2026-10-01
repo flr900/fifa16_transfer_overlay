@@ -65,7 +65,6 @@ pub enum Satelite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoutScreen {
     Aba(Aba),
-    #[allow(dead_code)]
     Satelite(Satelite),
 }
 
@@ -95,7 +94,6 @@ impl Navigation {
     }
 
     /// Tela no topo da pilha (a que está visível).
-    #[allow(dead_code)]
     pub fn tela_atual(&self) -> ScoutScreen {
         self.stack.last().copied().unwrap_or(ScoutScreen::Aba(Aba::Olheiros))
     }
@@ -112,7 +110,6 @@ impl Navigation {
     }
 
     /// Abre uma tela satélite. Recusa (com aviso) além de `MAX_SATELITES`.
-    #[allow(dead_code)]
     pub fn push(&mut self, satelite: Satelite) -> bool {
         if self.stack.len() > MAX_SATELITES {
             tracing::warn!(
@@ -128,7 +125,6 @@ impl Navigation {
     }
 
     /// Volta uma tela. Com só a aba na pilha, não faz nada.
-    #[allow(dead_code)]
     pub fn pop(&mut self) {
         if self.stack.len() > 1 {
             self.stack.pop();
@@ -182,6 +178,8 @@ impl Scout {
         } else {
             tracing::info!("[scout] Painel fechado.");
             self.nav.reset_para_aba();
+            // Fechar no meio da confirmação = cancelar (nada é debitado).
+            self.state.cancelar_contratacao();
         }
     }
 
@@ -302,6 +300,9 @@ mod tests {
         fn start_career_probe(&self, _task: &crate::async_task::AsyncTask<bool>) -> bool {
             false
         }
+        fn write_transfer_budget(&self, _anterior: i32, novo: i32) -> Result<i32, crate::save_repo::SaveRepoError> {
+            Ok(novo)
+        }
         fn read_snapshot(&self) -> Result<search::CareerSnapshot, crate::save_repo::SaveRepoError> {
             Ok(search::CareerSnapshot {
                 orcamento_transferencias: 1,
@@ -338,6 +339,21 @@ mod tests {
         assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
         abrir(&mut scout);
         assert_eq!(scout.nav.aba_ativa(), Aba::Sonar);
+    }
+
+    #[test]
+    fn closing_the_panel_during_a_hire_confirmation_cancels_it() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.atualizar_atalho(true);
+        scout.atualizar_atalho(false);
+        scout.state.preparar_contratacao(state::Especializacao::Generalista, state::Tier::Junior);
+        scout.nav.push(Satelite::ConfirmacaoContratacao);
+        assert!(scout.state.previa_contratacao().is_some());
+
+        scout.atualizar_atalho(true); // F10 fecha
+        assert!(!scout.painel_aberto());
+        assert_eq!(scout.state.previa_contratacao(), None);
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Olheiros));
     }
 
     #[test]

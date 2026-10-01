@@ -122,7 +122,6 @@ pub enum Tier {
 impl Tier {
     pub const TODOS: [Tier; 3] = [Tier::Junior, Tier::Experiente, Tier::Elite];
 
-    #[allow(dead_code)] // rótulo por extenso: modal de contratação (Story 1.5)
     pub fn nome(self) -> &'static str {
         match self {
             Tier::Junior => "Júnior",
@@ -157,6 +156,50 @@ pub struct OlheiroContratado {
     pub olheiro: Olheiro,
     /// Tem Missão ainda não concluída (AD-8): "Em Missão" em vez de "Disponível".
     pub em_missao: bool,
+}
+
+/// Contratação em andamento: o usuário clicou "Contratar" e o modal de
+/// confirmação está aberto (Story 1.5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Contratacao {
+    pub especializacao: Especializacao,
+    pub tier: Tier,
+    pub custo: i32,
+    /// Falha da última tentativa de confirmar (o modal mostra e oferece
+    /// tentar de novo). `None` = ainda não tentou.
+    pub erro: Option<ErroContratacao>,
+}
+
+/// O que o modal mostra, recalculado do orçamento vivo a cada frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviaContratacao {
+    pub contratacao: Contratacao,
+    pub orcamento_atual: i32,
+    pub orcamento_apos: i32,
+    /// Quanto falta (`None` = dá para pagar).
+    pub faltam: Option<i32>,
+}
+
+/// Por que a contratação não aconteceu. Em todos os casos NENHUM Olheiro
+/// foi salvo; só `OrcamentoDebitadoSemOlheiro` deixa o dinheiro gasto.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErroContratacao {
+    OrcamentoInsuficiente { faltam: i32 },
+    /// O jogo mexeu no orçamento entre o modal e a confirmação: nada
+    /// escrito; o modal já mostra o valor novo.
+    OrcamentoMudou { atual: i32 },
+    SemCarreira,
+    /// O arquivo de estado desta carreira não pode ser gravado: contratar
+    /// gastaria o dinheiro sem guardar o Olheiro.
+    EstadoNaoSalvavel,
+    /// A escrita do orçamento falhou ou a releitura não conferiu.
+    EscritaFalhou,
+    /// O orçamento foi debitado, mas gravar o Olheiro falhou; o débito
+    /// foi desfeito.
+    OlheiroNaoSalvo,
+    /// Gravar o Olheiro falhou E desfazer o débito também: o dinheiro
+    /// saiu. Caso raro, dito com todas as letras (nunca fingir sucesso).
+    OrcamentoDebitadoSemOlheiro { debitado: i32 },
 }
 
 /// As 12 ofertas na ordem da tela (Tier crescente, depois a ordem do PRD),
@@ -215,6 +258,8 @@ pub struct ScoutState {
     status: CarreiraStatus,
     /// Uma localização automática por abertura do painel (evita loop).
     localizacao_automatica_disponivel: bool,
+    /// Modal de confirmação de contratação aberto (Story 1.5).
+    contratacao: Option<Contratacao>,
     ultima_leitura: Option<Instant>,
     /// Pasta dos arquivos de estado (`None` = sem disco, só memória).
     diretorio_estado: Option<PathBuf>,
@@ -249,6 +294,7 @@ impl ScoutState {
             tarefa_localizar: AsyncTask::new(),
             status: CarreiraStatus::SemCarreira,
             localizacao_automatica_disponivel: false,
+            contratacao: None,
             ultima_leitura: None,
             diretorio_estado,
             estados: HashMap::new(),
@@ -465,6 +511,97 @@ impl ScoutState {
         })
     }
 
+    /// "Contratar" clicado: abre a confirmação para essa combinação.
+    pub fn preparar_contratacao(&mut self, especializacao: Especializacao, tier: Tier) {
+        let custo = quality::custo_contratacao(especializacao, tier);
+        self.contratacao = Some(Contratacao { especializacao, tier, custo, erro: None });
+    }
+
+    pub fn cancelar_contratacao(&mut self) {
+        self.contratacao = None;
+    }
+
+    /// Dados do modal, ou `None` se não há contratação aberta (ou a
+    /// carreira deixou de estar pronta — o modal deve fechar).
+    pub fn previa_contratacao(&self) -> Option<PreviaContratacao> {
+        let contratacao = self.contratacao.clone()?;
+        let orcamento_atual = self.orcamento()?;
+        let faltam = (orcamento_atual < contratacao.custo).then(|| contratacao.custo.saturating_sub(orcamento_atual));
+        Some(PreviaContratacao {
+            orcamento_apos: orcamento_atual.saturating_sub(contratacao.custo),
+            orcamento_atual,
+            faltam,
+            contratacao,
+        })
+    }
+
+    /// Botão confirmar do modal. `true` = contratado (o modal fecha); em
+    /// falha o erro fica em `Contratacao::erro` e o modal continua aberto.
+    pub fn confirmar_contratacao(&mut self) -> bool {
+        let Some(contratacao) = self.contratacao.clone() else {
+            return false;
+        };
+        match self.contratar(contratacao.especializacao, contratacao.tier, contratacao.custo) {
+            Ok(olheiro) => {
+                tracing::info!(
+                    "[scout::state] Olheiro contratado: {} {:?} ({}), id {}.",
+                    olheiro.especializacao.nome(),
+                    olheiro.tier,
+                    contratacao.custo,
+                    olheiro.id
+                );
+                self.contratacao = None;
+                // O cabeçalho mostra o saldo relido do jogo, não uma conta.
+                self.reler();
+                true
+            }
+            Err(erro) => {
+                tracing::warn!("[scout::state] Contratação não concluída: {erro:?}");
+                if matches!(erro, ErroContratacao::OrcamentoMudou { .. }) {
+                    self.reler();
+                }
+                if let Some(aberta) = self.contratacao.as_mut() {
+                    aberta.erro = Some(erro);
+                }
+                false
+            }
+        }
+    }
+
+    /// Debita (compare-and-write + releitura) e, só então, grava o
+    /// Olheiro write-through. Se gravar falhar, desfaz o débito: nenhum
+    /// caminho deixa um Olheiro salvo sem débito confirmado nem diz que
+    /// contratou sem ter contratado (AC da Story 1.5).
+    fn contratar(&mut self, especializacao: Especializacao, tier: Tier, custo: i32) -> Result<Olheiro, ErroContratacao> {
+        let anterior = self.orcamento().ok_or(ErroContratacao::SemCarreira)?;
+        if anterior < custo {
+            return Err(ErroContratacao::OrcamentoInsuficiente { faltam: custo.saturating_sub(anterior) });
+        }
+        let estado = self.estado_ativo().cloned().ok_or(ErroContratacao::SemCarreira)?;
+        if !estado.gravavel() {
+            return Err(ErroContratacao::EstadoNaoSalvavel);
+        }
+
+        let debitado = self.fonte.write_transfer_budget(anterior, anterior - custo).map_err(|err| match err {
+            SaveRepoError::OrcamentoMudou(atual) => ErroContratacao::OrcamentoMudou { atual },
+            _ => ErroContratacao::EscritaFalhou,
+        })?;
+
+        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao, tier };
+        let novo = olheiro.clone();
+        if let Err(err) = estado.mutar(move |dados| dados.olheiros.push(novo)) {
+            tracing::warn!("[scout::state] Olheiro não foi salvo ({err:?}); desfazendo o débito.");
+            return match self.fonte.write_transfer_budget(debitado, anterior) {
+                Ok(_) => Err(ErroContratacao::OlheiroNaoSalvo),
+                Err(err) => {
+                    tracing::warn!("[scout::state] Não deu para desfazer o débito: {err:?}");
+                    Err(ErroContratacao::OrcamentoDebitadoSemOlheiro { debitado: custo })
+                }
+            };
+        }
+        Ok(olheiro)
+    }
+
     /// Aba que a navegação deve assumir porque uma carreira acabou de
     /// ficar ativa (devolve uma vez só). Cliques em abas feitos antes da
     /// carreira ficar pronta não contam: vale a aba salva da carreira.
@@ -512,9 +649,23 @@ mod tests {
         localizacoes: Arc<AtomicUsize>,
         /// Resposta do sinal "há carreira carregada?", controlada pelo teste.
         sinal: Arc<Mutex<bool>>,
+        /// Resultados das próximas escritas de orçamento (vazio = sucesso).
+        resultados_escrita: Mutex<Vec<Result<i32, SaveRepoError>>>,
+        /// `(anterior, novo)` de cada escrita pedida.
+        escritas: Arc<Mutex<Vec<(i32, i32)>>>,
     }
 
     impl CareerSource for FonteFalsa {
+        fn write_transfer_budget(&self, anterior: i32, novo: i32) -> Result<i32, SaveRepoError> {
+            self.escritas.lock().unwrap_or_else(|p| p.into_inner()).push((anterior, novo));
+            let mut fila = self.resultados_escrita.lock().unwrap_or_else(|p| p.into_inner());
+            if fila.is_empty() {
+                Ok(novo)
+            } else {
+                fila.remove(0)
+            }
+        }
+
         fn start_career_probe(&self, task: &AsyncTask<bool>) -> bool {
             let aceso = *self.sinal.lock().unwrap_or_else(|p| p.into_inner());
             task.start(move || Ok(aceso))
@@ -580,8 +731,44 @@ mod tests {
             resultado_localizacao,
             localizacoes: Arc::clone(&localizacoes),
             sinal,
+            resultados_escrita: Mutex::new(Vec::new()),
+            escritas: Arc::new(Mutex::new(Vec::new())),
         };
         (ScoutState::com_fonte(Box::new(fonte), diretorio), localizacoes)
+    }
+
+    type Escritas = Arc<Mutex<Vec<(i32, i32)>>>;
+
+    /// Carreira pronta com `orcamento`; depois de contratar, a releitura
+    /// devolve `orcamento_depois`. Escritas seguem `resultados`.
+    fn estado_contratacao(
+        orcamento: i32,
+        orcamento_depois: i32,
+        diretorio: Option<PathBuf>,
+        resultados: Vec<Result<i32, SaveRepoError>>,
+    ) -> (ScoutState, Escritas) {
+        let antes = CareerSnapshot { orcamento_transferencias: orcamento, ..snapshot() };
+        let depois = CareerSnapshot { orcamento_transferencias: orcamento_depois, ..snapshot() };
+        let escritas: Escritas = Arc::new(Mutex::new(Vec::new()));
+        let fonte = FonteFalsa {
+            leituras: Mutex::new(vec![Ok(antes), Ok(depois)]),
+            resultado_localizacao: Ok(()),
+            localizacoes: Arc::new(AtomicUsize::new(0)),
+            sinal: Arc::new(Mutex::new(false)),
+            resultados_escrita: Mutex::new(resultados),
+            escritas: Arc::clone(&escritas),
+        };
+        let mut st = ScoutState::com_fonte(Box::new(fonte), diretorio);
+        st.ao_abrir_painel();
+        (st, escritas)
+    }
+
+    fn escritas_de(escritas: &Escritas) -> Vec<(i32, i32)> {
+        escritas.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn erro_da_contratacao(st: &ScoutState) -> Option<ErroContratacao> {
+        st.contratacao.as_ref().and_then(|c| c.erro.clone())
     }
 
     /// Força uma sondagem agora e trata a resposta (painel fechado).
@@ -937,5 +1124,108 @@ mod tests {
                 OlheiroContratado { olheiro: livre, em_missao: false },
             ]
         );
+    }
+
+    #[test]
+    fn hiring_debits_the_budget_then_saves_the_olheiro_and_shows_the_reread_balance() {
+        let pasta = PastaTemporaria::nova();
+        let (mut st, escritas) = estado_contratacao(63_999_988, 63_699_988, Some(pasta.0.clone()), vec![]);
+        st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+        let previa = st.previa_contratacao().expect("modal aberto");
+        assert_eq!(
+            (previa.contratacao.custo, previa.orcamento_atual, previa.orcamento_apos),
+            (300_000, 63_999_988, 63_699_988)
+        );
+        assert_eq!(previa.faltam, None);
+
+        assert!(st.confirmar_contratacao());
+        assert_eq!(escritas_de(&escritas), [(63_999_988, 63_699_988)]);
+        assert_eq!(st.previa_contratacao(), None, "modal fecha");
+        assert_eq!(st.orcamento(), Some(63_699_988), "saldo relido do jogo");
+        let contratados = st.olheiros_contratados();
+        assert_eq!(contratados.len(), 1);
+        let olheiro = &contratados[0].olheiro;
+        assert_eq!((olheiro.especializacao, olheiro.tier), (Especializacao::Generalista, Tier::Junior));
+        assert!(!contratados[0].em_missao, "Disponível");
+
+        // persistido (write-through) no arquivo da carreira
+        let bytes = std::fs::read(pasta.0.join(format!("{ID_A}.json"))).unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        assert_eq!(json["olheiros"][0]["id"], olheiro.id.to_string());
+        assert_eq!(json["olheiros"][0]["especializacao"], "generalista");
+    }
+
+    #[test]
+    fn insufficient_budget_never_writes() {
+        let pasta = PastaTemporaria::nova();
+        let (mut st, escritas) = estado_contratacao(100_000, 100_000, Some(pasta.0.clone()), vec![]);
+        st.preparar_contratacao(Especializacao::Tatico, Tier::Elite);
+        assert_eq!(st.previa_contratacao().and_then(|p| p.faltam), Some(5_100_000));
+        assert!(!st.confirmar_contratacao());
+        assert_eq!(erro_da_contratacao(&st), Some(ErroContratacao::OrcamentoInsuficiente { faltam: 5_100_000 }));
+        assert!(escritas_de(&escritas).is_empty());
+        assert!(st.olheiros_contratados().is_empty());
+    }
+
+    #[test]
+    fn failed_or_unconfirmed_writes_hire_nobody() {
+        for (resultado, esperado) in [
+            (Err(SaveRepoError::ProcessoInacessivel), ErroContratacao::EscritaFalhou),
+            (Err(SaveRepoError::Interno("releitura".into())), ErroContratacao::EscritaFalhou),
+            (Err(SaveRepoError::OrcamentoMudou(60_000_000)), ErroContratacao::OrcamentoMudou { atual: 60_000_000 }),
+        ] {
+            let pasta = PastaTemporaria::nova();
+            let (mut st, escritas) =
+                estado_contratacao(63_999_988, 63_999_988, Some(pasta.0.clone()), vec![resultado]);
+            st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+            assert!(!st.confirmar_contratacao());
+            assert_eq!(erro_da_contratacao(&st), Some(esperado));
+            assert_eq!(escritas_de(&escritas).len(), 1);
+            assert!(st.olheiros_contratados().is_empty(), "nenhum Olheiro salvo");
+            assert!(st.previa_contratacao().is_some(), "modal continua aberto para tentar de novo");
+        }
+    }
+
+    #[test]
+    fn without_a_writable_state_file_the_budget_is_not_touched() {
+        let (mut st, escritas) = estado_contratacao(63_999_988, 63_999_988, None, vec![]);
+        st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+        assert!(!st.confirmar_contratacao());
+        assert_eq!(erro_da_contratacao(&st), Some(ErroContratacao::EstadoNaoSalvavel));
+        assert!(escritas_de(&escritas).is_empty());
+    }
+
+    #[test]
+    fn if_saving_the_olheiro_fails_the_debit_is_undone() {
+        for (desfazer, esperado) in [
+            (Ok(63_999_988), ErroContratacao::OlheiroNaoSalvo),
+            (
+                Err(SaveRepoError::ProcessoInacessivel),
+                ErroContratacao::OrcamentoDebitadoSemOlheiro { debitado: 300_000 },
+            ),
+        ] {
+            let pasta = PastaTemporaria::nova();
+            let dir = pasta.0.join("scout");
+            let (mut st, escritas) =
+                estado_contratacao(63_999_988, 63_699_988, Some(dir.clone()), vec![Ok(63_699_988), desfazer]);
+            // a pasta de estado vira um arquivo: gravar o Olheiro falha
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::write(&dir, b"x");
+
+            st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+            assert!(!st.confirmar_contratacao());
+            assert_eq!(erro_da_contratacao(&st), Some(esperado));
+            assert_eq!(escritas_de(&escritas), [(63_999_988, 63_699_988), (63_699_988, 63_999_988)]);
+            assert!(st.olheiros_contratados().is_empty());
+        }
+    }
+
+    #[test]
+    fn cancelling_closes_the_preview_without_writing() {
+        let (mut st, escritas) = estado_contratacao(63_999_988, 63_999_988, None, vec![]);
+        st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+        st.cancelar_contratacao();
+        assert_eq!(st.previa_contratacao(), None);
+        assert!(escritas_de(&escritas).is_empty());
     }
 }

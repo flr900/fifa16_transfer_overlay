@@ -1373,6 +1373,21 @@ carregada"; data que VOLTA → outro save carregado → cache descartado).
 - Banner no canto superior direito (3 s): "Central de Scout ativa",
   "Carregando carreira…", "Carreira pronta", falha.
 
+## Sessão 10 — Stories 1.4 e 1.5: aba Olheiros e contratação (2026-10-01)
+
+- Aba Olheiros: as 12 combinações Especialização × Tier, com custos em
+  `scout::quality` (Júnior 0,3–0,5 M; Experiente 1,2–1,9 M; Elite 3,6–5,8 M).
+- **Primeira escrita real do overlay, confirmada até o save**:
+  `save_repo::write_transfer_budget(anterior, novo)` escreve os 4 bytes do
+  `transferbudget` na struct viva (só se o valor ainda for `anterior`) e
+  relê. Contratar um Caçador de Jovens Júnior: 45.955.973 → 45.555.973.
+  Depois de salvar no jogo, o `DATA` novo abre normal (checksum refeito
+  pelo jogo) e traz 45.555.973, com os outros 25 campos do `dqXv`
+  idênticos ao save anterior. A segunda cópia do orçamento (sessão 6) não
+  desfaz a escrita.
+- Ideias do Felipe para Olheiros pós-v1:
+  `_bmad-output/planning-artifacts/melhorias-futuras-olheiros.md`.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —

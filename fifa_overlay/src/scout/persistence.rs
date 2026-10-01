@@ -222,7 +222,6 @@ impl EstadoPersistido {
     }
 
     /// Aceita mutações (há um arquivo em disco por trás).
-    #[allow(dead_code)] // Story 1.5: não contratar se não der para salvar
     pub fn gravavel(&self) -> bool {
         self.caminho.is_some()
     }
