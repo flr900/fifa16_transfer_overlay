@@ -53,7 +53,7 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         .build(|| {
             cabecalho(ui, fonts, state.status());
             ui.dummy([0.0, theme::ESPACO_2]);
-            barra_de_abas(ui, fonts, nav);
+            barra_de_abas(ui, fonts, nav, state);
             ui.dummy([0.0, theme::ESPACO_4]);
             conteudo(ui, fonts, nav.aba_ativa(), state);
         });
@@ -99,7 +99,7 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, status: &CarreiraStatus) {
 /// 4 abas fixas: ativa em roxo sólido com texto escuro, inativas só com
 /// texto secundário (DESIGN.md → tab-bar). Botões próprios em vez do
 /// TabBar do ImGui porque ele não troca a cor do texto da aba ativa.
-fn barra_de_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation) {
+fn barra_de_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: &mut ScoutState) {
     com_fonte(ui, fonts.map(|f| f.heading), || {
         let _raio = ui.push_style_var(StyleVar::FrameRounding(theme::RAIO_MD));
         for (indice, aba) in Aba::TODAS.into_iter().enumerate() {
@@ -119,6 +119,7 @@ fn barra_de_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation) {
             let rotulo = format!("{}##aba", aba.rotulo());
             if ui.button_with_size(rotulo, [LARGURA_ABA, theme::ALVO_MINIMO + theme::ESPACO_1]) && !ativa {
                 nav.trocar_aba(aba);
+                state.definir_aba_ativa(aba);
             }
         }
     });

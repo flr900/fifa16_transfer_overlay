@@ -9,11 +9,13 @@
 //!   dentro de `render()`, com detecção de borda. Segurar a tecla alterna o
 //!   painel UMA vez, só na transição solta→pressionada.
 
+pub mod persistence;
 pub mod screens;
 pub mod search;
 pub mod state;
 
 use imgui::Ui;
+use serde::{Deserialize, Serialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VIRTUAL_KEY, VK_F10};
 
 use screens::theme::Fonts;
@@ -24,8 +26,10 @@ use state::ScoutState;
 /// Ctrl+Shift+P.
 const ATALHO_PAINEL: VIRTUAL_KEY = VK_F10;
 
-/// As 4 abas fixas, na ordem da barra de abas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// As 4 abas fixas, na ordem da barra de abas. Persistida em `ui_prefs`
+/// como `"olheiros"`, `"missoes"`, `"relatorios"`, `"sonar"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Aba {
     Olheiros,
     Missoes,
@@ -187,7 +191,19 @@ impl Scout {
             return;
         }
         self.state.tick();
+        self.aplicar_aba_restaurada();
         screens::render_painel(ui, fonts, &mut self.nav, &mut self.state);
+    }
+
+    /// Carreira acabou de ficar ativa: a navegação vai para a aba salva
+    /// dela (Story 1.3). Chamado logo após o `tick`, antes de desenhar.
+    fn aplicar_aba_restaurada(&mut self) {
+        if let Some(aba) = self.state.tomar_aba_restaurada() {
+            if aba != self.nav.aba_ativa() {
+                tracing::info!("[scout] Restaurando a aba salva da carreira: {aba:?}.");
+                self.nav.trocar_aba(aba);
+            }
+        }
     }
 }
 
@@ -270,6 +286,51 @@ mod tests {
         scout.atualizar_atalho(true);
         assert!(scout.painel_aberto());
         assert_eq!(scout.nav, Navigation::new(Aba::Sonar));
+    }
+
+    /// Carreira sempre pronta, sem varrer memória.
+    struct CarreiraFixa;
+
+    impl search::CareerSource for CarreiraFixa {
+        fn start_locating(&self, _task: &crate::async_task::AsyncTask<()>) -> bool {
+            false
+        }
+        fn read_snapshot(&self) -> Result<search::CareerSnapshot, crate::save_repo::SaveRepoError> {
+            Ok(search::CareerSnapshot {
+                orcamento_transferencias: 1,
+                data_atual: crate::save_repo::Date(20260703),
+                tecnico: "Senhor Manager".to_string(),
+                id_save: "ab".repeat(32),
+            })
+        }
+    }
+
+    #[test]
+    fn panel_reopens_on_the_tab_saved_for_the_career_after_a_restart() {
+        let pasta = persistence::tests::PastaTemporaria::nova();
+        let novo_scout = || Scout {
+            state: ScoutState::com_fonte(Box::new(CarreiraFixa), Some(pasta.0.clone())),
+            ..Scout::new()
+        };
+        let abrir = |scout: &mut Scout| {
+            scout.atualizar_atalho(false);
+            scout.atualizar_atalho(true);
+            scout.state.tick();
+            scout.aplicar_aba_restaurada();
+        };
+
+        let mut scout = novo_scout();
+        abrir(&mut scout);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
+        // o que a barra de abas faz no clique
+        scout.nav.trocar_aba(Aba::Sonar);
+        scout.state.definir_aba_ativa(Aba::Sonar);
+
+        // jogo reiniciado: Scout novo começa em Olheiros e vai para Sonar
+        let mut scout = novo_scout();
+        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
+        abrir(&mut scout);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Sonar);
     }
 
     #[test]

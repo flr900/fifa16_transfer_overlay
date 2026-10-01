@@ -16,6 +16,8 @@ pub struct CareerSnapshot {
     pub data_atual: Date,
     /// "Nome Sobrenome" do técnico (`mPrV`), para o jogador reconhecer a carreira.
     pub tecnico: String,
+    /// SHA-256 da identidade do save (AD-11): nome do arquivo de estado.
+    pub id_save: String,
 }
 
 /// De onde vem o estado da carreira. Em produção é o `save_repo`; nos
@@ -43,6 +45,7 @@ impl CareerSource for SaveRepoSource {
             tecnico: format!("{} {}", identidade.first_name, identidade.surname)
                 .trim()
                 .to_string(),
+            id_save: identidade.hash(),
         })
     }
 }
