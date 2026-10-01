@@ -4,7 +4,7 @@ baseline_commit: b90444a
 
 # Story 1.7: Start with the game and preload the career
 
-Status: review
+Status: done
 
 ## Story
 
@@ -14,7 +14,7 @@ so that I never run the injector by hand or wait in front of an empty panel.
 
 ## Acceptance Criteria
 
-1. **Given** I start my session with the launcher script instead of the FIFA Friends shortcut, **when** it runs, **then** it opens the FIFA Friends server (same target as the shortcut), waits for `fifa16.exe`, and injects the overlay once the game has loaded DirectX and shows a visible window, **and** it never injects twice into the same game process, waits again if the game is reopened, and exits when the FIFA Friends server closes.
+1. **Given** I start my session with the launcher script instead of the FIFA Friends shortcut, **when** it runs, **then** it opens the FIFA Friends server (same target as the shortcut), waits for `fifa16.exe`, and injects the overlay once the game has loaded DirectX and shows a visible window, **and** it never injects twice into the same game process, and it exits (closing its window) when the game closes, or when the FIFA Friends server closes before the game opens. *(Changed after merge, 2026-10-01: Felipe asked that nothing stays open after FIFA closes; shipped with Story 1.4.)*
 2. **Given** the overlay has just been injected, **when** the first frame renders, **then** a top-right banner shows "Central de Scout ativa" and disappears after 3 seconds, without taking mouse, keyboard or focus from the game.
 3. **Given** the panel is closed and I enter a career, **when** the overlay notices a career is loaded (cheap background check, never on the render thread — AD-4), **then** it locates the career by itself and the banner shows "Carregando carreira…" while it runs, then "Carreira pronta" with manager and date for 3 seconds, or a failure message with the F10 hint for 3 seconds, **and** a failed locate is not retried in a loop.
 4. **Given** the career was already located in the background, **when** I press F10, **then** the panel opens directly on the career's saved tab, with no "Localizando carreira…" wait.

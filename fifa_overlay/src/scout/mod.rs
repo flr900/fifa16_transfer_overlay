@@ -10,6 +10,7 @@
 //!   painel UMA vez, só na transição solta→pressionada.
 
 pub mod persistence;
+pub mod quality;
 pub mod screens;
 pub mod search;
 pub mod state;

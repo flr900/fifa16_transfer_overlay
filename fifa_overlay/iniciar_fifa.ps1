@@ -16,7 +16,8 @@
 #   3. deixa o injetor esperando o fifa16.exe: quando o jogo carregar o
 #      DirectX e mostrar a janela, injeta. O jogo mostra "Central de
 #      Scout ativa" no canto superior direito por 3 segundos.
-#   O injetor termina sozinho quando o servidor do FIFA Friends fechar.
+#   Quando o jogo fecha, o injetor termina e esta janela fecha junto (só
+#   fica aberta se algo der errado, para dar tempo de ler a mensagem).
 
 param(
     [string]$Atalho = (Join-Path ([Environment]::GetFolderPath("Desktop")) "FIFA FRIENDS PREMIUM!.lnk")
@@ -24,11 +25,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Janela elevada abre sem -NoExit: num erro, segura a mensagem na tela.
+trap {
+    Write-Host ""
+    Write-Host "Erro: $_" -ForegroundColor Red
+    Read-Host "Pressione Enter para fechar"
+    exit 1
+}
+
 $identidade = [Security.Principal.WindowsIdentity]::GetCurrent()
 $admin = (New-Object Security.Principal.WindowsPrincipal($identidade)).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) {
-    $argumentos = "-NoExit -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Atalho `"$Atalho`""
+    $argumentos = "-ExecutionPolicy Bypass -File `"$PSCommandPath`" -Atalho `"$Atalho`""
     Start-Process powershell.exe -Verb RunAs -ArgumentList $argumentos
     exit
 }
@@ -68,3 +77,6 @@ if ($servidor) {
 }
 
 & $injector --aguardar --enquanto-pid $servidor.Id $copia
+if ($LASTEXITCODE -ne 0) {
+    Read-Host "O injetor terminou com erro. Pressione Enter para fechar"
+}
