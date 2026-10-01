@@ -82,6 +82,8 @@ claude-opus-5-5
 
 ### Change Log
 
+- 2026-10-01 (after Epic 2, Felipe's feedback): only LB/RB switch tabs (D-pad/stick ←/→ always navigate inside the screen); the tab bar is out of gamepad navigation (`NO_NAV` child, mouse still clicks); opening the panel or changing tab/screen focuses the first item of the screen; in option groups (Olheiro, Modo de Busca, Duração, Tabular/Cards, Ativos/Arquivados) focus = choice; the Atributo dominante panel starts focused on the current choice. Build `2.10-v2`.
+
 - 2026-10-01: Story 1.6 implemented (XInput reading + game block hook, imgui gamepad/keyboard nav, L3+START/LB/RB/B, matching hover/focus outline).
 
 ### File List

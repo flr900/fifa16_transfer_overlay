@@ -9,11 +9,13 @@
 //!   dentro de `render()`, com detecção de borda. Segurar a tecla alterna o
 //!   painel UMA vez, só na transição solta→pressionada.
 //!
-//! Controle (Story 1.6): o mesmo vale para o combo `COMBO_PAINEL`. Com o
-//! painel aberto, LB/RB — e, numa aba sem tela satélite, também D-pad
-//! ←/→ — trocam de aba; B volta uma tela (fecha o modal; na raiz, fecha o
-//! painel); D-pad/analógico e A são a navegação do próprio ImGui
-//! (`gamepad::para_navegacao`). Enquanto o painel está aberto, e depois de fechar até
+//! Controle (Story 1.6, revisto em 2026-10-01): o mesmo vale para o combo
+//! `COMBO_PAINEL`. Com o painel aberto, só LB/RB trocam de aba (numa aba
+//! sem tela satélite); B volta uma tela (fecha o modal; na raiz, fecha o
+//! painel); D-pad/analógico (inclusive ←/→) e A são a navegação do
+//! próprio ImGui (`gamepad::para_navegacao`). A barra de abas não recebe
+//! foco do controle; ao abrir o painel, trocar de aba ou de tela, o foco
+//! vai para o primeiro item da tela (`Navigation::tomar_foco_pendente`). Enquanto o painel está aberto, e depois de fechar até
 //! todos os botões serem soltos, o jogo recebe o controle parado
 //! (`bloqueia_controle`, aplicado em `crate::gamepad`): sem isso o B ou o
 //! START que fechou o painel chegaria ao FIFA ao ser solto.
@@ -46,8 +48,6 @@ pub struct ComandosControle {
     pub aba_anterior: bool,
     pub proxima_aba: bool,
     pub voltar: bool,
-    pub esquerda: bool,
-    pub direita: bool,
 }
 
 pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> ComandosControle {
@@ -57,8 +57,6 @@ pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> Com
         aba_anterior: borda(botao::LB),
         proxima_aba: borda(botao::RB),
         voltar: borda(botao::B),
-        esquerda: borda(botao::DPAD_ESQUERDA),
-        direita: borda(botao::DPAD_DIREITA),
     }
 }
 
@@ -129,11 +127,25 @@ pub const MAX_SATELITES: usize = 2;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Navigation {
     stack: Vec<ScoutScreen>,
+    /// A tela visível mudou: o foco do controle vai para o primeiro item
+    /// dela no próximo frame (senão ficava "perdido" e só o analógico para
+    /// cima o trazia de volta — Felipe, 2026-10-01).
+    foco_pendente: bool,
 }
 
 impl Navigation {
     pub fn new(aba: Aba) -> Self {
-        Navigation { stack: vec![ScoutScreen::Aba(aba)] }
+        Navigation { stack: vec![ScoutScreen::Aba(aba)], foco_pendente: true }
+    }
+
+    /// Pede o foco no primeiro item da tela (ex.: o painel acabou de abrir).
+    pub fn pedir_foco(&mut self) {
+        self.foco_pendente = true;
+    }
+
+    /// Consome o pedido de foco (devolve se havia).
+    pub fn tomar_foco_pendente(&mut self) -> bool {
+        std::mem::take(&mut self.foco_pendente)
     }
 
     pub fn aba_ativa(&self) -> Aba {
@@ -158,6 +170,7 @@ impl Navigation {
     pub fn trocar_aba(&mut self, aba: Aba) {
         self.stack.clear();
         self.stack.push(ScoutScreen::Aba(aba));
+        self.foco_pendente = true;
     }
 
     /// Abre uma tela satélite. Recusa (com aviso) além de `MAX_SATELITES`.
@@ -172,6 +185,7 @@ impl Navigation {
             return false;
         }
         self.stack.push(ScoutScreen::Satelite(satelite));
+        self.foco_pendente = true;
         true
     }
 
@@ -179,6 +193,7 @@ impl Navigation {
     pub fn pop(&mut self) {
         if self.stack.len() > 1 {
             self.stack.pop();
+            self.foco_pendente = true;
         }
     }
 
@@ -191,6 +206,7 @@ impl Navigation {
     /// Ao fechar o painel: fica só a aba ativa.
     pub fn reset_para_aba(&mut self) {
         self.stack.truncate(1);
+        self.foco_pendente = true;
     }
 }
 
@@ -237,6 +253,7 @@ impl Scout {
         self.painel_aberto = !self.painel_aberto;
         if self.painel_aberto {
             tracing::info!("[scout] Painel aberto (aba {:?}).", self.nav.aba_ativa());
+            self.nav.pedir_foco();
             self.state.ao_abrir_painel();
         } else {
             tracing::info!("[scout] Painel fechado.");
@@ -270,10 +287,8 @@ impl Scout {
             self.alternar_painel();
         } else if self.painel_aberto {
             let na_raiz = self.nav.profundidade() == 1;
-            let anterior = comandos.aba_anterior || comandos.esquerda;
-            let proxima = comandos.proxima_aba || comandos.direita;
-            if na_raiz && (anterior || proxima) {
-                let passo = if proxima { 1 } else { -1 };
+            if na_raiz && (comandos.aba_anterior || comandos.proxima_aba) {
+                let passo = if comandos.proxima_aba { 1 } else { -1 };
                 let aba = self.nav.aba_ativa().vizinha(passo);
                 self.nav.trocar_aba(aba);
                 self.state.definir_aba_ativa(aba);
@@ -313,12 +328,6 @@ impl Scout {
     /// No `before_render`: sobe para a GPU os rostos já lidos (Story 2.6).
     pub fn enviar_minifaces(&self, carregar: &mut dyn FnMut(&crate::dds::Imagem, Option<imgui::TextureId>) -> Option<imgui::TextureId>) {
         self.state.minifaces().enviar(carregar);
-    }
-
-    /// Painel aberto numa aba, sem tela satélite: ←/→ do D-pad trocam de
-    /// aba em vez de navegar (`gamepad::para_navegacao`).
-    pub fn navegacao_na_raiz(&self) -> bool {
-        self.painel_aberto && self.nav.profundidade() == 1
     }
 
     /// O jogo deve receber o controle parado neste frame?
@@ -587,25 +596,29 @@ mod tests {
     }
 
     #[test]
-    fn dpad_left_right_switch_tabs_only_at_the_root() {
+    fn dpad_left_right_never_switch_tabs() {
         let mut scout = Scout::new();
         scout.aplicar_controle(controle(COMBO_PAINEL), false);
         scout.aplicar_controle(controle(0), false);
-        assert!(scout.navegacao_na_raiz());
         scout.aplicar_controle(controle(botao::DPAD_DIREITA), false);
-        assert_eq!(scout.nav.aba_ativa(), Aba::Missoes);
-        scout.aplicar_controle(controle(botao::DPAD_DIREITA), false);
-        assert_eq!(scout.nav.aba_ativa(), Aba::Missoes, "segurar troca uma vez só");
         scout.aplicar_controle(controle(0), false);
         scout.aplicar_controle(controle(botao::DPAD_ESQUERDA), false);
-        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros, "←/→ só navegam");
+    }
 
-        // num formulário/modal, ←/→ são navegação, não troca de aba
-        scout.aplicar_controle(controle(0), false);
-        scout.nav.push(Satelite::NovaMissao);
-        assert!(!scout.navegacao_na_raiz());
-        scout.aplicar_controle(controle(botao::DPAD_DIREITA), false);
-        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
+    #[test]
+    fn every_screen_change_asks_for_focus_on_its_first_item() {
+        let mut nav = Navigation::new(Aba::Olheiros);
+        assert!(nav.tomar_foco_pendente(), "primeira tela");
+        assert!(!nav.tomar_foco_pendente(), "uma vez só");
+        nav.trocar_aba(Aba::Missoes);
+        assert!(nav.tomar_foco_pendente());
+        nav.push(Satelite::NovaMissao);
+        assert!(nav.tomar_foco_pendente());
+        nav.pop();
+        assert!(nav.tomar_foco_pendente());
+        nav.pop();
+        assert!(!nav.tomar_foco_pendente(), "pop sem satélite não muda a tela");
     }
 
     #[test]

@@ -89,7 +89,11 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             ui.dummy([0.0, theme::ESPACO_2]);
             barra_de_abas(ui, fonts, nav, state);
             ui.dummy([0.0, theme::ESPACO_4]);
-            pedido = conteudo(ui, fonts, nav.aba_ativa(), nav.tela_atual(), state);
+            // Foco no primeiro item da tela nova (só com conteúdo de verdade
+            // na tela; com "Localizando…" o pedido espera).
+            let com_conteudo = matches!(state.status(), CarreiraStatus::Pronta(_) | CarreiraStatus::ErroLeitura);
+            let focar = !confirmando && com_conteudo && nav.tomar_foco_pendente();
+            pedido = conteudo(ui, fonts, nav.aba_ativa(), nav.tela_atual(), state, focar);
             drop(desabilitado);
             if confirmando {
                 let canto = ui.window_pos();
@@ -213,7 +217,20 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, status: &CarreiraStatus) {
 /// 4 abas fixas: ativa em roxo sólido com texto escuro, inativas só com
 /// texto secundário (DESIGN.md → tab-bar). Botões próprios em vez do
 /// TabBar do ImGui porque ele não troca a cor do texto da aba ativa.
+///
+/// A barra fica numa janela filha SEM navegação (`NO_NAV`): o controle
+/// troca de aba só com LB/RB e o foco nunca "sobe" para a barra — o mouse
+/// continua clicando nela normalmente.
 fn barra_de_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: &mut ScoutState) {
+    let altura = theme::ALVO_MINIMO + theme::ESPACO_1 + 6.0;
+    ui.child_window("##barra_de_abas")
+        .size([0.0, altura])
+        .border(false)
+        .flags(WindowFlags::NO_NAV | WindowFlags::NO_SCROLLBAR | WindowFlags::NO_SCROLL_WITH_MOUSE)
+        .build(|| botoes_das_abas(ui, fonts, nav, state));
+}
+
+fn botoes_das_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: &mut ScoutState) {
     com_fonte(ui, fonts.map(|f| f.heading), || {
         let _raio = ui.push_style_var(StyleVar::FrameRounding(theme::RAIO_MD));
         for (indice, aba) in Aba::TODAS.into_iter().enumerate() {
@@ -257,11 +274,33 @@ enum Pedido {
     FecharCampo,
 }
 
-fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState) -> Option<Pedido> {
+fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState, focar: bool) -> Option<Pedido> {
     let status = state.status().clone();
     let id = format!("##conteudo_{:?}", aba);
     let mut pedido = None;
-    ui.child_window(id).size([0.0, 0.0]).border(false).flags(flags_conteudo()).build(|| match status {
+    ui.child_window(id).size([0.0, 0.0]).border(false).flags(flags_conteudo()).build(|| {
+        if focar {
+            // O próximo item navegável desta tela recebe o foco (botões não
+            // são "clicados": só focados).
+            unsafe { imgui::sys::igSetKeyboardFocusHere(0) };
+        }
+        conteudo_da_tela(ui, fonts, aba, tela, state, &status, &mut pedido, focar);
+    });
+    pedido
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conteudo_da_tela(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    aba: Aba,
+    tela: ScoutScreen,
+    state: &mut ScoutState,
+    status: &CarreiraStatus,
+    pedido: &mut Option<Pedido>,
+    focar: bool,
+) {
+    match status.clone() {
         CarreiraStatus::Localizando => {
             mensagem(ui, fonts, MSG_LOCALIZANDO);
             com_fonte(ui, fonts.map(|f| f.meta), || {
@@ -285,43 +324,42 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::NovaMissao) => {
             match nova_missao::render(ui, fonts, state) {
                 nova_missao::Acao::Nenhuma => {}
-                nova_missao::Acao::AbrirCampo(satelite) => pedido = Some(Pedido::AbrirCampo(satelite)),
-                nova_missao::Acao::Confirmou | nova_missao::Acao::Cancelou => pedido = Some(Pedido::FecharNovaMissao),
+                nova_missao::Acao::AbrirCampo(satelite) => *pedido = Some(Pedido::AbrirCampo(satelite)),
+                nova_missao::Acao::Confirmou | nova_missao::Acao::Cancelou => *pedido = Some(Pedido::FecharNovaMissao),
             }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::SelecaoGeografica) => {
             if selecao_geografica::render(ui, fonts, state) {
-                pedido = Some(Pedido::FecharCampo);
+                *pedido = Some(Pedido::FecharCampo);
             }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::CampoAtributo) => {
-            if campo_atributo::render(ui, fonts, state) {
-                pedido = Some(Pedido::FecharCampo);
+            if campo_atributo::render(ui, fonts, state, focar) {
+                *pedido = Some(Pedido::FecharCampo);
             }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::Relatorio) => {
             if relatorio::render(ui, fonts, state) == relatorio::Acao::Voltar {
-                pedido = Some(Pedido::FecharRelatorio);
+                *pedido = Some(Pedido::FecharRelatorio);
             }
         }
         CarreiraStatus::Pronta(_) => match aba {
             Aba::Olheiros => {
-                pedido = olheiros::render(ui, fonts, state).map(|(e, t)| Pedido::Contratar(e, t));
+                *pedido = olheiros::render(ui, fonts, state).map(|(e, t)| Pedido::Contratar(e, t));
             }
             Aba::Missoes => match missoes::render(ui, fonts, state, true) {
-                missoes::Acao::NovaMissao => pedido = Some(Pedido::AbrirNovaMissao),
-                missoes::Acao::AbrirRelatorio(id) => pedido = Some(Pedido::AbrirRelatorio(id)),
+                missoes::Acao::NovaMissao => *pedido = Some(Pedido::AbrirNovaMissao),
+                missoes::Acao::AbrirRelatorio(id) => *pedido = Some(Pedido::AbrirRelatorio(id)),
                 missoes::Acao::Nenhuma => {}
             },
             Aba::Relatorios => {
                 if let Some(id) = relatorios::render(ui, fonts, state) {
-                    pedido = Some(Pedido::AbrirRelatorio(id));
+                    *pedido = Some(Pedido::AbrirRelatorio(id));
                 }
             }
             Aba::Sonar => sonar::render(ui, fonts),
         },
-    });
-    pedido
+    }
 }
 
 fn mensagem(ui: &Ui, fonts: Option<&Fonts>, texto: &str) {

@@ -349,25 +349,21 @@ pub fn eventos_imgui(estado: Option<EstadoControle>) -> Vec<(Key, bool, f32)> {
 /// valer como uma direção do D-pad na navegação.
 const LIMIAR_ANALOGICO_NAV: f32 = 0.5;
 
-/// Estado que vai para a NAVEGAÇÃO do ImGui (pedido do Felipe, 2026-10-01):
+/// Estado que vai para a NAVEGAÇÃO do ImGui (pedidos do Felipe, 2026-10-01):
 /// - o analógico esquerdo move o foco como o D-pad (no ImGui 1.89 ele só
 ///   rolaria a janela) e deixa de ser repassado como analógico, para não
 ///   rolar e mover ao mesmo tempo;
-/// - `na_raiz` (uma aba, sem tela satélite): ←/→ do D-pad trocam de aba
-///   (`scout`), então não vão para o ImGui; o analógico na horizontal
-///   também é ignorado ali. Em formulários e modais ←/→ navegam.
-pub fn para_navegacao(estado: EstadoControle, na_raiz: bool) -> EstadoControle {
+/// - ←/→ (D-pad ou analógico) navegam SEMPRE dentro da tela: trocar de
+///   aba é só LB/RB (`scout`).
+pub fn para_navegacao(estado: EstadoControle) -> EstadoControle {
     let mut botoes = estado.botoes;
     let x = normalizar_eixo(estado.lx, ZONA_MORTA_ANALOGICO);
     let y = normalizar_eixo(estado.ly, ZONA_MORTA_ANALOGICO);
     if y >= LIMIAR_ANALOGICO_NAV {
         botoes |= if estado.ly > 0 { botao::DPAD_CIMA } else { botao::DPAD_BAIXO };
     }
-    if x >= LIMIAR_ANALOGICO_NAV && !na_raiz {
+    if x >= LIMIAR_ANALOGICO_NAV {
         botoes |= if estado.lx > 0 { botao::DPAD_DIREITA } else { botao::DPAD_ESQUERDA };
-    }
-    if na_raiz {
-        botoes &= !(botao::DPAD_ESQUERDA | botao::DPAD_DIREITA);
     }
     EstadoControle { botoes, lx: 0, ly: 0, ..estado }
 }
@@ -414,22 +410,20 @@ mod tests {
     }
 
     #[test]
-    fn stick_moves_focus_like_the_dpad_and_root_keeps_left_right_for_tabs() {
+    fn stick_moves_focus_like_the_dpad_and_left_right_always_navigate() {
         let cima = EstadoControle { ly: 30_000, ..Default::default() };
-        assert_eq!(para_navegacao(cima, true).botoes, botao::DPAD_CIMA);
+        assert_eq!(para_navegacao(cima).botoes, botao::DPAD_CIMA);
         let baixo = EstadoControle { ly: -30_000, ..Default::default() };
-        assert_eq!(para_navegacao(baixo, false).botoes, botao::DPAD_BAIXO);
+        assert_eq!(para_navegacao(baixo).botoes, botao::DPAD_BAIXO);
         // pouco inclinado: nada
-        assert_eq!(para_navegacao(EstadoControle { ly: 12_000, ..Default::default() }, false).botoes, 0);
+        assert_eq!(para_navegacao(EstadoControle { ly: 12_000, ..Default::default() }).botoes, 0);
         // o analógico some (não rola a janela junto)
-        let convertido = para_navegacao(EstadoControle { lx: -30_000, ly: 30_000, ..Default::default() }, false);
+        let convertido = para_navegacao(EstadoControle { lx: -30_000, ly: 30_000, ..Default::default() });
         assert_eq!((convertido.lx, convertido.ly), (0, 0));
         assert_eq!(convertido.botoes, botao::DPAD_CIMA | botao::DPAD_ESQUERDA);
-
-        // na raiz, ←/→ (D-pad ou analógico) não vão para o ImGui
+        // ←/→ vão para o ImGui (trocar de aba é só LB/RB)
         let direita = EstadoControle { botoes: botao::DPAD_DIREITA | botao::A, lx: 30_000, ..Default::default() };
-        assert_eq!(para_navegacao(direita, true).botoes, botao::A);
-        assert_eq!(para_navegacao(direita, false).botoes, botao::DPAD_DIREITA | botao::A);
+        assert_eq!(para_navegacao(direita).botoes, botao::DPAD_DIREITA | botao::A);
     }
 
     #[test]

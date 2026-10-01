@@ -209,7 +209,9 @@ fn campo_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa:
     }
     for contratado in &previa.olheiros {
         let escolhido = previa.rascunho.olheiro_id == Some(contratado.olheiro.id);
-        if linha_olheiro(ui, fonts, contratado, escolhido) && !contratado.em_missao {
+        // clicar ou focar com o controle escolhe (foco = escolha)
+        let ativou = linha_olheiro(ui, fonts, contratado, escolhido);
+        if (ativou || componentes::focado_pelo_controle(ui)) && !escolhido && !contratado.em_missao {
             state.escolher_olheiro_da_missao(contratado.olheiro.id);
         }
     }
@@ -311,7 +313,8 @@ fn campo_modo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: Modo
             ui.same_line_with_spacing(0.0, theme::ESPACO_2);
         }
         let estilo = if opcao == modo { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
-        if componentes::botao_com_largura(ui, fonts, super::missoes::nome_modo(opcao), estilo, true, Some(LARGURA_MODO)) {
+        let clicou = componentes::botao_com_largura(ui, fonts, super::missoes::nome_modo(opcao), estilo, true, Some(LARGURA_MODO));
+        if (clicou || componentes::focado_pelo_controle(ui)) && opcao != modo {
             state.definir_modo_da_missao(opcao);
         }
     }
@@ -329,7 +332,8 @@ fn campo_duracao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, continu
             ui.same_line_with_spacing(0.0, theme::ESPACO_2);
         }
         let estilo = if valor == continua { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
-        if componentes::botao_com_largura(ui, fonts, nome, estilo, true, Some(LARGURA_MODO)) {
+        let clicou = componentes::botao_com_largura(ui, fonts, nome, estilo, true, Some(LARGURA_MODO));
+        if (clicou || componentes::focado_pelo_controle(ui)) && valor != continua {
             state.definir_continua_da_missao(valor);
         }
     }

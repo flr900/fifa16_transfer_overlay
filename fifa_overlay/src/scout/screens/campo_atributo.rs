@@ -47,7 +47,9 @@ pub const GRUPOS: [(&str, &[Atributo]); 7] = [
 ];
 
 /// Desenha o painel; `true` = voltar ao formulário (escolheu ou voltou).
-pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
+/// `focar`: a tela acabou de abrir — o foco começa na opção já escolhida
+/// (não no "Voltar"), para foco e escolha não ficarem em lugares diferentes.
+pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, focar: bool) -> bool {
     let Some(previa) = state.previa_missao() else {
         return true;
     };
@@ -69,6 +71,9 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
             );
         });
         ui.dummy([0.0, theme::ESPACO_2]);
+        if focar && atual.is_none() {
+            unsafe { imgui::sys::igSetKeyboardFocusHere(0) };
+        }
         if opcao(ui, fonts, "Qualquer um", atual.is_none()) {
             escolha = Some(None);
         }
@@ -78,6 +83,9 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
             for (indice, &a) in atributos.iter().enumerate() {
                 if indice > 0 {
                     ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+                }
+                if focar && atual == Some(a) {
+                    unsafe { imgui::sys::igSetKeyboardFocusHere(0) };
                 }
                 if opcao(ui, fonts, a.nome(), atual == Some(a)) {
                     escolha = Some(Some(a));

@@ -194,8 +194,15 @@ pub fn card_com_largura(ui: &Ui, chave: &str, largura: f32, altura: f32, borda_r
     Card { min, max, ativou }
 }
 
+/// O item anterior tem o foco do CONTROLE/teclado (não só o hover do
+/// mouse). Nos grupos de opção, foco = escolha: o foco nunca fica numa
+/// opção enquanto outra aparece escolhida (Felipe, 2026-10-01).
+pub fn focado_pelo_controle(ui: &Ui) -> bool {
+    ui.is_item_focused() && ui.io().nav_visible
+}
+
 /// Seletor de dois ou mais botões (ex.: Tabular / Cards): o escolhido em
-/// roxo. Devolve o índice clicado neste frame.
+/// roxo. Devolve o índice clicado — ou focado pelo controle — neste frame.
 pub fn alternador(ui: &Ui, fonts: Option<&Fonts>, opcoes: &[&str], escolhida: usize, largura: f32) -> Option<usize> {
     let mut clicada = None;
     for (indice, rotulo) in opcoes.iter().enumerate() {
@@ -203,7 +210,8 @@ pub fn alternador(ui: &Ui, fonts: Option<&Fonts>, opcoes: &[&str], escolhida: us
             ui.same_line_with_spacing(0.0, theme::ESPACO_1);
         }
         let estilo = if indice == escolhida { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
-        if botao_com_largura(ui, fonts, rotulo, estilo, true, Some(largura)) && indice != escolhida {
+        let clicou = botao_com_largura(ui, fonts, rotulo, estilo, true, Some(largura));
+        if (clicou || focado_pelo_controle(ui)) && indice != escolhida {
             clicada = Some(indice);
         }
     }
