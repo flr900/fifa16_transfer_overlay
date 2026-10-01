@@ -110,6 +110,9 @@ pub fn detalhe(item: &RelatorioNaLista) -> String {
     }
     if let Some(m) = &item.missao {
         partes.push(super::missoes::nome_modo(m.modo_busca).to_string());
+        if let Some(a) = m.filtros.atributo_dominante {
+            partes.push(format!("foco em {}", a.nome()));
+        }
     }
     if let Some(data) = r.gerado_em {
         partes.push(format!("gerado em {}", formatar_data(data)));

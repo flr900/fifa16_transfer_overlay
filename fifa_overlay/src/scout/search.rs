@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::quality;
-use super::state::{AtributoRevelado, JogadorEncontrado, Missao, Relatorio};
+use super::state::{Atributo, AtributoRevelado, JogadorEncontrado, Missao, Relatorio};
 use crate::async_task::AsyncTask;
 use crate::save_repo::{self, Date, PlayerPool, PlayerRaw, SaveRepoError};
 
@@ -116,6 +116,16 @@ pub fn passa_nos_filtros(missao: &Missao, pool: &PlayerPool, jogador: &PlayerRaw
     no_mercado
         && (filtros.overall.min..=filtros.overall.max).contains(&jogador.overall)
         && (filtros.potencial.min..=filtros.potencial.max).contains(&jogador.potencial)
+        && filtros.atributo_dominante.is_none_or(|a| tem_dominante(jogador, a))
+}
+
+/// O atributo está entre os maiores do jogador (Story 2.8)? Conta só os
+/// atributos da função dele: os de goleiro só para goleiros.
+pub fn tem_dominante(jogador: &PlayerRaw, atributo: Atributo) -> bool {
+    let goleiro = save_repo::funcao_da_posicao(jogador.posicao) == save_repo::Funcao::Goleiro;
+    let valores: Vec<(Atributo, u8)> =
+        Atributo::TODOS.iter().filter(|a| goleiro || !a.goleiro()).map(|&a| (a, jogador.atributo(a))).collect();
+    quality::eh_dominante(&valores, atributo)
 }
 
 /// Escolhe até `quantos` candidatos (fora de `excluir`) e revela cada um
@@ -134,7 +144,8 @@ pub fn escolher_jogadores(
         .iter()
         .filter(|j| !excluir.contains(&j.player_id) && passa_nos_filtros(missao, pool, j))
         .map(|j| {
-            let relevancia = quality::relevancia(missao.tipo, j.overall, j.potencial, None);
+            let dominante = missao.filtros.atributo_dominante.map(|a| j.atributo(a));
+            let relevancia = quality::relevancia(missao.tipo, j.overall, j.potencial, dominante);
             (quality::nota_de_escolha(relevancia, qualidade, quality::semente(id, j.player_id, 0)), j)
         })
         .collect();
@@ -150,7 +161,7 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
     let pid = jogador.player_id;
     let precisao = missao.estimativa.precisao_mais_menos;
     let funcao = save_repo::funcao_da_posicao(jogador.posicao);
-    let atributos = quality::ordem_de_observacao(funcao, None)
+    let atributos = quality::ordem_de_observacao(funcao, missao.filtros.atributo_dominante)
         .into_iter()
         .take(usize::from(missao.estimativa.atributos_revelados))
         .map(|atributo| {
@@ -268,5 +279,28 @@ pub mod tests {
         let fonte = include_str!("search.rs");
         let codigo = fonte.split("#[cfg(test)]").next().unwrap_or(fonte);
         assert!(codigo.contains("fonte.read_all_players()?"));
+    }
+
+    #[test]
+    fn the_dominant_attribute_filter_combines_with_the_ranges_and_ranks_by_it() {
+        let driblador = |id: u32, drible: u8, overall: u8| {
+            let mut j = jogador(id, overall, overall + 5, 24);
+            j.atributos = [50; TOTAL_ATRIBUTOS];
+            j.atributos[Atributo::Drible.indice()] = drible;
+            j
+        };
+        let mut defensor = jogador(9, 70, 75, 4);
+        defensor.atributos = [60; TOTAL_ATRIBUTOS];
+        defensor.atributos[Atributo::Marcacao.indice()] = 85;
+        defensor.atributos[Atributo::Drible.indice()] = 40;
+        let p = pool(vec![driblador(1, 80, 70), driblador(2, 92, 72), driblador(3, 95, 60), defensor]);
+        let mut m = missao_com((65, 80), (50, 99));
+        m.filtros.atributo_dominante = Some(Atributo::Drible);
+        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j)).map(|j| j.player_id).collect();
+        assert_eq!(ids, vec![1, 2], "o 3 sai pelo Overall, o 9 não dribla");
+        m.estimativa.qualidade = crate::scout::state::Qualidade::Alta;
+        let lista = escolher_jogadores(&m, &p, Date(20260801), &HashSet::new(), 2);
+        assert_eq!(lista.first().map(|j| j.player_id), Some(2), "o melhor driblador primeiro");
+        assert_eq!(lista[0].atributos.first().map(|a| a.atributo), Some(Atributo::Drible), "observado primeiro");
     }
 }

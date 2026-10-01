@@ -18,6 +18,7 @@ use super::componentes::{self, badge_qualidade, badge_tier, card, desenhar_badge
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar, olheiros};
 use crate::scout::quality::TipoMissao;
+use crate::scout::Satelite;
 use crate::scout::state::{
     BloqueioMissao, CampoFaixa, ErroCompra, FaixaAtributo, ModoBusca, OlheiroContratado, PreviaMissao, ScoutState,
 };
@@ -28,6 +29,7 @@ const ALTURA_OLHEIRO: f32 = 52.0;
 const LARGURA_VALOR: f32 = 44.0;
 const LARGURA_MODO: f32 = 150.0;
 const RAIO_RADIO: f32 = 7.0;
+const LARGURA_VALOR_CAMPO: f32 = 320.0;
 
 pub const MSG_SEM_OLHEIRO: &str = "Nenhum Olheiro disponível.";
 
@@ -37,6 +39,8 @@ pub enum Acao {
     Nenhuma,
     Confirmou,
     Cancelou,
+    /// Abrir um painel de campo (Atributo dominante, Filtro geográfico).
+    AbrirCampo(Satelite),
 }
 
 /// Rótulo do tipo de Missão derivado das faixas.
@@ -113,6 +117,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         return Acao::Cancelou;
     };
 
+    let mut campo = None;
     let altura_campos = (ui.content_region_avail()[1] - ALTURA_RODAPE).max(120.0);
     ui.child_window("##campos_nova_missao")
         .size([0.0, altura_campos])
@@ -135,10 +140,36 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 CampoFaixa::PotencialMax,
             );
             divisor(ui);
+            if campo_painel(ui, fonts, "Atributo dominante", &texto_atributo(previa.rascunho.filtros.atributo_dominante)) {
+                campo = Some(Satelite::CampoAtributo);
+            }
+            divisor(ui);
             campo_modo(ui, fonts, state, previa.rascunho.modo);
         });
 
-    rodape(ui, fonts, state, &previa)
+    match (rodape(ui, fonts, state, &previa), campo) {
+        (Acao::Nenhuma, Some(satelite)) => Acao::AbrirCampo(satelite),
+        (acao, _) => acao,
+    }
+}
+
+/// Valor da linha "Atributo dominante".
+pub fn texto_atributo(atributo: Option<crate::scout::state::Atributo>) -> String {
+    match atributo {
+        Some(a) => a.nome().to_string(),
+        None => "Qualquer um".to_string(),
+    }
+}
+
+/// Linha que abre um painel de campo em tela cheia (UX-DR11): rótulo à
+/// esquerda e um botão com o valor atual. `true` = ativada.
+fn campo_painel(ui: &Ui, fonts: Option<&Fonts>, nome: &str, valor: &str) -> bool {
+    let _id = ui.push_id(nome);
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, nome);
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let texto = format!("{valor}  ›");
+    componentes::botao_com_largura(ui, fonts, &texto, EstiloBotao::Secundario, true, Some(LARGURA_VALOR_CAMPO))
 }
 
 fn rotulo(ui: &Ui, fonts: Option<&Fonts>, texto: &str) {
@@ -273,6 +304,24 @@ fn campo_modo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: Modo
 
 /// Rodapé fixo: resumo ao vivo, motivo do bloqueio e os botões.
 fn rodape(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) -> Acao {
+    resumo(ui, fonts, previa);
+
+    let mut acao = Acao::Nenhuma;
+    let habilitado = previa.bloqueio.is_none();
+    let rotulo_confirmar = if previa.rascunho.erro.is_some() { "Tentar novamente" } else { "Confirmar Missão" };
+    if componentes::botao(ui, fonts, rotulo_confirmar, EstiloBotao::Primario, habilitado) && state.confirmar_nova_missao() {
+        acao = Acao::Confirmou;
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+    if componentes::botao(ui, fonts, "Cancelar", EstiloBotao::Secundario, true) {
+        acao = Acao::Cancelou;
+    }
+    acao
+}
+
+/// Resumo ao vivo (custo, prazo, Qualidade, tipo, aviso). Também aparece
+/// nos painéis de campo, que não têm os botões (UX-DR11).
+pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
     {
         let _c = ui.push_style_color(StyleColor::Separator, theme::BORDER_HAIRLINE);
         ui.separator();
@@ -328,19 +377,10 @@ fn rodape(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &Previ
         Some(texto) => com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::DANGER, texto)),
         None => ui.dummy([0.0, ui.text_line_height()]),
     }
-
-    let mut acao = Acao::Nenhuma;
-    let habilitado = previa.bloqueio.is_none();
-    let rotulo_confirmar = if previa.rascunho.erro.is_some() { "Tentar novamente" } else { "Confirmar Missão" };
-    if componentes::botao(ui, fonts, rotulo_confirmar, EstiloBotao::Primario, habilitado) && state.confirmar_nova_missao() {
-        acao = Acao::Confirmou;
-    }
-    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
-    if componentes::botao(ui, fonts, "Cancelar", EstiloBotao::Secundario, true) {
-        acao = Acao::Cancelou;
-    }
-    acao
 }
+
+/// Altura reservada para o resumo no rodapé de um painel de campo.
+pub const ALTURA_RESUMO: f32 = 120.0;
 
 #[cfg(test)]
 mod tests {

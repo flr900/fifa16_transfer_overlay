@@ -9,6 +9,7 @@ pub mod aviso;
 mod componentes;
 mod confirmacao_contratacao;
 mod missoes;
+mod campo_atributo;
 mod nova_missao;
 mod olheiros;
 mod relatorio;
@@ -51,12 +52,13 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         nav.pop();
         confirmando = false;
     }
-    // O formulário Nova Missão só existe com a tela dele no topo (trocar de
-    // aba descarta o rascunho) e fecha se a carreira deixar de estar pronta.
-    let na_nova_missao = nav.tela_atual() == ScoutScreen::Satelite(Satelite::NovaMissao);
+    // O formulário Nova Missão só existe com a tela dele na pilha (trocar de
+    // aba descarta o rascunho; um painel de campo fica por cima dele) e
+    // fecha se a carreira deixar de estar pronta.
+    let na_nova_missao = nav.contem(Satelite::NovaMissao);
     if na_nova_missao && state.previa_missao().is_none() {
         state.cancelar_nova_missao();
-        nav.pop();
+        nav.reset_para_aba();
     } else if !na_nova_missao && state.tem_nova_missao() {
         state.cancelar_nova_missao();
     }
@@ -109,8 +111,12 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         }
         Some(Pedido::FecharNovaMissao) => {
             state.cancelar_nova_missao();
-            nav.pop();
+            nav.reset_para_aba();
         }
+        Some(Pedido::AbrirCampo(satelite)) => {
+            nav.push(satelite);
+        }
+        Some(Pedido::FecharCampo) => nav.pop(),
         Some(Pedido::AbrirRelatorio(id)) => {
             state.abrir_relatorio(id);
             if state.relatorio_aberto().is_some() {
@@ -243,6 +249,10 @@ enum Pedido {
     FecharNovaMissao,
     AbrirRelatorio(uuid::Uuid),
     FecharRelatorio,
+    /// Abre um painel de campo do formulário (Story 2.8/2.9).
+    AbrirCampo(Satelite),
+    /// Escolheu (ou voltou) no painel de campo: volta ao formulário.
+    FecharCampo,
 }
 
 fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState) -> Option<Pedido> {
@@ -271,8 +281,15 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
             }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::NovaMissao) => {
-            if nova_missao::render(ui, fonts, state) != nova_missao::Acao::Nenhuma {
-                pedido = Some(Pedido::FecharNovaMissao);
+            match nova_missao::render(ui, fonts, state) {
+                nova_missao::Acao::Nenhuma => {}
+                nova_missao::Acao::AbrirCampo(satelite) => pedido = Some(Pedido::AbrirCampo(satelite)),
+                nova_missao::Acao::Confirmou | nova_missao::Acao::Cancelou => pedido = Some(Pedido::FecharNovaMissao),
+            }
+        }
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::CampoAtributo) => {
+            if campo_atributo::render(ui, fonts, state) {
+                pedido = Some(Pedido::FecharCampo);
             }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::Relatorio) => {

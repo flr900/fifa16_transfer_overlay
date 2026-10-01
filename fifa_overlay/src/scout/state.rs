@@ -254,13 +254,17 @@ impl FaixaAtributo {
     }
 }
 
-/// Filtros de uma Missão. A Story 2.2 traz Overall e Potencial; geografia
-/// (2.9), atributo dominante (2.8), Fit Posicional e Jogador de Referência
-/// (Épico 3) entram depois, com `#[serde(default)]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Filtros de uma Missão. A Story 2.2 traz Overall e Potencial; a 2.8, o
+/// atributo dominante; geografia (2.9), Fit Posicional e Jogador de
+/// Referência (Épico 3) entram com `#[serde(default)]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FiltrosMissao {
     pub overall: FaixaAtributo,
     pub potencial: FaixaAtributo,
+    /// "O melhor driblador": só entram jogadores que têm este atributo
+    /// entre os seus `quality::TOP_DOMINANTE` maiores (Story 2.8).
+    #[serde(default)]
+    pub atributo_dominante: Option<Atributo>,
 }
 
 impl Default for FiltrosMissao {
@@ -269,6 +273,7 @@ impl Default for FiltrosMissao {
         FiltrosMissao {
             overall: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
             potencial: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
+            atributo_dominante: None,
         }
     }
 }
@@ -998,6 +1003,15 @@ impl ScoutState {
         r.erro = None;
     }
 
+    /// Atributo dominante escolhido no painel de campo (Story 2.8);
+    /// `None` = sem esse filtro.
+    pub fn definir_atributo_da_missao(&mut self, atributo: Option<Atributo>) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.atributo_dominante = atributo;
+            r.erro = None;
+        }
+    }
+
     pub fn definir_modo_da_missao(&mut self, modo: ModoBusca) {
         if let Some(r) = self.rascunho_missao.as_mut() {
             r.modo = modo;
@@ -1018,7 +1032,11 @@ impl ScoutState {
             .olheiro_id
             .and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && !c.em_missao))
             .map(|c| c.olheiro.clone());
-        let tipo = quality::tipo_por_faixas(rascunho.filtros.overall, rascunho.filtros.potencial);
+        let tipo = quality::tipo_por_filtros(
+            rascunho.filtros.overall,
+            rascunho.filtros.potencial,
+            rascunho.filtros.atributo_dominante,
+        );
         let estimativa = escolhido.as_ref().map(|o| {
             quality::estimar_missao(&quality::PedidoMissao {
                 tier: o.tier,
@@ -1070,7 +1088,7 @@ impl ScoutState {
             status: StatusMissao::Pendente,
             criada_em: previa.data_atual,
             prazo_estimado: previa.data_atual.mais_dias(estimativa.duracao_dias),
-            filtros: previa.rascunho.filtros,
+            filtros: previa.rascunho.filtros.clone(),
             modo_busca: previa.rascunho.modo,
             tipo: previa.tipo,
             amplitude: quality::AmplitudeGeografica::Mundo,

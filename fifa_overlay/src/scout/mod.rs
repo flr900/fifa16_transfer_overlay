@@ -109,6 +109,8 @@ pub enum Satelite {
     FichaJogador,
     /// Relatório aberto (Story 2.5), a partir de Missões ou Relatórios.
     Relatorio,
+    /// Painel de campo "Atributo dominante" sobre o formulário (Story 2.8).
+    CampoAtributo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +180,12 @@ impl Navigation {
         if self.stack.len() > 1 {
             self.stack.pop();
         }
+    }
+
+    /// A tela satélite está em algum lugar da pilha (ex.: o formulário
+    /// Nova Missão por baixo de um painel de campo).
+    pub fn contem(&self, satelite: Satelite) -> bool {
+        self.stack.contains(&ScoutScreen::Satelite(satelite))
     }
 
     /// Ao fechar o painel: fica só a aba ativa.

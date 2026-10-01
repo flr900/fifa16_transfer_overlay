@@ -128,12 +128,15 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) -> bool {
     y += altura_nome + theme::ESPACO_1;
 
     // Linha 2: Modo · status · prazo.
-    let detalhe = format!(
+    let mut detalhe = format!(
         "{} · {} · prazo {}",
         nome_modo(missao.modo_busca),
         nome_status(missao.status, linha.progresso),
         formatar_data(missao.prazo_estimado)
     );
+    if let Some(a) = missao.filtros.atributo_dominante {
+        detalhe.push_str(&format!(" · foco em {}", a.nome()));
+    }
     let [_, altura_detalhe] = texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::TEXT_SECONDARY, &detalhe);
     y += altura_detalhe + theme::ESPACO_2;
 

@@ -80,7 +80,7 @@ pub enum TipoMissao {
 }
 
 impl TipoMissao {
-    #[allow(dead_code)] // Tática ainda não é derivada (Story 2.8); usado nos testes
+    #[allow(dead_code)] // usado nos testes
     pub const TODOS: [TipoMissao; 4] = [TipoMissao::Jovens, TipoMissao::Medalhoes, TipoMissao::Tatica, TipoMissao::Geral];
 }
 
@@ -276,6 +276,32 @@ pub fn tipo_por_faixas(overall: FaixaAtributo, potencial: FaixaAtributo) -> Tipo
     } else {
         TipoMissao::Geral
     }
+}
+
+/// Tipo da Missão a partir de todos os filtros (Story 2.8): pedir um
+/// atributo dominante ("o melhor driblador") é uma Missão **Tática** — a
+/// especialidade do Tático; sem ele, valem as faixas.
+pub fn tipo_por_filtros(overall: FaixaAtributo, potencial: FaixaAtributo, dominante: Option<Atributo>) -> TipoMissao {
+    match dominante {
+        Some(_) => TipoMissao::Tatica,
+        None => tipo_por_faixas(overall, potencial),
+    }
+}
+
+/// Um jogador "tem" um atributo dominante quando ele está entre os seus
+/// `TOP_DOMINANTE` maiores atributos (empates contam). Só o maior seria
+/// raro demais (muitos jogadores têm Velocidade ou Força no topo).
+pub const TOP_DOMINANTE: usize = 3;
+
+/// `valores`: os atributos do jogador que contam para a função dele (os de
+/// goleiro só para goleiros). Verdadeiro se `alvo` está no top
+/// `TOP_DOMINANTE` (empates incluídos).
+pub fn eh_dominante(valores: &[(Atributo, u8)], alvo: Atributo) -> bool {
+    let Some(&(_, valor_alvo)) = valores.iter().find(|(a, _)| *a == alvo) else {
+        return false;
+    };
+    let maiores = valores.iter().filter(|(_, v)| *v > valor_alvo).count();
+    maiores < TOP_DOMINANTE
 }
 
 /// A Especialização do Olheiro combina com o tipo da Missão (bônus de
@@ -659,5 +685,20 @@ mod tests {
         assert_eq!(relevancia(TipoMissao::Tatica, 70, 80, Some(91)), 91);
         assert_eq!(semente(9, 9, 9), semente(9, 9, 9));
         assert_ne!(semente(9, 9, 9), semente(9, 9, 8));
+    }
+
+    #[test]
+    fn a_dominant_attribute_makes_a_tactical_missao_and_counts_the_top_three() {
+        let faixa = |min, max| FaixaAtributo { min, max };
+        assert_eq!(tipo_por_filtros(faixa(50, 70), faixa(80, 99), Some(Atributo::Drible)), TipoMissao::Tatica);
+        assert_eq!(tipo_por_filtros(faixa(50, 70), faixa(80, 99), None), TipoMissao::Jovens);
+        assert!(combina(Especializacao::Tatico, TipoMissao::Tatica));
+        let valores = [(Atributo::Velocidade, 90), (Atributo::Drible, 88), (Atributo::Forca, 88), (Atributo::Finalizacao, 85), (Atributo::Marcacao, 40)];
+        assert!(eh_dominante(&valores, Atributo::Velocidade));
+        assert!(eh_dominante(&valores, Atributo::Drible));
+        assert!(eh_dominante(&valores, Atributo::Forca), "empate conta");
+        assert!(!eh_dominante(&valores, Atributo::Finalizacao), "4º maior");
+        assert!(!eh_dominante(&valores, Atributo::Marcacao));
+        assert!(!eh_dominante(&valores, Atributo::GkReflexos), "fora da função");
     }
 }
