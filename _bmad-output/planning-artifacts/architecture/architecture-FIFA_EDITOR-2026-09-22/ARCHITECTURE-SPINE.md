@@ -183,6 +183,8 @@ graph LR
 | serde_json | 1.0 — verificado 2026-09-22, atual 1.0.151 |
 | uuid (features `v4`, `serde`) | 1.26 — verificado 2026-09-22, atual 1.26.1 |
 | dirs | 7.0 — verificado 2026-09-22, atual 7.0.0 |
+| sha2 | 0.10 — adicionado na Story 1.1 (AD-11), resolvido 0.10.9 em 2026-09-30 |
+| windows (features extras) | `Win32_System_LibraryLoader`, `Win32_Storage_FileSystem` — Story 1.1, verificação da build via string `ProductVersion` do `fifa16.exe` (NFR4) |
 
 ## Structural Seed
 

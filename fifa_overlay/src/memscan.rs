@@ -41,7 +41,7 @@ use windows::Win32::System::Threading::GetCurrentProcess;
 /// Tamanho máximo de uma única região que aceitamos varrer (mesmo
 /// limite usado nas ferramentas Python anteriores, para evitar
 /// regiões monstruosas de allocator genérico).
-const MAX_REGION_SIZE: usize = 64 * 1024 * 1024;
+pub const MAX_REGION_SIZE: usize = 64 * 1024 * 1024;
 
 /// Assinatura de cabeçalho de database FIFA (t3db v8), a mesma usada
 /// em `fifa16_db_parser.py` (`DB_SIGNATURE`).
@@ -143,6 +143,35 @@ pub fn read_region_bytes(region: &Region) -> Option<Vec<u8>> {
 
     buffer.truncate(bytes_read);
     Some(buffer)
+}
+
+/// Como `read_region_bytes`, mas lê para dentro de `buffer` (que o
+/// chamador reutiliza entre regiões) e devolve quantos bytes leu. Evita
+/// espalhar cópias da memória do jogo pelo heap a cada região lida —
+/// cópias soltas viram falsos positivos em scans seguintes
+/// (`save_repo`, Story 1.1).
+pub fn read_region_into(region: &Region, buffer: &mut [u8]) -> Option<usize> {
+    let size = region.size.min(buffer.len());
+    if region.base == 0 || size == 0 {
+        return None;
+    }
+
+    let mut bytes_read: usize = 0;
+    let current_process: HANDLE = unsafe { GetCurrentProcess() };
+    let ok = unsafe {
+        ReadProcessMemory(
+            current_process,
+            region.base as *const _,
+            buffer.as_mut_ptr() as *mut _,
+            size,
+            Some(&mut bytes_read),
+        )
+    };
+
+    if ok.is_err() || bytes_read == 0 {
+        return None;
+    }
+    Some(bytes_read)
 }
 
 /// Escreve bytes num endereço arbitrário via `WriteProcessMemory`

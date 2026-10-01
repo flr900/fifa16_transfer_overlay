@@ -4,7 +4,7 @@ baseline_commit: b46ea7f9d7e632ebafe1156c7f9f3bd2047f3123
 
 # Story 1.1: Read career state and identify the active save
 
-Status: in-progress
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -25,32 +25,32 @@ so that every Scout feature works from the real state of my active save.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Spike — resolve field short names and prove which fields are LIVE in the blob (AC: #1, #3) — **do this first, it gates the design**
-  - [ ] 1.1 Resolve short names from `fifa_ng_db-meta.xml` (`D:\Program Files\FIFA 16\data\db\fifa_ng_db-meta.xml`; reader: `fifa16_db_parser.py::load_metadata`): tables `GJUr`, `mPrV`, `dqXv` (short names are the 4-char ids, e.g. CZUM playerid = `ykFq`) and fields `currdate`, `startdate`, `firstname`, `surname`, `clubteamid`, `transferbudget`. Record the table→field short-name map in a `const` block (Portuguese `//!` comment saying where each came from).
-  - [ ] 1.2 **Freshness test of the blob.** `PROJECT_MEMORY.md` ("blob ... snapshot somente-lido-uma-vez") says the heap copy of the DB is a disconnected snapshot for player attributes. Check whether `GJUr.currdate` and `dqXv.transferbudget` in the blob change after: (a) advancing the career a few days without saving; (b) spending/receiving transfer budget in game (or after the user's write in the session-4 technique). Record results.
-  - [ ] 1.3 **If the blob is stale for date and/or budget**, find the live location instead (session-4 technique: exact-value scan for the value shown on screen, e.g. `memscan::scan_for_i32_value`, stability check per the checklist at `PROJECT_MEMORY.md` "Lição geral sobre metodologia"; for date, scan `YYYYMMDD` as i32). Decide and document a strategy (live-scan per call? pointer/anchor? tolerate snapshot + explicit limitation?). Do NOT proceed to Task 3 without a documented decision; if no acceptable strategy exists, stop and report to Felipe (Stories 1.5, 2.2, 2.3 depend on it).
-  - [ ] 1.4 Check whether `mPrV.firstname`/`surname` are plain integers or Huffman-coded strings in the blob (`fifa_db.rs` only decodes `storage_type == 3` ints — see Dev Notes). If strings need Huffman decoding, either port the minimal decoder from `fifa16_db_parser.py` or propose a numeric-only identity (e.g. `startdate|clubteamid|<numeric manager id>`) — a deviation from AD-11 that Felipe must approve before it is used.
-  - [ ] 1.5 Append findings to `PROJECT_MEMORY.md` (new section "Sessão 6 — Story 1.1: leitura de estado da carreira") and to this story's Completion Notes.
-- [ ] Task 2: `async_task.rs` — generic `AsyncTask<T>` (AC: #6)
-  - [ ] 2.1 `enum TaskState<T> { Idle, Running, Done(T), Failed(SaveRepoError) }`; `AsyncTask<T>` wraps `Arc<Mutex<TaskState<T>>>` + `Arc<AtomicBool>`; `poll(&self) -> TaskState<T> where T: Clone` is non-destructive and idempotent; constructor spawns a `std::thread` (same pattern as `spawn_scan_thread` in `lib.rs:73`). `Failed` is a sibling of `Done`, never nested in `T` (AD-4).
-  - [ ] 2.2 A second `start` while `Running` must be a no-op (guard via the `AtomicBool`).
-  - [ ] 2.3 Unit tests with a fake closure: Idle→Running→Done, Failed path, `poll()` called twice returns the same `Done`, double-start ignored, poisoned mutex does not panic.
-- [ ] Task 3: `save_repo.rs` (AC: #1, #2, #4, #5, #6)
-  - [ ] 3.1 `SaveRepoError` enum with at least `TabelaNaoEncontrada`, `ProcessoInacessivel`, `CarreiraNaoCarregada` (derive `Debug, Clone, PartialEq`; `impl Display` in Portuguese user-safe text; no extra crate).
-  - [ ] 3.2 `Date(pub i32)` newtype (`#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]`), YYYYMMDD raw as read from `GJUr.currdate`. Serde derive comes in Story 1.3 (`#[serde(transparent)]`) — do not add serde here.
-  - [ ] 3.3 Locate step (runs in an `AsyncTask`): `memscan::find_databases_in_memory()` returns several blobs (~9 per PROJECT_MEMORY); choose the one that (a) has `GJUr` with `written_record_count >= 1` and (b) `CZUM` with a plausible record count (full DB ≈ 32k records, 38 tables). Cache `region_base + offset_in_region` and the parsed `TableDescriptor`s (not the 64 MB region bytes). No matching DB → `CarreiraNaoCarregada`.
-  - [ ] 3.4 Field reads: compute the absolute address with `fifa_db::locate_packed_field` (+ `region_base`), read only `byte_count` bytes via `memscan::read_region_bytes(&Region{..})`, decode with `fifa_db::read_packed_int`, apply the metadata `range_low` offset where the field has one (see the `+ 1` for strength/overall in `lib.rs:113-121`; `currdate` is raw YYYYMMDD per `fifa16_search.py:decode_yyyymmdd`). Before each read re-check the 8-byte `DB\0\x08...` signature at the cached start; on mismatch invalidate the cache and return a recoverable error so the caller can re-locate.
-  - [ ] 3.5 Public API: `read_current_date() -> Result<Date, SaveRepoError>`, `read_transfer_budget() -> Result<i32, SaveRepoError>`, `identify_active_save() -> Result<String, SaveRepoError>`, plus the `AsyncTask` entry point that primes the cache (e.g. `locate_career() -> AsyncTask<()>`). Leave `write_transfer_budget`, `read_squad_players`, `read_all_players` to later stories (1.5, 3.2/2.4).
-  - [ ] 3.6 Build check (AC #5): verify the FIFA build is `16.0.2904053` (e.g. `GetFileVersionInfo` on the main module, or module size/PE version); mismatch → log via `tracing::warn!("[save_repo] ...")` and return `TabelaNaoEncontrada`. If version info is not readable, treat as "unverified" and log, but do not block — document the choice.
-  - [ ] 3.7 `identify_active_save`: concatenate `startdate|firstname|surname|clubteamid` (or the approved numeric variant from Task 1.4) as UTF-8, SHA-256, lowercase hex. Add `sha2 = "0.10"` (**not in the Architecture Stack table — verify the current version with `cargo add sha2` and record it**) — hex formatting by hand, no `hex` crate.
-  - [ ] 3.8 All indexing through `.get(a..b)`; all errors via `Result`; logging `tracing::info!/warn!("[save_repo] ...")`; `//!` module comment in Portuguese explaining the why (incl. AD-2 "única porta para memscan/fifa_db").
-- [ ] Task 4: Wire into `lib.rs` for manual verification (AC: #1–#3, #6)
-  - [ ] 4.1 Add `mod async_task; mod save_repo;`. In the existing debug window add a small section "Carreira (save_repo)": a button "Localizar carreira" that starts the `AsyncTask`, shows Localizando…/erro, and, once located, shows currdate, transferbudget and the save hash each frame-cheaply (or on button "Reler"). This is scaffolding for verification; Story 1.2 replaces it with the real panel. Do not remove the existing test sections.
-  - [ ] 4.2 Never call a `save_repo` function that scans from inside `render()` (see `lib.rs` module comment lines 8–13).
-- [ ] Task 5: Tests and manual verification (AC: #1–#6)
-  - [ ] 5.1 Unit tests (pure logic, no process access): SHA-256 hex of a known vector; hash of a name with accents and reserved chars contains only `[0-9a-f]{64}`; `Date` ordering; packed-int decoding with a synthetic buffer (mirror `fifa16_db_parser.read_packed_int` cases, including a field not byte-aligned); error mapping (no DB found → `CarreiraNaoCarregada`).
-  - [ ] 5.2 Optional integration test marked `#[ignore]` that parses a real `DATA` file from `save_backups/` and checks `GJUr`/`dqXv`/`mPrV` reads and the hash (gives a repeatable oracle without the game).
-  - [ ] 5.3 Manual, on Windows with the game: (a) values in the debug window equal the game screens (date: career calendar; budget: Transferências screen); (b) AC #3 protocol — career A session 1, restart the game and reload career A (same hash), load career B (different hash); (c) menu with no career loaded → `CarreiraNaoCarregada`; (d) FPS stays smooth while the locate runs. Record every result in Completion Notes.
+- [x] Task 1: Spike — resolve field short names and prove which fields are LIVE in the blob (AC: #1, #3) — **do this first, it gates the design**
+  - [x] 1.1 Resolve short names from `fifa_ng_db-meta.xml` (`D:\Program Files\FIFA 16\data\db\fifa_ng_db-meta.xml`; reader: `fifa16_db_parser.py::load_metadata`): tables `GJUr`, `mPrV`, `dqXv` (short names are the 4-char ids, e.g. CZUM playerid = `ykFq`) and fields `currdate`, `startdate`, `firstname`, `surname`, `clubteamid`, `transferbudget`. Record the table→field short-name map in a `const` block (Portuguese `//!` comment saying where each came from).
+  - [x] 1.2 **Freshness test of the blob.** `PROJECT_MEMORY.md` ("blob ... snapshot somente-lido-uma-vez") says the heap copy of the DB is a disconnected snapshot for player attributes. Check whether `GJUr.currdate` and `dqXv.transferbudget` in the blob change after: (a) advancing the career a few days without saving; (b) spending/receiving transfer budget in game (or after the user's write in the session-4 technique). Record results.
+  - [x] 1.3 **If the blob is stale for date and/or budget**, find the live location instead (session-4 technique: exact-value scan for the value shown on screen, e.g. `memscan::scan_for_i32_value`, stability check per the checklist at `PROJECT_MEMORY.md` "Lição geral sobre metodologia"; for date, scan `YYYYMMDD` as i32). Decide and document a strategy (live-scan per call? pointer/anchor? tolerate snapshot + explicit limitation?). Do NOT proceed to Task 3 without a documented decision; if no acceptable strategy exists, stop and report to Felipe (Stories 1.5, 2.2, 2.3 depend on it).
+  - [x] 1.4 Check whether `mPrV.firstname`/`surname` are plain integers or Huffman-coded strings in the blob (`fifa_db.rs` only decodes `storage_type == 3` ints — see Dev Notes). If strings need Huffman decoding, either port the minimal decoder from `fifa16_db_parser.py` or propose a numeric-only identity (e.g. `startdate|clubteamid|<numeric manager id>`) — a deviation from AD-11 that Felipe must approve before it is used.
+  - [x] 1.5 Append findings to `PROJECT_MEMORY.md` (new section "Sessão 6 — Story 1.1: leitura de estado da carreira") and to this story's Completion Notes.
+- [x] Task 2: `async_task.rs` — generic `AsyncTask<T>` (AC: #6)
+  - [x] 2.1 `enum TaskState<T> { Idle, Running, Done(T), Failed(SaveRepoError) }`; `AsyncTask<T>` wraps `Arc<Mutex<TaskState<T>>>` + `Arc<AtomicBool>`; `poll(&self) -> TaskState<T> where T: Clone` is non-destructive and idempotent; constructor spawns a `std::thread` (same pattern as `spawn_scan_thread` in `lib.rs:73`). `Failed` is a sibling of `Done`, never nested in `T` (AD-4).
+  - [x] 2.2 A second `start` while `Running` must be a no-op (guard via the `AtomicBool`).
+  - [x] 2.3 Unit tests with a fake closure: Idle→Running→Done, Failed path, `poll()` called twice returns the same `Done`, double-start ignored, poisoned mutex does not panic.
+- [x] Task 3: `save_repo.rs` (AC: #1, #2, #4, #5, #6)
+  - [x] 3.1 `SaveRepoError` enum with at least `TabelaNaoEncontrada`, `ProcessoInacessivel`, `CarreiraNaoCarregada` (derive `Debug, Clone, PartialEq`; `impl Display` in Portuguese user-safe text; no extra crate).
+  - [x] 3.2 `Date(pub i32)` newtype (`#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]`), YYYYMMDD raw as read from `GJUr.currdate`. Serde derive comes in Story 1.3 (`#[serde(transparent)]`) — do not add serde here.
+  - [x] 3.3 **(SUBSTITUÍDO — ver Completion Notes: o blob do heap não é fonte viva; a localização agora é por assinatura de temporada)** Locate step (runs in an `AsyncTask`): `memscan::find_databases_in_memory()` returns several blobs (~9 per PROJECT_MEMORY); choose the one that (a) has `GJUr` with `written_record_count >= 1` and (b) `CZUM` with a plausible record count (full DB ≈ 32k records, 38 tables). Cache `region_base + offset_in_region` and the parsed `TableDescriptor`s (not the 64 MB region bytes). No matching DB → `CarreiraNaoCarregada`.
+  - [x] 3.4 **(vale para a leitura dos saves no disco; os valores vivos vêm da struct de finanças)** Field reads: compute the absolute address with `fifa_db::locate_packed_field` (+ `region_base`), read only `byte_count` bytes via `memscan::read_region_bytes(&Region{..})`, decode with `fifa_db::read_packed_int`, apply the metadata `range_low` offset where the field has one (see the `+ 1` for strength/overall in `lib.rs:113-121`; `currdate` is raw YYYYMMDD per `fifa16_search.py:decode_yyyymmdd`). Before each read re-check the 8-byte `DB\0\x08...` signature at the cached start; on mismatch invalidate the cache and return a recoverable error so the caller can re-locate.
+  - [x] 3.5 Public API: `read_current_date() -> Result<Date, SaveRepoError>`, `read_transfer_budget() -> Result<i32, SaveRepoError>`, `identify_active_save() -> Result<String, SaveRepoError>`, plus the `AsyncTask` entry point that primes the cache (e.g. `locate_career() -> AsyncTask<()>`). Leave `write_transfer_budget`, `read_squad_players`, `read_all_players` to later stories (1.5, 3.2/2.4).
+  - [x] 3.6 Build check (AC #5): verify the FIFA build is `16.0.2904053` (e.g. `GetFileVersionInfo` on the main module, or module size/PE version); mismatch → log via `tracing::warn!("[save_repo] ...")` and return `TabelaNaoEncontrada`. If version info is not readable, treat as "unverified" and log, but do not block — document the choice.
+  - [x] 3.7 `identify_active_save`: concatenate `startdate|firstname|surname|clubteamid` (or the approved numeric variant from Task 1.4) as UTF-8, SHA-256, lowercase hex. Add `sha2 = "0.10"` (**not in the Architecture Stack table — verify the current version with `cargo add sha2` and record it**) — hex formatting by hand, no `hex` crate.
+  - [x] 3.8 All indexing through `.get(a..b)`; all errors via `Result`; logging `tracing::info!/warn!("[save_repo] ...")`; `//!` module comment in Portuguese explaining the why (incl. AD-2 "única porta para memscan/fifa_db").
+- [x] Task 4: Wire into `lib.rs` for manual verification (AC: #1–#3, #6)
+  - [x] 4.1 Add `mod async_task; mod save_repo;`. In the existing debug window add a small section "Carreira (save_repo)": a button "Localizar carreira" that starts the `AsyncTask`, shows Localizando…/erro, and, once located, shows currdate, transferbudget and the save hash each frame-cheaply (or on button "Reler"). This is scaffolding for verification; Story 1.2 replaces it with the real panel. Do not remove the existing test sections.
+  - [x] 4.2 Never call a `save_repo` function that scans from inside `render()` (see `lib.rs` module comment lines 8–13).
+- [x] Task 5: Tests and manual verification (AC: #1–#6)
+  - [x] 5.1 Unit tests (pure logic, no process access): SHA-256 hex of a known vector; hash of a name with accents and reserved chars contains only `[0-9a-f]{64}`; `Date` ordering; packed-int decoding with a synthetic buffer (mirror `fifa16_db_parser.read_packed_int` cases, including a field not byte-aligned); error mapping (no DB found → `CarreiraNaoCarregada`).
+  - [x] 5.2 Optional integration test marked `#[ignore]` that parses a real `DATA` file from `save_backups/` and checks `GJUr`/`dqXv`/`mPrV` reads and the hash (gives a repeatable oracle without the game).
+  - [x] 5.3 **(a)–(d) feitos — ver Completion Notes** Manual, on Windows with the game: (a) values in the debug window equal the game screens (date: career calendar; budget: Transferências screen); (b) AC #3 protocol — career A session 1, restart the game and reload career A (same hash), load career B (different hash); (c) menu with no career loaded → `CarreiraNaoCarregada`; (d) FPS stays smooth while the locate runs. Record every result in Completion Notes.
 
 ## Dev Notes
 
@@ -123,44 +123,64 @@ If a tiny helper in `fifa_db.rs` (e.g. a signature re-check or a metadata `range
 
 ### Agent Model Used
 
-claude-sonnet-5-5
+claude-sonnet-5-5 (rascunho no Mac); claude-opus-5-5 (verificação no Windows)
 
 ### Debug Log References
 
-- No Rust toolchain on the dev Mac (Darwin arm64): **nothing below has been compiled or run.** The crate is Windows-only (hudhook DX11 + Win32 APIs).
+- 2026-09-30 (Windows, Rust 1.98.1 msvc): `cargo build --release` OK; `cargo test` → 38 passed, 0 failed (build final `s6-v10`).
+- Log do overlay: `%TEMP%\fifa_overlay.log` (testes com o jogo: builds s6 → s6-v9, ver `PROJECT_MEMORY.md` "Sessão 6").
+- `python tools/resolve_short_names.py` → short names abaixo.
+- Oráculo: `fifa16_db_parser.py` sobre `save_backups/*/DATA` e os saves atuais em `Documents\FIFA 16`.
 
 ### Completion Notes List
 
-**Code written, UNVERIFIED (no task is checked on purpose):**
-- Task 2 (`src/async_task.rs`): `AsyncTask<T>`/`TaskState<T>` per AD-4, panic-safe, with 6 unit tests. Pure logic; should compile and pass on Windows.
-- Task 3 (`src/save_repo.rs`): `SaveRepoError` (+ `NaoLocalizado`, `Interno`), `Date`, locate via `AsyncTask`, signature re-validation, `read_current_date`, `read_transfer_budget`, `identify_active_save`, `hash_identity` (SHA-256), build check, 10 unit tests.
-  - **Field short names are `????` placeholders** (`save_repo::fields`). Reads return `TabelaNaoEncontrada` until filled. Run `python tools/resolve_short_names.py` on the Windows machine and paste its output. The test `all_field_short_names_are_resolved` is deliberately red until then.
-  - `EXPECTED_FILE_VERSION` is `None`: the build check only logs the observed version (AC #5 is not enforced yet). Fill it from the log, then mismatches are refused.
-  - `read_main_module_file_version` uses `GetFileVersionInfo*`/`VerQueryValueW` from memory of the windows 0.62 API; the most likely place for a compile error (e.g. the `dwhandle` parameter type).
-  - `sha2 = "0.10"` was added without checking the current release; run `cargo add sha2` / `cargo update` and record the version.
-- Task 4 (`src/lib.rs`): "Carreira (save_repo)" section in the debug window: locate button, status, "Reler valores" showing date, budget and hash.
-- `memscan::DB_SIGNATURE` made `pub` (only change to existing modules besides `lib.rs` wiring).
-- `Cargo.toml`: added `sha2`, windows features `Win32_System_LibraryLoader`, `Win32_Storage_FileSystem`.
-- New helper `tools/resolve_short_names.py` prints the field consts and all `mPrV` fields.
+**Verificado offline nesta sessão (Windows, sem o jogo aberto):**
+- Task 1.1: short names resolvidos e colados em `save_repo::fields` — `GJUr.currdate=aLZZ`, `GJUr.startdate=vHhZ` (19 bits, `rangelow=20080101`), `mPrV.firstname=HdeP`, `mPrV.surname=rREd`, `mPrV.clubteamid=NTyS` (`rangelow=-1`), `dqXv.transferbudget=SnDr` (31 bits).
+- Task 1.4: `firstname`/`surname` são **strings fixas inline** (storage_type 0, 32 bytes, `\0` no fim), não Huffman → AD-11 sem desvio. `save_repo` ganhou `read_string`.
+- **Bug corrigido:** `is_career_db` exigia `GJUr` e `CZUM` no mesmo blob, mas no save são databases separadas (carreira: 34 tabelas; jogadores: 38). A localização sempre devolveria `CarreiraNaoCarregada`. Agora exige `GJUr` + `mPrV` + `dqXv`.
+- **AC #5 (build):** `FileVersion` fixo do `fifa16.exe` = `1.0.0.0`, `ProductVersion` fixo = `16.0.0.0`; só a string `ProductVersion` traz `16.0.2904053`. Trocado para comparar essa string (`EXPECTED_PRODUCT_VERSION`); testado contra o exe instalado. Divergência → `TabelaNaoEncontrada`; ilegível → só loga (decisão: não bloquear por recurso de versão ilegível).
+- Leitura refatorada sobre um `ByteSource` (memória do processo em produção, buffer nos testes): o mesmo código de leitura é testado contra 3 `DATA` reais (data, orçamento, identidade).
+- AC #3 offline: `717036e3` e `705c22c4` (mesma carreira, `currdate` 20351102 vs 20351206) → mesmo hash; `7a096416` (`20350721|Felipe|Careca|73`) → hash diferente. `GJUr.startdate` é estável entre saves da mesma carreira.
+- `sha2` resolvido 0.10.9; Stack do Architecture Spine atualizado.
+- Debug window: mostra também a identidade legível (`startdate|nome|sobrenome|clube`) além do hash.
 
-**Still to do on Windows with the game (Task 1 spike gates everything else):**
-1. Task 1.1: run the script, paste consts.
-2. Task 1.2/1.3: freshness test of `currdate` and `transferbudget` in the blob; decide the read strategy (not designed yet; `save_repo` currently assumes the blob is live).
-3. Task 1.4: check whether manager names are ints or Huffman strings (`read_raw` fails with an explicit message if not int).
-4. Task 1.5: write findings into `PROJECT_MEMORY.md`.
-5. Task 5.3 manual checks (AC #1, #3, #4, #6) and `cargo test`.
+**Verificado com o jogo aberto (2026-09-30, carreiras "teste" e Felipe Careca):**
+- Task 1.2 — **o blob de carreira do heap NÃO é fonte viva**: é o buffer do último load/save (orçamento alterado em jogo não apareceu nele) e some depois de um save. Mesma natureza do blob `CZUM`.
+- Task 1.3 — estratégia decidida com o Felipe ("sondar struct viva", opção 1):
+  - **Orçamento**: a struct viva de `dqXv` está no heap como i32 contíguos (`wagebudget` −4, `transferbudget` 0, início de temporada +20/+24/+28); achada com a sonda (`save_repo::start_live_probe`) e confirmada pelo Felipe no Cheat Engine. `locate()` lê os saves recentes em `Documents\FIFA 16`, procura o trio de início de temporada na memória e lê orçamento/salário vivos (revalidando a assinatura a cada leitura). A identidade vem do save cuja assinatura está viva (escolhido pela memória, não por `mtime`).
+  - **Data**: fica num ponto fixo do bloco de memória do jogo (região + `0x373E08`, reservas +`0x1D2BD4`/+`0x1D3114`), achada por scan de valor ao longo de vários dias (CE e DLL). Validada pela janela da temporada (`enddate` − 366 dias). Logo após carregar o save o campo fica no dia anterior até o primeiro dia ser processado → devolvemos a data do save.
+  - **Carreira ativa**: structs de carreiras carregadas antes ficam como restos na memória; vence a struct cuja temporada contém a data viva (teste "teste" → Careca: escolheu Careca corretamente).
+  - **Sem carreira (menu)**: a posição principal da data também fica com resto da última carreira, mas as duas listas de eventos zeram → a data viva só vale com 2 das 3 posições concordando; sem carreira confirmada → `CarreiraNaoCarregada` (sem queda para o save mais recente). Toda leitura revalida (menu → "carreira não carregada"; data que volta → cache descartado).
+- Bug corrigido: a varredura achava a assinatura na **própria memória da DLL** (lista de saves); agora exclui lista, pilha e um buffer único de leitura, e zera as cópias.
+- AC #1: orçamento de transferência, salário e data batem com as telas e acompanham mudanças (Reler sem relocalizar). AC #5: build `16.0.2904053` verificada no jogo. AC #3: "teste" em sessões diferentes → mesma identidade `20260717|Senhor|Manager|243`; Careca `20280715|Felipe|Careca|234` → outra.
+- Ferramentas de diagnóstico mantidas na janela de debug: sonda de estado vivo; scan de valor agora loga endereços + vizinhança (≤ 50 candidatos). Log reduzido para INFO.
+
+**Limitações conhecidas:**
+- Duas carreiras na MESMA temporada não são distinguíveis pela data → vence o save mais recente.
+- Recarregar o MESMO save na mesma data pode deixar o cache no resto da carga anterior → relocalizar resolve (Story 1.2 deve relocalizar ao abrir o painel ou oferecer o botão).
+- Se a temporada virar e o jogo não tiver salvo depois, a assinatura do disco não existe na memória → `CarreiraNaoCarregada` até salvar.
+- Offsets da data são empíricos (FIFA 16 `16.0.2904053`); plano B documentado: pointer scan do CE.
+- Injeção: o eject do hudhook crashou o jogo 1×; a v7 crashou 2× via `fifa_overlay/inject_dev.ps1` e carregou pelo injetor direto (causa não identificada).
+
+**Task 5.3 (com o jogo, s6-v10):** (a) orçamento/salário/data = telas, acompanham sem relocalizar; (b) identidade estável entre sessões, outra carreira → outro hash; (c) menu principal → `CarreiraNaoCarregada`; (d) localização (~15 s em background) não engasga o jogo.
 
 ### Change Log
 
 - 2026-09-30: Added `async_task.rs`, `save_repo.rs`, lib.rs debug wiring, Cargo deps, `tools/resolve_short_names.py` (unverified, see notes).
+- 2026-09-30 (Windows): compilado e testado; short names preenchidos; strings inline; correção de `is_career_db`; build check via string `ProductVersion`; `ByteSource` + testes de oráculo com saves reais; docs atualizadas.
+- 2026-09-30 (com o jogo): blob do heap descartado como fonte viva; sonda de estado vivo; localização por assinatura de temporada (orçamento/salário vivos); exclusão da memória da própria DLL; data viva por offset da região, validada pela temporada; carreira ativa escolhida pela data viva; `inject_dev.ps1`; log em INFO.
+- 2026-09-30 (s6-v10): data viva confirmada por 2 das 3 posições; menu → `CarreiraNaoCarregada`; leituras revalidam a carreira a cada chamada. Story → review.
 
 ### File List
 
 - fifa_overlay/src/async_task.rs (new)
 - fifa_overlay/src/save_repo.rs (new)
 - fifa_overlay/src/lib.rs (modified)
-- fifa_overlay/src/memscan.rs (modified: `DB_SIGNATURE` pub)
+- fifa_overlay/src/memscan.rs (modified: `DB_SIGNATURE` e `MAX_REGION_SIZE` pub; novo `read_region_into`)
+- fifa_overlay/inject_dev.ps1 (new)
 - fifa_overlay/Cargo.toml (modified)
 - tools/resolve_short_names.py (new)
 - _bmad-output/planning-artifacts/epics.md (modified: Story 1.1/1.2/2.4 ACs)
 - _bmad-output/implementation-artifacts/sprint-status.yaml (modified)
+- _bmad-output/planning-artifacts/architecture/architecture-FIFA_EDITOR-2026-09-22/ARCHITECTURE-SPINE.md (modified: Stack)
+- PROJECT_MEMORY.md (modified: Sessão 6)

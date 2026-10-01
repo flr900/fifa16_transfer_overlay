@@ -29,6 +29,10 @@ mod save_repo;
 
 use async_task::{AsyncTask, TaskState};
 
+/// Mostrado na janela e no log para saber QUAL DLL está carregada no jogo
+/// (já houve confusão entre cópias injetadas).
+const BUILD_TAG: &str = "s6-v10 — sem carreira no menu; data confirmada por 2 posições";
+
 /// Playerid usado como alvo de teste nesta fase de prova de conceito
 /// (Ibrahim Mbaye, já validado em sessões anteriores). No futuro isso
 /// vira configurável/dinâmico (jogador selecionado na UI do jogo).
@@ -47,7 +51,9 @@ fn setup_tracing() {
                 .with_file(true)
                 .with_line_number(true),
         )
-        .with(EnvFilter::new("trace"))
+        // "info": o TRACE do hudhook gravava uma linha por frame (log de
+        // dezenas de MB, I/O a cada frame) sem ajudar a depurar nada nosso.
+        .with(EnvFilter::new("info"))
         .try_init();
 }
 
@@ -250,6 +256,27 @@ fn spawn_value_scan_thread(
             addresses.len(),
             elapsed_ms
         );
+        // Com poucos candidatos, registra endereço + vizinhança (i32 de
+        // -64 a +64 bytes) para descobrir o layout da struct no log.
+        if addresses.len() <= 50 {
+            for addr in &addresses {
+                let start = addr.saturating_sub(64);
+                let context = memscan::read_region_bytes(&memscan::Region { base: start, size: 132 })
+                    .map(|bytes| {
+                        bytes
+                            .chunks_exact(4)
+                            .enumerate()
+                            .map(|(i, c)| {
+                                let v = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                                format!("{:+}:{}", i as isize * 4 - 64, v)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_else(|| "(ilegível)".to_string());
+                tracing::info!("[value-scan-thread] 0x{:X} contexto ±64: {}", addr, context);
+            }
+        }
 
         if let Ok(mut guard) = state.lock() {
             *guard = ValueScanState::Done { addresses, elapsed_ms };
@@ -273,12 +300,15 @@ pub struct FifaOverlay {
     /// verificação manual; a Story 1.2 troca isto pelo painel real.
     career_task: AsyncTask<()>,
     career_lines: Vec<String>,
+    /// Sonda de estado vivo (Story 1.1, Task 1.3) — diagnóstico.
+    probe_task: AsyncTask<Vec<String>>,
+    probe_input: String,
 }
 
 impl FifaOverlay {
     fn new() -> Self {
         setup_tracing();
-        tracing::info!("FifaOverlay::new() — DLL injetada com sucesso, overlay inicializando.");
+        tracing::info!("FifaOverlay::new() — DLL injetada com sucesso, overlay inicializando ({BUILD_TAG}).");
         Self {
             frame_count: 0,
             scan_state: Arc::new(Mutex::new(ScanState::Idle)),
@@ -292,6 +322,10 @@ impl FifaOverlay {
             write_test_result: None,
             career_task: AsyncTask::new(),
             career_lines: Vec::new(),
+            probe_task: AsyncTask::new(),
+            // orçamento atual, salário, data, data crua (-20080101),
+            // valores de início de temporada do save "teste"
+            probe_input: String::from("67000000, 634615, 20260701, 180600, 74000000, 4650000, 4150000"),
         }
     }
 
@@ -301,17 +335,24 @@ impl FifaOverlay {
     fn refresh_career_lines(&mut self) {
         let mut lines = Vec::new();
         lines.push(match save_repo::read_current_date() {
-            Ok(date) => format!("Data da carreira: {}", date.0),
+            Ok(date) => format!("Data (viva): {}", date.0),
             Err(err) => format!("Data: {err}"),
         });
         lines.push(match save_repo::read_transfer_budget() {
-            Ok(budget) => format!("Orçamento de transferência: {budget}"),
+            Ok(budget) => format!("Orçamento de transferência (vivo): {budget}"),
             Err(err) => format!("Orçamento: {err}"),
         });
-        lines.push(match save_repo::identify_active_save() {
-            Ok(hash) => format!("Hash do save: {hash}"),
-            Err(err) => format!("Hash do save: {err}"),
+        lines.push(match save_repo::read_wage_budget() {
+            Ok(wage) => format!("Orçamento de salários (vivo): {wage}"),
+            Err(err) => format!("Salários: {err}"),
         });
+        match save_repo::read_career_identity() {
+            Ok(identity) => {
+                lines.push(format!("Identidade: {}", identity.joined()));
+                lines.push(format!("Hash do save: {}", identity.hash()));
+            }
+            Err(err) => lines.push(format!("Identidade: {err}")),
+        }
         self.career_lines = lines;
     }
 
@@ -395,6 +436,7 @@ impl ImguiRenderLoop for FifaOverlay {
             .always_vertical_scrollbar(true)
             .build(|| {
                 ui.text("Overlay funcionando!");
+                ui.text(format!("Versão: {BUILD_TAG}"));
                 ui.separator();
                 ui.text(format!("Frames renderizados: {}", self.frame_count));
                 ui.spacing();
@@ -431,6 +473,31 @@ impl ImguiRenderLoop for FifaOverlay {
                             self.refresh_career_lines();
                         }
                         for line in &self.career_lines {
+                            ui.text(line);
+                        }
+                    }
+                }
+
+                ui.spacing();
+                ui.text("Sonda de estado vivo (1º valor = orçamento atual)");
+                ui.input_text("Valores", &mut self.probe_input).build();
+                let probe_state = self.probe_task.poll();
+                let probe_running = matches!(probe_state, TaskState::Running);
+                let probe_label = if probe_running { "Sondando... (background)" } else { "Sondar" };
+                if ui.button(probe_label) && !probe_running {
+                    match save_repo::parse_probe_values(&self.probe_input) {
+                        Some((anchor, neighbors)) => {
+                            save_repo::start_live_probe(&self.probe_task, anchor, neighbors);
+                        }
+                        None => tracing::warn!("[save_repo] [sonda] Valores inválidos: {:?}", self.probe_input),
+                    }
+                }
+                match &probe_state {
+                    TaskState::Idle => ui.text("(sonda não executada)"),
+                    TaskState::Running => ui.text("Sondando a memória, aguarde..."),
+                    TaskState::Failed(err) => ui.text_colored([1.0, 0.4, 0.4, 1.0], format!("{err}")),
+                    TaskState::Done(lines) => {
+                        for line in lines {
                             ui.text(line);
                         }
                     }
