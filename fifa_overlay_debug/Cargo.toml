@@ -1,10 +1,10 @@
 [package]
-name = "fifa_overlay"
+name = "fifa_overlay_debug"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "fifa_overlay"
+name = "fifa_overlay_debug"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -26,7 +26,6 @@ features = [
   "Win32_System_ProcessStatus",
   "Win32_System_LibraryLoader",
   "Win32_Storage_FileSystem",
-  "Win32_UI_Input_KeyboardAndMouse",
 ]
 
 [profile.release]

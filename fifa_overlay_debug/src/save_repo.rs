@@ -952,7 +952,6 @@ impl CareerIdentity {
         )
     }
 
-    #[allow(dead_code)] // nome do arquivo de estado por save (Story 1.3)
     pub fn hash(&self) -> String {
         hash_identity(&self.joined())
     }
@@ -973,7 +972,6 @@ pub fn read_transfer_budget() -> Result<i32, SaveRepoError> {
 }
 
 /// `dqXv.wagebudget` VIVO (vizinho do orçamento na mesma struct).
-#[allow(dead_code)] // API do repositório; ainda sem tela que mostre
 pub fn read_wage_budget() -> Result<i32, SaveRepoError> {
     with_live(|live| live_finances(live, &ProcessMemory).map(|(_, wage)| wage))
 }
@@ -1049,20 +1047,160 @@ pub fn read_career_identity() -> Result<CareerIdentity, SaveRepoError> {
 
 /// SHA-256 (hex minúsculo) de `startdate|firstname|surname|clubteamid`
 /// (AD-11) — nome do arquivo de estado do Scout para esta carreira.
-#[allow(dead_code)] // Story 1.3 (persistência por save, AD-11)
 pub fn identify_active_save() -> Result<String, SaveRepoError> {
     read_career_identity().map(|identity| identity.hash())
 }
 
-/// i32 little-endian em `bytes[pos..pos+4]`, sem panic.
+// ---------------------------------------------------------------------
+// Sonda de estado vivo (Story 1.1, Task 1.3 — diagnóstico temporário)
+// ---------------------------------------------------------------------
+//
+// O blob de carreira no heap é só o buffer do último load/save (teste
+// de 2026-09-30, ver `PROJECT_MEMORY.md` "Sessão 6"). A fonte viva do
+// orçamento é achável por scan de valor exato (sessão 4). A pergunta
+// desta sonda: em volta de cada ocorrência do orçamento ATUAL existem
+// outros valores da carreira (orçamento de salário, data...)? Se sim,
+// é uma struct viva localizável por vários valores ao mesmo tempo.
+
+/// Distância máxima (bytes, para cada lado) olhada em volta da âncora.
+pub const PROBE_WINDOW: usize = 1024;
+/// Limite de ocorrências da âncora detalhadas no log.
+const PROBE_MAX_LOGGED_HITS: usize = 300;
+
+/// Uma ocorrência da âncora e os vizinhos encontrados perto dela.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeHit {
+    pub address: usize,
+    pub region_base: usize,
+    /// `(valor, deslocamento em bytes relativo à âncora)`
+    pub neighbors: Vec<(i32, isize)>,
+    /// i32 alinhados de -64..+64 bytes em volta da âncora (para o log).
+    pub context: Vec<(isize, i32)>,
+}
+
+impl ProbeHit {
+    /// Quantos valores DISTINTOS da lista de vizinhos apareceram.
+    pub fn distinct_neighbors(&self) -> usize {
+        let mut values: Vec<i32> = self.neighbors.iter().map(|(v, _)| *v).collect();
+        values.sort_unstable();
+        values.dedup();
+        values.len()
+    }
+}
+
 fn i32_at(bytes: &[u8], pos: usize) -> Option<i32> {
     let chunk: [u8; 4] = bytes.get(pos..pos.checked_add(4)?)?.try_into().ok()?;
     Some(i32::from_le_bytes(chunk))
 }
 
+/// Parte pura da sonda: procura `anchor` (i32 alinhado) em `bytes`
+/// (cópia de uma região que começa em `base`) e, em volta de cada
+/// ocorrência, os valores de `neighbors` (também alinhados a 4).
+pub fn probe_buffer(bytes: &[u8], base: usize, anchor: i32, neighbors: &[i32], window: usize) -> Vec<ProbeHit> {
+    let needle = anchor.to_le_bytes();
+    let mut hits = Vec::new();
+    let mut pos = 0usize;
+    while pos.saturating_add(4) <= bytes.len() {
+        if bytes.get(pos..pos + 4) == Some(&needle[..]) {
+            let lo = pos.saturating_sub(window) & !3;
+            let hi = pos.saturating_add(window).min(bytes.len());
+            let mut found = Vec::new();
+            let mut p = lo;
+            while p.saturating_add(4) <= hi {
+                if p != pos {
+                    if let Some(v) = i32_at(bytes, p) {
+                        if neighbors.contains(&v) {
+                            found.push((v, p as isize - pos as isize));
+                        }
+                    }
+                }
+                p += 4;
+            }
+            let mut context = Vec::new();
+            let mut c = pos.saturating_sub(64) & !3;
+            while c <= pos.saturating_add(64) {
+                if let Some(v) = i32_at(bytes, c) {
+                    context.push((c as isize - pos as isize, v));
+                }
+                c += 4;
+            }
+            hits.push(ProbeHit {
+                address: base.saturating_add(pos),
+                region_base: base,
+                neighbors: found,
+                context,
+            });
+        }
+        pos += 4;
+    }
+    hits
+}
+
+/// Interpreta `"67000000, 634615, 20260701"`: o primeiro valor é a
+/// âncora (orçamento atual), o resto são os vizinhos procurados.
+pub fn parse_probe_values(input: &str) -> Option<(i32, Vec<i32>)> {
+    let mut values = Vec::new();
+    for part in input.split(|c: char| c == ',' || c == ';' || c.is_whitespace()) {
+        let cleaned: String = part.chars().filter(|c| c.is_ascii_digit() || *c == '-').collect();
+        if cleaned.is_empty() {
+            continue;
+        }
+        values.push(cleaned.parse::<i32>().ok()?);
+    }
+    let (anchor, rest) = values.split_first()?;
+    Some((*anchor, rest.to_vec()))
+}
+
+/// Roda a sonda na memória inteira (via `AsyncTask` — é um scan
+/// completo, AD-4). O resultado são linhas de resumo para a UI; o
+/// detalhe vai para o log com a tag `[save_repo] [sonda]`.
+pub fn start_live_probe(task: &AsyncTask<Vec<String>>, anchor: i32, neighbors: Vec<i32>) -> bool {
+    task.start(move || {
+        tracing::info!(
+            "[save_repo] [sonda] Âncora {} | vizinhos {:?} | janela ±{} bytes",
+            anchor,
+            neighbors,
+            PROBE_WINDOW
+        );
+        let mut hits = Vec::new();
+        for region in memscan::enumerate_private_committed_regions() {
+            let Some(bytes) = memscan::read_region_bytes(&region) else {
+                continue;
+            };
+            hits.extend(probe_buffer(&bytes, region.base, anchor, &neighbors, PROBE_WINDOW));
+        }
+        hits.sort_by(|a, b| b.distinct_neighbors().cmp(&a.distinct_neighbors()));
+
+        tracing::info!("[save_repo] [sonda] {} ocorrência(s) da âncora.", hits.len());
+        for (i, hit) in hits.iter().take(PROBE_MAX_LOGGED_HITS).enumerate() {
+            tracing::info!(
+                "[save_repo] [sonda] #{i} 0x{:X} (região 0x{:X}) vizinhos distintos={} {:?}",
+                hit.address,
+                hit.region_base,
+                hit.distinct_neighbors(),
+                hit.neighbors
+            );
+            if i < 10 && hit.distinct_neighbors() > 0 {
+                let ctx: Vec<String> =
+                    hit.context.iter().map(|(off, v)| format!("{off:+}:{v}")).collect();
+                tracing::info!("[save_repo] [sonda] #{i} contexto ±64: {}", ctx.join(" "));
+            }
+        }
+
+        let mut lines = vec![format!("{} ocorrência(s) de {}", hits.len(), anchor)];
+        for hit in hits.iter().take(8) {
+            lines.push(format!(
+                "0x{:X}: {} vizinho(s) distinto(s)",
+                hit.address,
+                hit.distinct_neighbors()
+            ));
+        }
+        Ok(lines)
+    })
+}
+
 /// SHA-256 em hex minúsculo (64 chars `[0-9a-f]`, sempre um nome de
 /// arquivo válido no Windows, mesmo com acentos/reservados na entrada).
-#[allow(dead_code)] // Story 1.3 (persistência por save, AD-11)
 pub fn hash_identity(joined: &str) -> String {
     let digest = Sha256::digest(joined.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1212,6 +1350,43 @@ mod tests {
         assert_eq!(read_product_version(&wide).as_deref(), EXPECTED_PRODUCT_VERSION);
         // sem `\0` final => recusa, sem chamar a API
         assert_eq!(read_product_version(&wide[..wide.len() - 1]), None);
+    }
+
+    #[test]
+    fn probe_finds_anchor_and_neighbors_with_offsets() {
+        // buffer: [lixo][wage][anchor][date][lixo][anchor sozinho]
+        let mut buf = Vec::new();
+        for v in [7i32, 634_615, 67_000_000, 20_260_701, 9, 9, 67_000_000] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let hits = probe_buffer(&buf, 0x1000, 67_000_000, &[634_615, 20_260_701], 8);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].address, 0x1008);
+        assert_eq!(hits[0].neighbors, vec![(634_615, -4), (20_260_701, 4)]);
+        assert_eq!(hits[0].distinct_neighbors(), 2);
+        assert_eq!(hits[1].address, 0x1018);
+        assert_eq!(hits[1].distinct_neighbors(), 0);
+        assert!(hits[0].context.contains(&(0, 67_000_000)));
+    }
+
+    #[test]
+    fn probe_ignores_unaligned_matches_and_handles_edges() {
+        let mut buf = vec![0u8; 2];
+        buf.extend_from_slice(&67_000_000i32.to_le_bytes());
+        assert!(probe_buffer(&buf, 0, 67_000_000, &[], 64).is_empty());
+        assert!(probe_buffer(&[], 0, 1, &[2], 64).is_empty());
+        assert_eq!(probe_buffer(&1i32.to_le_bytes(), 0, 1, &[1], 4096).len(), 1);
+    }
+
+    #[test]
+    fn parse_probe_values_accepts_separators_and_thousand_dots() {
+        assert_eq!(
+            parse_probe_values("67.000.000, 634615; 20260701"),
+            Some((67_000_000, vec![634_615, 20_260_701]))
+        );
+        assert_eq!(parse_probe_values("5"), Some((5, vec![])));
+        assert_eq!(parse_probe_values(""), None);
+        assert_eq!(parse_probe_values("99999999999"), None);
     }
 
     #[test]

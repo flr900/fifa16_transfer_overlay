@@ -1324,6 +1324,20 @@ carregada"; data que VOLTA → outro save carregado → cache descartado).
 3. Menu sem carreira carregada → `CarreiraNaoCarregada`; FPS liso
    durante a localização.
 
+## Sessão 7 — Story 1.2: painel da Central de Scout (2026-10-01)
+
+- `fifa_overlay` agora é só o produto: F10 abre/fecha a Central de Scout
+  (tema do DESIGN.md, 4 abas, cabeçalho com orçamento/data vivos, estados
+  vazios). Validado no jogo pelo Felipe.
+- A janela de diagnóstico (sonda, scans, teste de escrita) foi arquivada em
+  `fifa_overlay_debug/` (compila e injeta sozinha; log
+  `fifa_overlay_debug.log`). Não injetar as duas juntas.
+- Fontes: Oswald (estática) e Inter (variável) do Google Fonts, OFL, em
+  `fifa_overlay/assets/fonts/`; Consolas lida do Windows.
+- A DLL nova não tem eject: para trocar de build, reabrir o jogo.
+- Observação visual: o jogo aparece mais através do painel do que a
+  opacidade de 93% sugere; reavaliar quando houver tabelas.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —
