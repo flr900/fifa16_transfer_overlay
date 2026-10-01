@@ -8,6 +8,14 @@
 //! - **AD-14**: o atalho (F10) é lido por polling de `GetAsyncKeyState`
 //!   dentro de `render()`, com detecção de borda. Segurar a tecla alterna o
 //!   painel UMA vez, só na transição solta→pressionada.
+//!
+//! Controle (Story 1.6): o mesmo vale para o combo `COMBO_PAINEL`. Com o
+//! painel aberto, LB/RB trocam de aba e B volta uma tela (fecha o modal;
+//! na raiz, fecha o painel); D-pad/analógico e A são a navegação do
+//! próprio ImGui. Enquanto o painel está aberto, e depois de fechar até
+//! todos os botões serem soltos, o jogo recebe o controle parado
+//! (`bloqueia_controle`, aplicado em `crate::gamepad`): sem isso o B ou o
+//! START que fechou o painel chegaria ao FIFA ao ser solto.
 
 pub mod persistence;
 pub mod quality;
@@ -19,8 +27,34 @@ use imgui::Ui;
 use serde::{Deserialize, Serialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VIRTUAL_KEY, VK_F10};
 
+use crate::gamepad::{botao, EstadoControle};
 use screens::theme::Fonts;
 use state::ScoutState;
+
+/// Atalho do controle: L3 + START (o mesmo combo validado no Companion
+/// Electron: L3+R3 conflita com um atalho do FIFA e os paddles do 8BitDo
+/// não emitem XInput — `PROJECT_MEMORY.md`, "Por que o atalho de controle
+/// usa LEFT_THUMB+START").
+pub const COMBO_PAINEL: u16 = botao::L3 | botao::START;
+
+/// O que o controle pediu neste frame (bordas solto→apertado).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ComandosControle {
+    pub alternar_painel: bool,
+    pub aba_anterior: bool,
+    pub proxima_aba: bool,
+    pub voltar: bool,
+}
+
+pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> ComandosControle {
+    let borda = |mascara: u16| atual.segura(mascara) && !anterior.segura(mascara);
+    ComandosControle {
+        alternar_painel: borda(COMBO_PAINEL),
+        aba_anterior: borda(botao::LB),
+        proxima_aba: borda(botao::RB),
+        voltar: borda(botao::B),
+    }
+}
 
 /// Atalho do painel. F10 foi escolhido com o Felipe (2026-09-30): o FIFA
 /// 16 não usa F10 no modo carreira e o Companion Electron já usa
@@ -40,6 +74,14 @@ pub enum Aba {
 
 impl Aba {
     pub const TODAS: [Aba; 4] = [Aba::Olheiros, Aba::Missoes, Aba::Relatorios, Aba::Sonar];
+
+    /// Aba vizinha na barra (LB/RB), dando a volta nas pontas.
+    pub fn vizinha(self, passo: isize) -> Aba {
+        let n = Aba::TODAS.len() as isize;
+        let atual = Aba::TODAS.iter().position(|&a| a == self).unwrap_or(0) as isize;
+        let indice = (atual + passo).rem_euclid(n) as usize;
+        Aba::TODAS.get(indice).copied().unwrap_or(self)
+    }
 
     pub fn rotulo(self) -> &'static str {
         match self {
@@ -143,6 +185,10 @@ pub struct Scout {
     tecla_estava_pressionada: bool,
     nav: Navigation,
     state: ScoutState,
+    controle_anterior: EstadoControle,
+    /// O painel fechou com algum botão do controle apertado: o jogo segue
+    /// bloqueado até tudo ser solto.
+    esperando_soltar: bool,
 }
 
 impl Scout {
@@ -151,6 +197,8 @@ impl Scout {
             painel_aberto: false,
             tecla_estava_pressionada: false,
             nav: Navigation::new(Aba::Olheiros),
+            controle_anterior: EstadoControle::default(),
+            esperando_soltar: false,
             state: ScoutState::new(),
         }
     }
@@ -186,8 +234,9 @@ impl Scout {
     /// Chamado a cada frame pelo `render()` do overlay. O estado anda com
     /// o painel fechado também (o vigia da carreira — Story 1.7); fechado,
     /// só o banner do canto da tela é desenhado, e só quando há aviso.
-    pub fn frame(&mut self, ui: &Ui, fonts: Option<&Fonts>) {
-        self.atualizar_atalho(tecla_pressionada(ATALHO_PAINEL));
+    pub fn frame(&mut self, ui: &Ui, fonts: Option<&Fonts>, controle: Option<EstadoControle>) {
+        let alternou = self.atualizar_atalho(tecla_pressionada(ATALHO_PAINEL));
+        self.aplicar_controle(controle.unwrap_or_default(), alternou);
         self.state.tick();
         self.aplicar_aba_restaurada();
         if self.painel_aberto {
@@ -195,6 +244,56 @@ impl Scout {
         } else if let Some(aviso) = self.state.aviso_visivel(std::time::Instant::now()) {
             screens::aviso::render(ui, fonts, aviso);
         }
+    }
+
+    /// Comandos do controle (Story 1.6). `ja_alternou`: o F10 já alternou
+    /// o painel neste frame (não alternar duas vezes).
+    fn aplicar_controle(&mut self, atual: EstadoControle, ja_alternou: bool) {
+        let comandos = comandos_controle(self.controle_anterior, atual);
+        self.controle_anterior = atual;
+
+        if comandos.alternar_painel && !ja_alternou {
+            self.alternar_painel();
+        } else if self.painel_aberto {
+            let na_raiz = self.nav.profundidade() == 1;
+            if na_raiz && (comandos.aba_anterior || comandos.proxima_aba) {
+                let passo = if comandos.proxima_aba { 1 } else { -1 };
+                let aba = self.nav.aba_ativa().vizinha(passo);
+                self.nav.trocar_aba(aba);
+                self.state.definir_aba_ativa(aba);
+            }
+            if comandos.voltar {
+                self.voltar();
+            }
+        }
+
+        if self.painel_aberto {
+            self.esperando_soltar = false;
+        } else if !atual.solto() && (comandos.alternar_painel || comandos.voltar) {
+            // fechou agora, com o botão ainda apertado
+            self.esperando_soltar = true;
+        } else if atual.solto() {
+            self.esperando_soltar = false;
+        }
+    }
+
+    /// B do controle: fecha a tela satélite (o modal cancela a
+    /// contratação, nada é debitado); na raiz, fecha o painel.
+    fn voltar(&mut self) {
+        match self.nav.tela_atual() {
+            ScoutScreen::Satelite(satelite) => {
+                if satelite == Satelite::ConfirmacaoContratacao {
+                    self.state.cancelar_contratacao();
+                }
+                self.nav.pop();
+            }
+            ScoutScreen::Aba(_) => self.alternar_painel(),
+        }
+    }
+
+    /// O jogo deve receber o controle parado neste frame?
+    pub fn bloqueia_controle(&self) -> bool {
+        self.painel_aberto || self.esperando_soltar
     }
 
     /// Carreira acabou de ficar ativa: a navegação vai para a aba salva
@@ -354,6 +453,92 @@ mod tests {
         assert!(!scout.painel_aberto());
         assert_eq!(scout.state.previa_contratacao(), None);
         assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Olheiros));
+    }
+
+    fn controle(botoes: u16) -> EstadoControle {
+        EstadoControle { botoes, ..Default::default() }
+    }
+
+    #[test]
+    fn controller_combo_toggles_once_and_the_game_stays_blocked_until_release() {
+        let mut scout = Scout::new();
+        // L3 primeiro, depois START: abre na borda do combo
+        scout.aplicar_controle(controle(botao::L3), false);
+        assert!(!scout.painel_aberto());
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        assert!(scout.painel_aberto());
+        assert!(scout.bloqueia_controle());
+        for _ in 0..10 {
+            scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        }
+        assert!(scout.painel_aberto(), "segurar não alterna de novo");
+
+        // solta e aperta de novo: fecha, mas o jogo só volta a receber o
+        // controle quando tudo for solto
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        assert!(!scout.painel_aberto());
+        assert!(scout.bloqueia_controle());
+        scout.aplicar_controle(controle(botao::START), false);
+        assert!(scout.bloqueia_controle());
+        scout.aplicar_controle(controle(0), false);
+        assert!(!scout.bloqueia_controle());
+    }
+
+    #[test]
+    fn f10_and_the_combo_in_the_same_frame_toggle_once() {
+        let mut scout = Scout::new();
+        scout.aplicar_controle(controle(COMBO_PAINEL), true);
+        assert!(!scout.painel_aberto(), "o F10 já alternou; o combo não desfaz");
+    }
+
+    #[test]
+    fn lb_rb_switch_tabs_with_wraparound_only_at_the_root() {
+        let mut scout = Scout::new();
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::RB), false);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Missoes);
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::LB), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::LB), false);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Sonar, "dá a volta");
+
+        // com uma tela satélite aberta, LB/RB não trocam de aba
+        scout.aplicar_controle(controle(0), false);
+        scout.nav.push(Satelite::FichaJogador);
+        scout.aplicar_controle(controle(botao::RB), false);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Sonar);
+        assert_eq!(scout.nav.profundidade(), 2);
+    }
+
+    #[test]
+    fn b_closes_the_hire_modal_first_and_then_the_panel() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.state.preparar_contratacao(state::Especializacao::Generalista, state::Tier::Junior);
+        scout.nav.push(Satelite::ConfirmacaoContratacao);
+
+        scout.aplicar_controle(controle(botao::B), false);
+        assert!(scout.painel_aberto());
+        assert_eq!(scout.nav.profundidade(), 1);
+        assert_eq!(scout.state.previa_contratacao(), None, "B cancela a contratação");
+
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::B), false);
+        assert!(!scout.painel_aberto());
+        assert!(scout.bloqueia_controle(), "B ainda apertado");
+        scout.aplicar_controle(controle(0), false);
+        assert!(!scout.bloqueia_controle());
+    }
+
+    #[test]
+    fn neighbour_tabs_wrap_around() {
+        assert_eq!(Aba::Olheiros.vizinha(-1), Aba::Sonar);
+        assert_eq!(Aba::Sonar.vizinha(1), Aba::Olheiros);
+        assert_eq!(Aba::Missoes.vizinha(1), Aba::Relatorios);
     }
 
     #[test]

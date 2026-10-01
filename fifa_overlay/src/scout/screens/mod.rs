@@ -100,6 +100,36 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     }
 }
 
+/// Borda roxa sólida no item anterior quando ele tem hover do mouse OU o
+/// foco do controle/teclado: um só desenho para os dois (o `NavHighlight`
+/// nativo do ImGui fica transparente no tema), então trocar de entrada
+/// nunca muda o destaque nem perde a referência (UX-DR19, Story 1.6).
+pub(super) fn contorno_hover(ui: &Ui, raio: f32) {
+    let focado = ui.is_item_focused() && ui.io().nav_visible;
+    if !(ui.is_item_hovered() || focado) {
+        return;
+    }
+    let distancia = 3.0 + ESPESSURA_FOCO * 0.5;
+    let [x0, y0] = ui.item_rect_min();
+    let [x1, y1] = ui.item_rect_max();
+    ui.get_window_draw_list()
+        .add_rect([x0 - distancia, y0 - distancia], [x1 + distancia, y1 + distancia], theme::ACCENT_PRIMARY)
+        .rounding(raio)
+        .thickness(ESPESSURA_FOCO)
+        .build();
+}
+
+/// Espessura do contorno de foco/hover (a mesma do `NavHighlight`).
+pub(super) const ESPESSURA_FOCO: f32 = 2.0;
+
+/// Filhos com `NavFlattened`: o D-pad passa da barra de abas para o
+/// conteúdo (e volta) sem precisar "entrar" na janela filha com A. A flag
+/// existe no ImGui 1.89 do hudhook, mas o `imgui-rs` 0.12 não a expõe.
+fn flags_conteudo() -> WindowFlags {
+    // SAFETY: bit válido do ImGui 1.89 (`ImGuiWindowFlags_NavFlattened`).
+    unsafe { WindowFlags::from_bits_unchecked(imgui::sys::ImGuiWindowFlags_NavFlattened) }
+}
+
 /// Empilha uma fonte do tema (se as fontes já foram carregadas).
 fn com_fonte<R>(ui: &Ui, fonte: Option<FontId>, f: impl FnOnce() -> R) -> R {
     let _token = fonte.map(|id| ui.push_font(id));
@@ -158,7 +188,9 @@ fn barra_de_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: &m
             let _c3 = ui.push_style_color(StyleColor::ButtonActive, destaque);
             let _c4 = ui.push_style_color(StyleColor::Text, texto);
             let rotulo = format!("{}##aba", aba.rotulo());
-            if ui.button_with_size(rotulo, [LARGURA_ABA, theme::ALVO_MINIMO + theme::ESPACO_1]) && !ativa {
+            let clicou = ui.button_with_size(rotulo, [LARGURA_ABA, theme::ALVO_MINIMO + theme::ESPACO_1]);
+            contorno_hover(ui, theme::RAIO_MD);
+            if clicou && !ativa {
                 nav.trocar_aba(aba);
                 state.definir_aba_ativa(aba);
             }
@@ -172,7 +204,7 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, state: &mut ScoutState) ->
     let status = state.status().clone();
     let id = format!("##conteudo_{:?}", aba);
     let mut pedido = None;
-    ui.child_window(id).size([0.0, 0.0]).border(false).build(|| match status {
+    ui.child_window(id).size([0.0, 0.0]).border(false).flags(flags_conteudo()).build(|| match status {
         CarreiraStatus::Localizando => {
             mensagem(ui, fonts, MSG_LOCALIZANDO);
             com_fonte(ui, fonts.map(|f| f.meta), || {
@@ -213,7 +245,9 @@ fn botao_primario(ui: &Ui, rotulo: &str) -> bool {
     let _c3 = ui.push_style_color(StyleColor::ButtonActive, theme::FIELD_GREEN);
     let _c4 = ui.push_style_color(StyleColor::Text, theme::BG_BASE);
     let largura = ui.calc_text_size(rotulo)[0] + theme::ESPACO_5 * 2.0;
-    ui.button_with_size(rotulo, [largura, theme::ALVO_MINIMO])
+    let clicou = ui.button_with_size(rotulo, [largura, theme::ALVO_MINIMO]);
+    contorno_hover(ui, theme::RAIO_PADRAO);
+    clicou
 }
 
 /// `63999988` → `63.999.988` (separador de milhar brasileiro).

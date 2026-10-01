@@ -4,7 +4,7 @@ baseline_commit: 98641f7
 
 # Story 1.5: Hire an Olheiro
 
-Status: review
+Status: done
 
 ## Story
 

@@ -12,7 +12,7 @@
 use imgui::{Condition, StyleColor, StyleVar, Ui, WindowFlags};
 
 use super::theme::{self, Fonts};
-use super::{com_fonte, formatar_milhar, olheiros};
+use super::{com_fonte, contorno_hover, formatar_milhar, olheiros};
 use crate::scout::state::{ErroContratacao, PreviaContratacao, ScoutState};
 
 const LARGURA: f32 = 480.0;
@@ -121,13 +121,21 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 ui.dummy([0.0, theme::ESPACO_2]);
             }
 
+            // Foco inicial (controle/teclado): confirmar, ou cancelar quando
+            // não dá para confirmar.
             let habilitado = previa.faltam.is_none();
             if botao(ui, fonts, rotulo_confirmar(&previa), Estilo::Primario, habilitado) && habilitado {
                 acao = if state.confirmar_contratacao() { Acao::Contratou } else { Acao::Nenhuma };
             }
+            if habilitado {
+                ui.set_item_default_focus();
+            }
             ui.same_line_with_spacing(0.0, theme::ESPACO_3);
             if botao(ui, fonts, "Cancelar", Estilo::Secundario, true) {
                 acao = Acao::Cancelou;
+            }
+            if !habilitado {
+                ui.set_item_default_focus();
             }
         });
     acao
@@ -170,10 +178,12 @@ fn botao(ui: &Ui, fonts: Option<&Fonts>, rotulo: &str, estilo: Estilo, habilitad
     let _c4 = ui.push_style_color(StyleColor::Text, texto);
     let _c5 = ui.push_style_color(StyleColor::Border, theme::BORDER_HAIRLINE);
     let _b = ui.push_style_var(StyleVar::FrameBorderSize(borda));
-    com_fonte(ui, fonts.map(|f| f.heading), || {
+    let clicou = com_fonte(ui, fonts.map(|f| f.heading), || {
         let largura = ui.calc_text_size(rotulo)[0] + theme::ESPACO_5 * 2.0;
         ui.button_with_size(rotulo, [largura, theme::ALVO_MINIMO])
-    })
+    });
+    contorno_hover(ui, theme::RAIO_PADRAO);
+    clicou
 }
 
 #[cfg(test)]
