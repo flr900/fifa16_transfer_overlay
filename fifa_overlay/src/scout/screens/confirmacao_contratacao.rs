@@ -11,9 +11,10 @@
 
 use imgui::{Condition, StyleColor, StyleVar, Ui, WindowFlags};
 
+use super::componentes::{botao, EstiloBotao};
 use super::theme::{self, Fonts};
-use super::{com_fonte, contorno_hover, formatar_milhar, olheiros};
-use crate::scout::state::{ErroContratacao, PreviaContratacao, ScoutState};
+use super::{com_fonte, formatar_milhar, olheiros};
+use crate::scout::state::{ErroCompra, PreviaContratacao, ScoutState};
 
 const LARGURA: f32 = 480.0;
 
@@ -27,22 +28,22 @@ pub enum Acao {
 
 /// Mensagem de cada falha (UX-DR21: factual, valores exatos, sem
 /// exclamação; sempre diz se o dinheiro saiu ou não).
-pub fn texto_erro(erro: &ErroContratacao) -> String {
+pub fn texto_erro(erro: &ErroCompra) -> String {
     match erro {
-        ErroContratacao::OrcamentoInsuficiente { faltam } => olheiros::texto_faltam(*faltam),
-        ErroContratacao::OrcamentoMudou { atual } => format!(
+        ErroCompra::OrcamentoInsuficiente { faltam } => olheiros::texto_faltam(*faltam),
+        ErroCompra::OrcamentoMudou { atual } => format!(
             "O orçamento mudou para {} antes da confirmação. Nada foi debitado; confira os valores e confirme de novo.",
             formatar_milhar(*atual)
         ),
-        ErroContratacao::SemCarreira => "Nenhuma carreira carregada. Nada foi debitado.".to_string(),
-        ErroContratacao::EstadoNaoSalvavel => {
+        ErroCompra::SemCarreira => "Nenhuma carreira carregada. Nada foi debitado.".to_string(),
+        ErroCompra::EstadoNaoSalvavel => {
             "Não é possível salvar o estado do Scout desta carreira. Nada foi debitado.".to_string()
         }
-        ErroContratacao::EscritaFalhou => "Não foi possível debitar o orçamento. Nada foi contratado.".to_string(),
-        ErroContratacao::OlheiroNaoSalvo => {
+        ErroCompra::EscritaFalhou => "Não foi possível debitar o orçamento. Nada foi contratado.".to_string(),
+        ErroCompra::NaoSalvo => {
             "Não foi possível salvar o Olheiro. O débito foi desfeito e nada foi contratado.".to_string()
         }
-        ErroContratacao::OrcamentoDebitadoSemOlheiro { debitado } => format!(
+        ErroCompra::DebitadoSemSalvar { debitado } => format!(
             "Não foi possível salvar o Olheiro, e o débito de {} não pôde ser desfeito. Confira o orçamento no jogo.",
             formatar_milhar(*debitado)
         ),
@@ -124,14 +125,14 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             // Foco inicial (controle/teclado): confirmar, ou cancelar quando
             // não dá para confirmar.
             let habilitado = previa.faltam.is_none();
-            if botao(ui, fonts, rotulo_confirmar(&previa), Estilo::Primario, habilitado) && habilitado {
+            if botao(ui, fonts, rotulo_confirmar(&previa), EstiloBotao::Primario, habilitado) {
                 acao = if state.confirmar_contratacao() { Acao::Contratou } else { Acao::Nenhuma };
             }
             if habilitado {
                 ui.set_item_default_focus();
             }
             ui.same_line_with_spacing(0.0, theme::ESPACO_3);
-            if botao(ui, fonts, "Cancelar", Estilo::Secundario, true) {
+            if botao(ui, fonts, "Cancelar", EstiloBotao::Secundario, true) {
                 acao = Acao::Cancelou;
             }
             if !habilitado {
@@ -155,37 +156,6 @@ fn linha(ui: &Ui, fonts: Option<&Fonts>, rotulo: &str, valor: &str, cor: [f32; 4
     ui.set_cursor_pos([inicio[0], fim[1].max(ui.cursor_pos()[1])]);
 }
 
-#[derive(Clone, Copy)]
-enum Estilo {
-    Primario,
-    Secundario,
-}
-
-/// Primário verde / secundário em contorno (DESIGN.md → button-*), ≥ 32 px.
-fn botao(ui: &Ui, fonts: Option<&Fonts>, rotulo: &str, estilo: Estilo, habilitado: bool) -> bool {
-    let (fundo, texto, borda) = match (estilo, habilitado) {
-        (_, false) => (theme::BOTAO_DESABILITADO, theme::TEXT_DISABLED, 0.0),
-        (Estilo::Primario, true) => (theme::FIELD_GREEN, theme::BG_BASE, 0.0),
-        (Estilo::Secundario, true) => (theme::TRANSPARENTE, theme::TEXT_PRIMARY, 1.0),
-    };
-    let realce = match (estilo, habilitado) {
-        (Estilo::Secundario, true) => theme::ACCENT_PRIMARY_DIM,
-        _ => fundo,
-    };
-    let _c1 = ui.push_style_color(StyleColor::Button, fundo);
-    let _c2 = ui.push_style_color(StyleColor::ButtonHovered, realce);
-    let _c3 = ui.push_style_color(StyleColor::ButtonActive, realce);
-    let _c4 = ui.push_style_color(StyleColor::Text, texto);
-    let _c5 = ui.push_style_color(StyleColor::Border, theme::BORDER_HAIRLINE);
-    let _b = ui.push_style_var(StyleVar::FrameBorderSize(borda));
-    let clicou = com_fonte(ui, fonts.map(|f| f.heading), || {
-        let largura = ui.calc_text_size(rotulo)[0] + theme::ESPACO_5 * 2.0;
-        ui.button_with_size(rotulo, [largura, theme::ALVO_MINIMO])
-    });
-    contorno_hover(ui, theme::RAIO_PADRAO);
-    clicou
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,13 +163,13 @@ mod tests {
     #[test]
     fn every_error_says_whether_money_left_and_has_no_exclamation() {
         let erros = [
-            ErroContratacao::OrcamentoInsuficiente { faltam: 2_100_000 },
-            ErroContratacao::OrcamentoMudou { atual: 60_000_000 },
-            ErroContratacao::SemCarreira,
-            ErroContratacao::EstadoNaoSalvavel,
-            ErroContratacao::EscritaFalhou,
-            ErroContratacao::OlheiroNaoSalvo,
-            ErroContratacao::OrcamentoDebitadoSemOlheiro { debitado: 5_800_000 },
+            ErroCompra::OrcamentoInsuficiente { faltam: 2_100_000 },
+            ErroCompra::OrcamentoMudou { atual: 60_000_000 },
+            ErroCompra::SemCarreira,
+            ErroCompra::EstadoNaoSalvavel,
+            ErroCompra::EscritaFalhou,
+            ErroCompra::NaoSalvo,
+            ErroCompra::DebitadoSemSalvar { debitado: 5_800_000 },
         ];
         for erro in &erros {
             let texto = texto_erro(erro);

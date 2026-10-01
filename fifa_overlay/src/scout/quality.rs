@@ -25,7 +25,9 @@
 //! Falsos positivos NÃO entram no v1 (decisão de 2026-10-01; ver
 //! `_bmad-output/planning-artifacts/melhorias-futuras-olheiros.md`).
 
-use super::state::{Especializacao, ModoBusca, Qualidade, Tier};
+use serde::{Deserialize, Serialize};
+
+use super::state::{Especializacao, FaixaAtributo, ModoBusca, Qualidade, Tier};
 
 // ---------------------------------------------------------------------
 // Contratação (Story 1.4)
@@ -64,11 +66,12 @@ pub fn custo_contratacao(especializacao: Especializacao, tier: Tier) -> i32 {
 // ---------------------------------------------------------------------
 
 /// Que tipo de jogador a Missão procura — é o que decide se a
-/// Especialização do Olheiro "combina". A Story 2.2 deriva o tipo dos
-/// filtros escolhidos (ex.: Potencial alto → Jovens; Atributo dominante /
-/// Fit Posicional / Jogador de Referência → Tática).
-#[allow(dead_code)] // derivado dos filtros na Story 2.2
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Especialização do Olheiro "combina". Derivado dos filtros
+/// (`tipo_por_faixas`); Tática chega com os filtros de atributo / Fit
+/// Posicional / Jogador de Referência (Stories 2.8 e Épico 3).
+/// No JSON: `"jovens"`, `"medalhoes"`, `"tatica"`, `"geral"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TipoMissao {
     Jovens,
     Medalhoes,
@@ -77,14 +80,16 @@ pub enum TipoMissao {
 }
 
 impl TipoMissao {
-    #[allow(dead_code)] // usado nos testes e pela Story 2.2
+    #[allow(dead_code)] // Tática ainda não é derivada (Story 2.8); usado nos testes
     pub const TODOS: [TipoMissao; 4] = [TipoMissao::Jovens, TipoMissao::Medalhoes, TipoMissao::Tatica, TipoMissao::Geral];
 }
 
-/// Amplitude do filtro geográfico (Stories 2.2/2.9 calculam a partir dos
-/// países escolhidos). Em ordem: `Pais < VariosPaises < Continente < Mundo`.
-#[allow(dead_code)] // derivada do filtro geográfico nas Stories 2.2/2.9
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Amplitude do filtro geográfico. Até a Story 2.9 (filtro por país) toda
+/// Missão é `Mundo`. Em ordem: `Pais < VariosPaises < Continente < Mundo`.
+/// No JSON: `"pais"`, `"varios_paises"`, `"continente"`, `"mundo"`.
+#[allow(dead_code)] // as demais amplitudes chegam com o filtro geográfico (Story 2.9)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AmplitudeGeografica {
     /// Um país só.
     Pais,
@@ -96,7 +101,7 @@ pub enum AmplitudeGeografica {
 }
 
 impl AmplitudeGeografica {
-    #[allow(dead_code)] // usado nos testes e pelas Stories 2.2/2.9
+    #[allow(dead_code)] // usado nos testes e pela Story 2.9
     pub const TODAS: [AmplitudeGeografica; 4] = [
         AmplitudeGeografica::Pais,
         AmplitudeGeografica::VariosPaises,
@@ -106,7 +111,6 @@ impl AmplitudeGeografica {
 }
 
 /// Tudo o que a estimativa precisa saber da Missão.
-#[allow(dead_code)] // montado pelo formulário Nova Missão (Story 2.2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PedidoMissao {
     pub tier: Tier,
@@ -117,8 +121,9 @@ pub struct PedidoMissao {
 }
 
 /// O que o formulário mostra antes de confirmar e o que a busca (2.4)
-/// usa para montar o Relatório.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// usa para montar o Relatório. Guardada na Missão no momento da
+/// confirmação: o jogador recebe o que pagou, mesmo se a tabela mudar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EstimativaMissao {
     /// Mesma unidade do `transferbudget`.
     pub custo: i32,
@@ -251,12 +256,37 @@ fn fatores_tier(tier: Tier) -> (u32, i64) {
 /// Custos de Missão são arredondados para este múltiplo.
 const ARREDONDAMENTO_CUSTO: i64 = 10_000;
 
+/// Overall mínimo a partir do qual a Missão procura "medalhões".
+const OVERALL_MEDALHAO: u8 = 75;
+/// Quanto o Potencial mínimo precisa passar do Overall máximo para a
+/// Missão ser de "jovens" (jogadores que ainda vão crescer).
+const MARGEM_POTENCIAL_JOVENS: u8 = 5;
+
+/// Tipo da Missão a partir das faixas de Overall/Potencial (Story 2.2):
+/// - Potencial mínimo ≥ Overall máximo + 5 → **Jovens** (busca crescimento);
+/// - senão, Overall mínimo ≥ 75 → **Medalhões** (prontos para jogar);
+/// - senão → **Geral**.
+pub fn tipo_por_faixas(overall: FaixaAtributo, potencial: FaixaAtributo) -> TipoMissao {
+    if potencial.min >= overall.max.saturating_add(MARGEM_POTENCIAL_JOVENS) {
+        TipoMissao::Jovens
+    } else if overall.min >= OVERALL_MEDALHAO {
+        TipoMissao::Medalhoes
+    } else {
+        TipoMissao::Geral
+    }
+}
+
+/// A Especialização do Olheiro combina com o tipo da Missão (bônus de
+/// Qualidade)? O formulário mostra isso ao jogador.
+pub fn combina(especializacao: Especializacao, tipo: TipoMissao) -> bool {
+    aderente(especializacao, tipo)
+}
+
 // ---------------------------------------------------------------------
 // Estimativa
 // ---------------------------------------------------------------------
 
 /// Custo, duração e Qualidade de uma Missão. Pura e determinística.
-#[allow(dead_code)] // chamada pelo formulário Nova Missão (Story 2.2) e pela busca (2.4)
 pub fn estimar_missao(pedido: &PedidoMissao) -> EstimativaMissao {
     let pontos = pontuacao(pedido);
     let (dias_base, custo_base) = base_do_modo(pedido.modo);
@@ -438,6 +468,20 @@ mod tests {
                 alvo_jogadores: 10,
             }
         );
+    }
+
+    #[test]
+    fn missao_type_comes_from_the_overall_and_potencial_ranges() {
+        let faixa = |min, max| FaixaAtributo { min, max };
+        assert_eq!(tipo_por_faixas(faixa(50, 70), faixa(80, 99)), TipoMissao::Jovens);
+        assert_eq!(tipo_por_faixas(faixa(50, 70), faixa(75, 99)), TipoMissao::Jovens, "exatamente +5");
+        assert_eq!(tipo_por_faixas(faixa(50, 70), faixa(74, 99)), TipoMissao::Geral);
+        assert_eq!(tipo_por_faixas(faixa(78, 99), faixa(78, 99)), TipoMissao::Medalhoes);
+        assert_eq!(tipo_por_faixas(faixa(50, 99), faixa(50, 99)), TipoMissao::Geral, "padrão do formulário");
+        // jovens vence medalhões quando as duas regras valem
+        assert_eq!(tipo_por_faixas(faixa(75, 80), faixa(90, 99)), TipoMissao::Jovens);
+        assert!(combina(Especializacao::CacadorDeJovens, TipoMissao::Jovens));
+        assert!(!combina(Especializacao::Generalista, TipoMissao::Geral));
     }
 
     #[test]

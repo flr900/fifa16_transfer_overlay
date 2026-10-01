@@ -34,7 +34,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "1.6-v2 — cards navegáveis + recarga dev";
+const BUILD_TAG: &str = "2.2-v4 — fontes alinhadas ao pixel";
 
 /// Arquivo que pede para a DLL se descarregar sem fechar o jogo
 /// (script `recarregar_dev.ps1` da pasta `fifa_overlay`, só para
@@ -126,7 +126,9 @@ impl ImguiRenderLoop for FifaOverlay {
         io.config_flags.insert(ConfigFlags::NAV_ENABLE_GAMEPAD | ConfigFlags::NAV_ENABLE_KEYBOARD);
         io.backend_flags.insert(BackendFlags::HAS_GAMEPAD);
         self.ultimo_controle = self.controle.ler();
-        gamepad::alimentar_imgui(io, if aberto { self.ultimo_controle } else { None });
+        let na_raiz = self.scout.navegacao_na_raiz();
+        let navegacao = self.ultimo_controle.filter(|_| aberto).map(|e| gamepad::para_navegacao(e, na_raiz));
+        gamepad::alimentar_imgui(io, navegacao);
     }
 
     fn render(&mut self, ui: &mut Ui) {

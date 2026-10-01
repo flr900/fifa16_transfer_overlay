@@ -134,7 +134,6 @@ impl Tier {
 /// Modo de Busca de uma Missão (PRD, Glossário): Rápida = mais nomes,
 /// Qualidade menor, conclui antes; Completa = menos nomes, Qualidade
 /// maior, mais devagar. No JSON: `"rapida"` / `"completa"`.
-#[allow(dead_code)] // persistido na Missão a partir da Story 2.2
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModoBusca {
@@ -143,14 +142,12 @@ pub enum ModoBusca {
 }
 
 impl ModoBusca {
-    #[allow(dead_code)] // opções do formulário Nova Missão (Story 2.2)
     pub const TODOS: [ModoBusca; 2] = [ModoBusca::Rapida, ModoBusca::Completa];
 }
 
 /// Qualidade de um Relatório (PRD, Glossário): define precisão dos
 /// atributos, quantos atributos aparecem e quantos jogadores voltam. Em
 /// ordem: `Baixa < Media < Alta`. No JSON: `"baixa"` etc.
-#[allow(dead_code)] // badge no formulário (2.2) e no Relatório (2.4/2.5)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Qualidade {
@@ -195,7 +192,7 @@ pub struct Contratacao {
     pub custo: i32,
     /// Falha da última tentativa de confirmar (o modal mostra e oferece
     /// tentar de novo). `None` = ainda não tentou.
-    pub erro: Option<ErroContratacao>,
+    pub erro: Option<ErroCompra>,
 }
 
 /// O que o modal mostra, recalculado do orçamento vivo a cada frame.
@@ -208,26 +205,113 @@ pub struct PreviaContratacao {
     pub faltam: Option<i32>,
 }
 
-/// Por que a contratação não aconteceu. Em todos os casos NENHUM Olheiro
-/// foi salvo; só `OrcamentoDebitadoSemOlheiro` deixa o dinheiro gasto.
+/// Por que uma compra (contratar um Olheiro, Story 1.5; encomendar uma
+/// Missão, Story 2.2) não aconteceu. Em todos os casos NADA foi salvo; só
+/// `DebitadoSemSalvar` deixa o dinheiro gasto.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ErroContratacao {
+pub enum ErroCompra {
     OrcamentoInsuficiente { faltam: i32 },
-    /// O jogo mexeu no orçamento entre o modal e a confirmação: nada
-    /// escrito; o modal já mostra o valor novo.
+    /// O jogo mexeu no orçamento entre a tela e a confirmação: nada
+    /// escrito; a tela já mostra o valor novo.
     OrcamentoMudou { atual: i32 },
     SemCarreira,
-    /// O arquivo de estado desta carreira não pode ser gravado: contratar
-    /// gastaria o dinheiro sem guardar o Olheiro.
+    /// O arquivo de estado desta carreira não pode ser gravado: comprar
+    /// gastaria o dinheiro sem guardar o que foi comprado.
     EstadoNaoSalvavel,
     /// A escrita do orçamento falhou ou a releitura não conferiu.
     EscritaFalhou,
-    /// O orçamento foi debitado, mas gravar o Olheiro falhou; o débito
+    /// O orçamento foi debitado, mas gravar a compra falhou; o débito
     /// foi desfeito.
-    OlheiroNaoSalvo,
-    /// Gravar o Olheiro falhou E desfazer o débito também: o dinheiro
+    NaoSalvo,
+    /// Gravar a compra falhou E desfazer o débito também: o dinheiro
     /// saiu. Caso raro, dito com todas as letras (nunca fingir sucesso).
-    OrcamentoDebitadoSemOlheiro { debitado: i32 },
+    DebitadoSemSalvar { debitado: i32 },
+}
+
+/// Faixa de um atributo de 0 a 99 (inclusiva), como as do formulário.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaixaAtributo {
+    pub min: u8,
+    pub max: u8,
+}
+
+impl FaixaAtributo {
+    /// Limites de um atributo do FIFA (o save guarda 1–99).
+    pub const MENOR: u8 = 1;
+    pub const MAIOR: u8 = 99;
+
+    pub fn valida(&self) -> bool {
+        self.min <= self.max
+    }
+}
+
+/// Filtros de uma Missão. A Story 2.2 traz Overall e Potencial; geografia
+/// (2.9), atributo dominante (2.8), Fit Posicional e Jogador de Referência
+/// (Épico 3) entram depois, com `#[serde(default)]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FiltrosMissao {
+    pub overall: FaixaAtributo,
+    pub potencial: FaixaAtributo,
+}
+
+impl Default for FiltrosMissao {
+    /// Faixas amplas: o formulário abre sem restringir quase nada.
+    fn default() -> Self {
+        FiltrosMissao {
+            overall: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
+            potencial: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
+        }
+    }
+}
+
+/// Qual ponta de qual faixa um botão − / + do formulário mexe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CampoFaixa {
+    OverallMin,
+    OverallMax,
+    PotencialMin,
+    PotencialMax,
+}
+
+/// Formulário Nova Missão aberto (Story 2.2): o que o jogador escolheu até
+/// agora. Nada é persistido antes de confirmar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RascunhoMissao {
+    pub olheiro_id: Option<Uuid>,
+    pub filtros: FiltrosMissao,
+    pub modo: ModoBusca,
+    pub erro: Option<ErroCompra>,
+}
+
+/// Por que o botão confirmar está desabilitado (o texto vai ao lado dele).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BloqueioMissao {
+    SemOlheiroDisponivel,
+    FaixaInvalida { campo: CampoFaixa },
+    OrcamentoInsuficiente { faltam: i32 },
+}
+
+/// O formulário inteiro, recalculado a cada frame (síncrono, AD-4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviaMissao {
+    pub rascunho: RascunhoMissao,
+    /// Todos os contratados: os "Em Missão" aparecem, mas não são escolhíveis.
+    pub olheiros: Vec<OlheiroContratado>,
+    pub tipo: quality::TipoMissao,
+    /// O Olheiro escolhido combina com o tipo (bônus de Qualidade).
+    pub combina: bool,
+    /// `None` sem Olheiro escolhido.
+    pub estimativa: Option<quality::EstimativaMissao>,
+    pub orcamento_atual: i32,
+    pub data_atual: Date,
+    pub bloqueio: Option<BloqueioMissao>,
+}
+
+impl PreviaMissao {
+    /// Data em que a Missão fica pronta, se confirmada agora.
+    pub fn prazo(&self) -> Option<Date> {
+        self.estimativa.map(|e| self.data_atual.mais_dias(e.duracao_dias))
+    }
 }
 
 /// As 12 ofertas na ordem da tela (Tier crescente, depois a ordem do PRD),
@@ -260,6 +344,39 @@ pub struct Missao {
     pub status: StatusMissao,
     pub criada_em: Date,
     pub prazo_estimado: Date,
+    pub filtros: FiltrosMissao,
+    pub modo_busca: ModoBusca,
+    pub tipo: quality::TipoMissao,
+    pub amplitude: quality::AmplitudeGeografica,
+    /// O que o jogador viu e pagou ao confirmar (custo, Qualidade, ...).
+    pub estimativa: quality::EstimativaMissao,
+}
+
+#[cfg(test)]
+impl Missao {
+    /// Missão mínima para testes.
+    pub fn de_teste(olheiro_id: Uuid, status: StatusMissao) -> Missao {
+        let filtros = FiltrosMissao::default();
+        let pedido = quality::PedidoMissao {
+            tier: Tier::Junior,
+            especializacao: Especializacao::Generalista,
+            modo: ModoBusca::Rapida,
+            tipo: quality::TipoMissao::Geral,
+            amplitude: quality::AmplitudeGeografica::Mundo,
+        };
+        Missao {
+            id: Uuid::new_v4(),
+            olheiro_id,
+            status,
+            criada_em: Date(20260701),
+            prazo_estimado: Date(20260715),
+            filtros,
+            modo_busca: ModoBusca::Rapida,
+            tipo: quality::TipoMissao::Geral,
+            amplitude: quality::AmplitudeGeografica::Mundo,
+            estimativa: quality::estimar_missao(&pedido),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -288,6 +405,8 @@ pub struct ScoutState {
     localizacao_automatica_disponivel: bool,
     /// Modal de confirmação de contratação aberto (Story 1.5).
     contratacao: Option<Contratacao>,
+    /// Formulário Nova Missão aberto (Story 2.2).
+    rascunho_missao: Option<RascunhoMissao>,
     ultima_leitura: Option<Instant>,
     /// Pasta dos arquivos de estado (`None` = sem disco, só memória).
     diretorio_estado: Option<PathBuf>,
@@ -323,6 +442,7 @@ impl ScoutState {
             status: CarreiraStatus::SemCarreira,
             localizacao_automatica_disponivel: false,
             contratacao: None,
+            rascunho_missao: None,
             ultima_leitura: None,
             diretorio_estado,
             estados: HashMap::new(),
@@ -569,8 +689,14 @@ impl ScoutState {
         let Some(contratacao) = self.contratacao.clone() else {
             return false;
         };
-        match self.contratar(contratacao.especializacao, contratacao.tier, contratacao.custo) {
-            Ok(olheiro) => {
+        let olheiro = Olheiro {
+            id: Uuid::new_v4(),
+            especializacao: contratacao.especializacao,
+            tier: contratacao.tier,
+        };
+        let novo = olheiro.clone();
+        match self.comprar(contratacao.custo, move |dados| dados.olheiros.push(novo)) {
+            Ok(()) => {
                 tracing::info!(
                     "[scout::state] Olheiro contratado: {} {:?} ({}), id {}.",
                     olheiro.especializacao.nome(),
@@ -585,7 +711,7 @@ impl ScoutState {
             }
             Err(erro) => {
                 tracing::warn!("[scout::state] Contratação não concluída: {erro:?}");
-                if matches!(erro, ErroContratacao::OrcamentoMudou { .. }) {
+                if matches!(erro, ErroCompra::OrcamentoMudou { .. }) {
                     self.reler();
                 }
                 if let Some(aberta) = self.contratacao.as_mut() {
@@ -596,38 +722,207 @@ impl ScoutState {
         }
     }
 
-    /// Debita (compare-and-write + releitura) e, só então, grava o
-    /// Olheiro write-through. Se gravar falhar, desfaz o débito: nenhum
-    /// caminho deixa um Olheiro salvo sem débito confirmado nem diz que
-    /// contratou sem ter contratado (AC da Story 1.5).
-    fn contratar(&mut self, especializacao: Especializacao, tier: Tier, custo: i32) -> Result<Olheiro, ErroContratacao> {
-        let anterior = self.orcamento().ok_or(ErroContratacao::SemCarreira)?;
+    /// Debita `custo` (compare-and-write + releitura) e, só então, grava
+    /// a compra write-through (`gravar`). Se gravar falhar, desfaz o
+    /// débito: nenhum caminho deixa algo salvo sem débito confirmado nem
+    /// diz que comprou sem ter comprado (ACs das Stories 1.5 e 2.2).
+    fn comprar(
+        &mut self,
+        custo: i32,
+        gravar: impl FnOnce(&mut persistence::ScoutStateFile),
+    ) -> Result<(), ErroCompra> {
+        let anterior = self.orcamento().ok_or(ErroCompra::SemCarreira)?;
         if anterior < custo {
-            return Err(ErroContratacao::OrcamentoInsuficiente { faltam: custo.saturating_sub(anterior) });
+            return Err(ErroCompra::OrcamentoInsuficiente { faltam: custo.saturating_sub(anterior) });
         }
-        let estado = self.estado_ativo().cloned().ok_or(ErroContratacao::SemCarreira)?;
+        let estado = self.estado_ativo().cloned().ok_or(ErroCompra::SemCarreira)?;
         if !estado.gravavel() {
-            return Err(ErroContratacao::EstadoNaoSalvavel);
+            return Err(ErroCompra::EstadoNaoSalvavel);
         }
 
         let debitado = self.fonte.write_transfer_budget(anterior, anterior - custo).map_err(|err| match err {
-            SaveRepoError::OrcamentoMudou(atual) => ErroContratacao::OrcamentoMudou { atual },
-            _ => ErroContratacao::EscritaFalhou,
+            SaveRepoError::OrcamentoMudou(atual) => ErroCompra::OrcamentoMudou { atual },
+            _ => ErroCompra::EscritaFalhou,
         })?;
 
-        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao, tier };
-        let novo = olheiro.clone();
-        if let Err(err) = estado.mutar(move |dados| dados.olheiros.push(novo)) {
-            tracing::warn!("[scout::state] Olheiro não foi salvo ({err:?}); desfazendo o débito.");
+        if let Err(err) = estado.mutar(gravar) {
+            tracing::warn!("[scout::state] Compra não foi salva ({err:?}); desfazendo o débito.");
             return match self.fonte.write_transfer_budget(debitado, anterior) {
-                Ok(_) => Err(ErroContratacao::OlheiroNaoSalvo),
+                Ok(_) => Err(ErroCompra::NaoSalvo),
                 Err(err) => {
                     tracing::warn!("[scout::state] Não deu para desfazer o débito: {err:?}");
-                    Err(ErroContratacao::OrcamentoDebitadoSemOlheiro { debitado: custo })
+                    Err(ErroCompra::DebitadoSemSalvar { debitado: custo })
                 }
             };
         }
-        Ok(olheiro)
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Nova Missão (Story 2.2)
+    // -----------------------------------------------------------------
+
+    /// "Nova Missão": abre o formulário com o primeiro Olheiro disponível
+    /// já escolhido e faixas amplas.
+    pub fn abrir_nova_missao(&mut self) {
+        let olheiro_id = self.olheiros_contratados().into_iter().find(|c| !c.em_missao).map(|c| c.olheiro.id);
+        self.rascunho_missao =
+            Some(RascunhoMissao { olheiro_id, filtros: FiltrosMissao::default(), modo: ModoBusca::Rapida, erro: None });
+    }
+
+    pub fn cancelar_nova_missao(&mut self) {
+        self.rascunho_missao = None;
+    }
+
+    pub fn tem_nova_missao(&self) -> bool {
+        self.rascunho_missao.is_some()
+    }
+
+    /// Escolhe o Olheiro (só os disponíveis; um "Em Missão" é ignorado).
+    pub fn escolher_olheiro_da_missao(&mut self, id: Uuid) {
+        let disponivel = self.olheiros_contratados().iter().any(|c| c.olheiro.id == id && !c.em_missao);
+        if let (true, Some(r)) = (disponivel, self.rascunho_missao.as_mut()) {
+            r.olheiro_id = Some(id);
+            r.erro = None;
+        }
+    }
+
+    /// Botões − / + das faixas (sempre dentro de 1–99).
+    pub fn ajustar_faixa_da_missao(&mut self, campo: CampoFaixa, delta: i32) {
+        let Some(r) = self.rascunho_missao.as_mut() else {
+            return;
+        };
+        let valor = match campo {
+            CampoFaixa::OverallMin => &mut r.filtros.overall.min,
+            CampoFaixa::OverallMax => &mut r.filtros.overall.max,
+            CampoFaixa::PotencialMin => &mut r.filtros.potencial.min,
+            CampoFaixa::PotencialMax => &mut r.filtros.potencial.max,
+        };
+        let novo = (i32::from(*valor) + delta).clamp(i32::from(FaixaAtributo::MENOR), i32::from(FaixaAtributo::MAIOR));
+        *valor = u8::try_from(novo).unwrap_or(*valor);
+        r.erro = None;
+    }
+
+    pub fn definir_modo_da_missao(&mut self, modo: ModoBusca) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.modo = modo;
+            r.erro = None;
+        }
+    }
+
+    /// O formulário inteiro, ou `None` se ele não está aberto (ou a
+    /// carreira deixou de estar pronta — o formulário deve fechar).
+    pub fn previa_missao(&self) -> Option<PreviaMissao> {
+        let rascunho = self.rascunho_missao.clone()?;
+        let (orcamento_atual, data_atual) = match &self.status {
+            CarreiraStatus::Pronta(c) => (c.orcamento_transferencias, c.data_atual),
+            _ => return None,
+        };
+        let olheiros = self.olheiros_contratados();
+        let escolhido = rascunho
+            .olheiro_id
+            .and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && !c.em_missao))
+            .map(|c| c.olheiro.clone());
+        let tipo = quality::tipo_por_faixas(rascunho.filtros.overall, rascunho.filtros.potencial);
+        let estimativa = escolhido.as_ref().map(|o| {
+            quality::estimar_missao(&quality::PedidoMissao {
+                tier: o.tier,
+                especializacao: o.especializacao,
+                modo: rascunho.modo,
+                tipo,
+                amplitude: quality::AmplitudeGeografica::Mundo,
+            })
+        });
+        let bloqueio = if escolhido.is_none() {
+            Some(BloqueioMissao::SemOlheiroDisponivel)
+        } else if !rascunho.filtros.overall.valida() {
+            Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::OverallMin })
+        } else if !rascunho.filtros.potencial.valida() {
+            Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::PotencialMin })
+        } else {
+            estimativa
+                .filter(|e| orcamento_atual < e.custo)
+                .map(|e| BloqueioMissao::OrcamentoInsuficiente { faltam: e.custo.saturating_sub(orcamento_atual) })
+        };
+        Some(PreviaMissao {
+            combina: escolhido.as_ref().is_some_and(|o| quality::combina(o.especializacao, tipo)),
+            rascunho,
+            olheiros,
+            tipo,
+            estimativa,
+            orcamento_atual,
+            data_atual,
+            bloqueio,
+        })
+    }
+
+    /// Confirmar do formulário. `true` = Missão encomendada (o formulário
+    /// fecha). Debita com as garantias da Story 1.5 e grava a Missão como
+    /// `Pendente` — nenhuma busca roda agora (AD-8).
+    pub fn confirmar_nova_missao(&mut self) -> bool {
+        let Some(previa) = self.previa_missao() else {
+            return false;
+        };
+        if previa.bloqueio.is_some() {
+            return false;
+        }
+        let (Some(olheiro_id), Some(estimativa)) = (previa.rascunho.olheiro_id, previa.estimativa) else {
+            return false;
+        };
+        let missao = Missao {
+            id: Uuid::new_v4(),
+            olheiro_id,
+            status: StatusMissao::Pendente,
+            criada_em: previa.data_atual,
+            prazo_estimado: previa.data_atual.mais_dias(estimativa.duracao_dias),
+            filtros: previa.rascunho.filtros,
+            modo_busca: previa.rascunho.modo,
+            tipo: previa.tipo,
+            amplitude: quality::AmplitudeGeografica::Mundo,
+            estimativa,
+        };
+        let nova = missao.clone();
+        match self.comprar(estimativa.custo, move |dados| dados.missoes.push(nova)) {
+            Ok(()) => {
+                tracing::info!(
+                    "[scout::state] Missão encomendada: {:?} {:?} ({}), prazo {}, id {}.",
+                    missao.tipo,
+                    missao.modo_busca,
+                    estimativa.custo,
+                    missao.prazo_estimado.0,
+                    missao.id
+                );
+                self.rascunho_missao = None;
+                self.reler();
+                true
+            }
+            Err(erro) => {
+                tracing::warn!("[scout::state] Missão não encomendada: {erro:?}");
+                if matches!(erro, ErroCompra::OrcamentoMudou { .. }) {
+                    self.reler();
+                }
+                if let Some(r) = self.rascunho_missao.as_mut() {
+                    r.erro = Some(erro);
+                }
+                false
+            }
+        }
+    }
+
+    /// Missões desta carreira, mais novas primeiro, com o Olheiro de cada
+    /// uma (a aba Missões; a Story 2.3 acrescenta o progresso).
+    pub fn missoes(&self) -> Vec<(Missao, Option<Olheiro>)> {
+        let Some(estado) = self.estado_ativo() else {
+            return Vec::new();
+        };
+        estado.ler(|dados| {
+            dados
+                .missoes
+                .iter()
+                .rev()
+                .map(|m| (m.clone(), dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned()))
+                .collect()
+        })
     }
 
     /// Aba que a navegação deve assumir porque uma carreira acabou de
@@ -795,7 +1090,7 @@ mod tests {
         escritas.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    fn erro_da_contratacao(st: &ScoutState) -> Option<ErroContratacao> {
+    fn erro_da_contratacao(st: &ScoutState) -> Option<ErroCompra> {
         st.contratacao.as_ref().and_then(|c| c.erro.clone())
     }
 
@@ -1128,13 +1423,7 @@ mod tests {
 
         let ocupado = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente };
         let livre = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Generalista, tier: Tier::Junior };
-        let missao = |olheiro: &Olheiro, status| Missao {
-            id: Uuid::new_v4(),
-            olheiro_id: olheiro.id,
-            status,
-            criada_em: Date(20260701),
-            prazo_estimado: Date(20260715),
-        };
+        let missao = |olheiro: &Olheiro, status| Missao::de_teste(olheiro.id, status);
         let missoes = vec![missao(&ocupado, StatusMissao::Pendente), missao(&livre, StatusMissao::Concluida)];
         let (o1, o2) = (ocupado.clone(), livre.clone());
         st.estado_ativo()
@@ -1190,7 +1479,7 @@ mod tests {
         st.preparar_contratacao(Especializacao::Tatico, Tier::Elite);
         assert_eq!(st.previa_contratacao().and_then(|p| p.faltam), Some(5_100_000));
         assert!(!st.confirmar_contratacao());
-        assert_eq!(erro_da_contratacao(&st), Some(ErroContratacao::OrcamentoInsuficiente { faltam: 5_100_000 }));
+        assert_eq!(erro_da_contratacao(&st), Some(ErroCompra::OrcamentoInsuficiente { faltam: 5_100_000 }));
         assert!(escritas_de(&escritas).is_empty());
         assert!(st.olheiros_contratados().is_empty());
     }
@@ -1198,9 +1487,9 @@ mod tests {
     #[test]
     fn failed_or_unconfirmed_writes_hire_nobody() {
         for (resultado, esperado) in [
-            (Err(SaveRepoError::ProcessoInacessivel), ErroContratacao::EscritaFalhou),
-            (Err(SaveRepoError::Interno("releitura".into())), ErroContratacao::EscritaFalhou),
-            (Err(SaveRepoError::OrcamentoMudou(60_000_000)), ErroContratacao::OrcamentoMudou { atual: 60_000_000 }),
+            (Err(SaveRepoError::ProcessoInacessivel), ErroCompra::EscritaFalhou),
+            (Err(SaveRepoError::Interno("releitura".into())), ErroCompra::EscritaFalhou),
+            (Err(SaveRepoError::OrcamentoMudou(60_000_000)), ErroCompra::OrcamentoMudou { atual: 60_000_000 }),
         ] {
             let pasta = PastaTemporaria::nova();
             let (mut st, escritas) =
@@ -1219,17 +1508,17 @@ mod tests {
         let (mut st, escritas) = estado_contratacao(63_999_988, 63_999_988, None, vec![]);
         st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
         assert!(!st.confirmar_contratacao());
-        assert_eq!(erro_da_contratacao(&st), Some(ErroContratacao::EstadoNaoSalvavel));
+        assert_eq!(erro_da_contratacao(&st), Some(ErroCompra::EstadoNaoSalvavel));
         assert!(escritas_de(&escritas).is_empty());
     }
 
     #[test]
     fn if_saving_the_olheiro_fails_the_debit_is_undone() {
         for (desfazer, esperado) in [
-            (Ok(63_999_988), ErroContratacao::OlheiroNaoSalvo),
+            (Ok(63_999_988), ErroCompra::NaoSalvo),
             (
                 Err(SaveRepoError::ProcessoInacessivel),
-                ErroContratacao::OrcamentoDebitadoSemOlheiro { debitado: 300_000 },
+                ErroCompra::DebitadoSemSalvar { debitado: 300_000 },
             ),
         ] {
             let pasta = PastaTemporaria::nova();
@@ -1255,5 +1544,161 @@ mod tests {
         st.cancelar_contratacao();
         assert_eq!(st.previa_contratacao(), None);
         assert!(escritas_de(&escritas).is_empty());
+    }
+
+    /// Carreira pronta (orçamento `orcamento`, data 03/07/2026) com estes
+    /// Olheiros já no arquivo; depois de comprar, a releitura devolve
+    /// `orcamento_depois`.
+    fn estado_com_olheiros(
+        orcamento: i32,
+        orcamento_depois: i32,
+        olheiros: Vec<Olheiro>,
+        missoes: Vec<Missao>,
+        pasta: &PastaTemporaria,
+    ) -> (ScoutState, Escritas) {
+        let (st, escritas) = estado_contratacao(orcamento, orcamento_depois, Some(pasta.0.clone()), vec![]);
+        st.estado_ativo()
+            .map(|e| {
+                e.mutar(move |d| {
+                    d.olheiros = olheiros;
+                    d.missoes = missoes;
+                })
+            })
+            .expect("carreira ativa")
+            .expect("gravou");
+        (st, escritas)
+    }
+
+    fn olheiro(especializacao: Especializacao, tier: Tier) -> Olheiro {
+        Olheiro { id: Uuid::new_v4(), especializacao, tier }
+    }
+
+    #[test]
+    fn new_missao_form_picks_the_first_available_olheiro_and_estimates_live() {
+        let pasta = PastaTemporaria::nova();
+        let ocupado = olheiro(Especializacao::Tatico, Tier::Elite);
+        let livre = olheiro(Especializacao::CacadorDeJovens, Tier::Elite);
+        let missoes = vec![Missao::de_teste(ocupado.id, StatusMissao::Pendente)];
+        let (mut st, _) = estado_com_olheiros(63_999_988, 0, vec![ocupado.clone(), livre.clone()], missoes, &pasta);
+
+        st.abrir_nova_missao();
+        let previa = st.previa_missao().expect("formulário aberto");
+        assert_eq!(previa.rascunho.olheiro_id, Some(livre.id), "o ocupado é pulado");
+        assert_eq!(previa.olheiros.len(), 2, "o ocupado aparece, apagado");
+        assert_eq!(previa.tipo, quality::TipoMissao::Geral);
+        assert_eq!(previa.bloqueio, None);
+        let antes = previa.estimativa.expect("estimativa");
+
+        // escolher o ocupado é ignorado
+        st.escolher_olheiro_da_missao(ocupado.id);
+        assert_eq!(st.previa_missao().and_then(|p| p.rascunho.olheiro_id), Some(livre.id));
+
+        // faixas de jovens + Completa: combina e a Qualidade sobe
+        st.definir_modo_da_missao(ModoBusca::Completa);
+        st.ajustar_faixa_da_missao(CampoFaixa::OverallMax, -29); // 99 -> 70
+        st.ajustar_faixa_da_missao(CampoFaixa::PotencialMin, 30); // 50 -> 80
+        let previa = st.previa_missao().expect("formulário aberto");
+        assert_eq!(previa.tipo, quality::TipoMissao::Jovens);
+        assert!(previa.combina);
+        let depois = previa.estimativa.expect("estimativa");
+        assert!(depois.qualidade > antes.qualidade);
+        assert_eq!(depois.qualidade, Qualidade::Alta);
+        assert_eq!(previa.prazo(), Some(Date(20260703).mais_dias(depois.duracao_dias)));
+    }
+
+    #[test]
+    fn ranges_are_clamped_and_an_inverted_range_blocks_confirmation() {
+        let pasta = PastaTemporaria::nova();
+        let (mut st, escritas) =
+            estado_com_olheiros(63_999_988, 0, vec![olheiro(Especializacao::Generalista, Tier::Junior)], vec![], &pasta);
+        st.abrir_nova_missao();
+        st.ajustar_faixa_da_missao(CampoFaixa::OverallMax, 50);
+        assert_eq!(st.previa_missao().map(|p| p.rascunho.filtros.overall.max), Some(99), "não passa de 99");
+        st.ajustar_faixa_da_missao(CampoFaixa::OverallMin, -100);
+        assert_eq!(st.previa_missao().map(|p| p.rascunho.filtros.overall.min), Some(1), "não passa de 1");
+
+        st.ajustar_faixa_da_missao(CampoFaixa::PotencialMin, 60); // 50 -> 99... limitado
+        st.ajustar_faixa_da_missao(CampoFaixa::PotencialMax, -40); // 99 -> 59
+        let previa = st.previa_missao().expect("aberto");
+        assert_eq!(previa.bloqueio, Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::PotencialMin }));
+        assert!(!st.confirmar_nova_missao());
+        assert!(escritas_de(&escritas).is_empty());
+    }
+
+    #[test]
+    fn without_an_available_olheiro_confirmation_is_blocked() {
+        let pasta = PastaTemporaria::nova();
+        let (mut st, _) = estado_com_olheiros(63_999_988, 0, vec![], vec![], &pasta);
+        st.abrir_nova_missao();
+        let previa = st.previa_missao().expect("aberto");
+        assert_eq!(previa.bloqueio, Some(BloqueioMissao::SemOlheiroDisponivel));
+        assert_eq!(previa.estimativa, None);
+        assert!(!st.confirmar_nova_missao());
+    }
+
+    #[test]
+    fn confirming_debits_and_saves_a_pending_missao_and_the_olheiro_becomes_busy() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, escritas) = estado_com_olheiros(63_999_988, 63_849_988, vec![o.clone()], vec![], &pasta);
+        st.abrir_nova_missao();
+        let estimativa = st.previa_missao().and_then(|p| p.estimativa).expect("estimativa");
+        assert_eq!(estimativa.custo, 450_000, "Júnior, Rápida, mundo");
+
+        assert!(st.confirmar_nova_missao());
+        assert_eq!(escritas_de(&escritas), [(63_999_988, 63_999_988 - 450_000)]);
+        assert!(!st.tem_nova_missao(), "o formulário fecha");
+        assert_eq!(st.orcamento(), Some(63_849_988), "saldo relido do jogo");
+
+        let missoes = st.missoes();
+        assert_eq!(missoes.len(), 1);
+        let (m, dono) = &missoes[0];
+        assert_eq!(m.status, StatusMissao::Pendente, "nenhuma busca roda agora");
+        assert_eq!(m.olheiro_id, o.id);
+        assert_eq!(dono.as_ref().map(|d| d.id), Some(o.id));
+        assert_eq!(m.criada_em, Date(20260703));
+        assert_eq!(m.prazo_estimado, Date(20260703).mais_dias(estimativa.duracao_dias));
+        assert_eq!(m.estimativa, estimativa, "guarda o que o jogador pagou");
+        assert!(st.olheiros_contratados().iter().all(|c| c.em_missao), "Olheiro agora Em Missão");
+
+        // gravado no arquivo da carreira
+        let bytes = std::fs::read(pasta.0.join(format!("{ID_A}.json"))).unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        assert_eq!(json["missoes"][0]["status"], "Pendente");
+        assert_eq!(json["missoes"][0]["modo_busca"], "rapida");
+        assert_eq!(json["missoes"][0]["estimativa"]["custo"], 450_000);
+
+        // um segundo formulário já não tem Olheiro disponível
+        st.abrir_nova_missao();
+        assert_eq!(st.previa_missao().and_then(|p| p.bloqueio), Some(BloqueioMissao::SemOlheiroDisponivel));
+    }
+
+    #[test]
+    fn insufficient_budget_blocks_with_the_exact_shortfall() {
+        let pasta = PastaTemporaria::nova();
+        let (mut st, escritas) =
+            estado_com_olheiros(100_000, 100_000, vec![olheiro(Especializacao::Generalista, Tier::Junior)], vec![], &pasta);
+        st.abrir_nova_missao();
+        assert_eq!(
+            st.previa_missao().and_then(|p| p.bloqueio),
+            Some(BloqueioMissao::OrcamentoInsuficiente { faltam: 350_000 })
+        );
+        assert!(!st.confirmar_nova_missao());
+        assert!(escritas_de(&escritas).is_empty());
+        assert!(st.missoes().is_empty());
+    }
+
+    #[test]
+    fn a_failed_debit_saves_no_missao_and_keeps_the_form_open() {
+        let pasta = PastaTemporaria::nova();
+        let (st, _) = estado_contratacao(63_999_988, 63_999_988, Some(pasta.0.clone()), vec![Err(SaveRepoError::ProcessoInacessivel)]);
+        let mut st = st;
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        st.estado_ativo().map(|e| e.mutar(move |d| d.olheiros = vec![o])).expect("ativa").expect("gravou");
+        st.abrir_nova_missao();
+        assert!(!st.confirmar_nova_missao());
+        assert_eq!(st.previa_missao().and_then(|p| p.rascunho.erro), Some(ErroCompra::EscritaFalhou));
+        assert!(st.missoes().is_empty());
+        assert!(st.olheiros_contratados().iter().all(|c| !c.em_missao));
     }
 }

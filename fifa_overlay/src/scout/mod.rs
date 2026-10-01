@@ -10,9 +10,10 @@
 //!   painel UMA vez, só na transição solta→pressionada.
 //!
 //! Controle (Story 1.6): o mesmo vale para o combo `COMBO_PAINEL`. Com o
-//! painel aberto, LB/RB trocam de aba e B volta uma tela (fecha o modal;
-//! na raiz, fecha o painel); D-pad/analógico e A são a navegação do
-//! próprio ImGui. Enquanto o painel está aberto, e depois de fechar até
+//! painel aberto, LB/RB — e, numa aba sem tela satélite, também D-pad
+//! ←/→ — trocam de aba; B volta uma tela (fecha o modal; na raiz, fecha o
+//! painel); D-pad/analógico e A são a navegação do próprio ImGui
+//! (`gamepad::para_navegacao`). Enquanto o painel está aberto, e depois de fechar até
 //! todos os botões serem soltos, o jogo recebe o controle parado
 //! (`bloqueia_controle`, aplicado em `crate::gamepad`): sem isso o B ou o
 //! START que fechou o painel chegaria ao FIFA ao ser solto.
@@ -44,6 +45,8 @@ pub struct ComandosControle {
     pub aba_anterior: bool,
     pub proxima_aba: bool,
     pub voltar: bool,
+    pub esquerda: bool,
+    pub direita: bool,
 }
 
 pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> ComandosControle {
@@ -53,6 +56,8 @@ pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> Com
         aba_anterior: borda(botao::LB),
         proxima_aba: borda(botao::RB),
         voltar: borda(botao::B),
+        esquerda: borda(botao::DPAD_ESQUERDA),
+        direita: borda(botao::DPAD_DIREITA),
     }
 }
 
@@ -226,8 +231,10 @@ impl Scout {
         } else {
             tracing::info!("[scout] Painel fechado.");
             self.nav.reset_para_aba();
-            // Fechar no meio da confirmação = cancelar (nada é debitado).
+            // Fechar no meio da confirmação/formulário = cancelar (nada é
+            // debitado nem gravado).
             self.state.cancelar_contratacao();
+            self.state.cancelar_nova_missao();
         }
     }
 
@@ -256,8 +263,10 @@ impl Scout {
             self.alternar_painel();
         } else if self.painel_aberto {
             let na_raiz = self.nav.profundidade() == 1;
-            if na_raiz && (comandos.aba_anterior || comandos.proxima_aba) {
-                let passo = if comandos.proxima_aba { 1 } else { -1 };
+            let anterior = comandos.aba_anterior || comandos.esquerda;
+            let proxima = comandos.proxima_aba || comandos.direita;
+            if na_raiz && (anterior || proxima) {
+                let passo = if proxima { 1 } else { -1 };
                 let aba = self.nav.aba_ativa().vizinha(passo);
                 self.nav.trocar_aba(aba);
                 self.state.definir_aba_ativa(aba);
@@ -282,13 +291,21 @@ impl Scout {
     fn voltar(&mut self) {
         match self.nav.tela_atual() {
             ScoutScreen::Satelite(satelite) => {
-                if satelite == Satelite::ConfirmacaoContratacao {
-                    self.state.cancelar_contratacao();
+                match satelite {
+                    Satelite::ConfirmacaoContratacao => self.state.cancelar_contratacao(),
+                    Satelite::NovaMissao => self.state.cancelar_nova_missao(),
+                    _ => {}
                 }
                 self.nav.pop();
             }
             ScoutScreen::Aba(_) => self.alternar_painel(),
         }
+    }
+
+    /// Painel aberto numa aba, sem tela satélite: ←/→ do D-pad trocam de
+    /// aba em vez de navegar (`gamepad::para_navegacao`).
+    pub fn navegacao_na_raiz(&self) -> bool {
+        self.painel_aberto && self.nav.profundidade() == 1
     }
 
     /// O jogo deve receber o controle parado neste frame?
@@ -532,6 +549,44 @@ mod tests {
         assert!(scout.bloqueia_controle(), "B ainda apertado");
         scout.aplicar_controle(controle(0), false);
         assert!(!scout.bloqueia_controle());
+    }
+
+    #[test]
+    fn b_on_the_new_missao_form_goes_back_without_saving() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.state.tick();
+        scout.state.abrir_nova_missao();
+        scout.nav.push(Satelite::NovaMissao);
+        assert!(scout.state.tem_nova_missao());
+
+        scout.aplicar_controle(controle(botao::B), false);
+        assert!(scout.painel_aberto(), "B volta para a aba, não fecha o painel");
+        assert_eq!(scout.nav.profundidade(), 1);
+        assert!(!scout.state.tem_nova_missao());
+    }
+
+    #[test]
+    fn dpad_left_right_switch_tabs_only_at_the_root() {
+        let mut scout = Scout::new();
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        assert!(scout.navegacao_na_raiz());
+        scout.aplicar_controle(controle(botao::DPAD_DIREITA), false);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Missoes);
+        scout.aplicar_controle(controle(botao::DPAD_DIREITA), false);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Missoes, "segurar troca uma vez só");
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::DPAD_ESQUERDA), false);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
+
+        // num formulário/modal, ←/→ são navegação, não troca de aba
+        scout.aplicar_controle(controle(0), false);
+        scout.nav.push(Satelite::NovaMissao);
+        assert!(!scout.navegacao_na_raiz());
+        scout.aplicar_controle(controle(botao::DPAD_DIREITA), false);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
     }
 
     #[test]

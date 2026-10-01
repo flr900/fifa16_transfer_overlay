@@ -381,11 +381,9 @@ pub(crate) mod tests {
     fn ids_and_dates_follow_ad12() {
         let olheiro = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente };
         let missao = Missao {
-            id: Uuid::new_v4(),
-            olheiro_id: olheiro.id,
-            status: StatusMissao::Pendente,
             criada_em: Date(20260703),
             prazo_estimado: Date(20261015),
+            ..Missao::de_teste(olheiro.id, StatusMissao::Pendente)
         };
         let relatorio = Relatorio { id: Uuid::new_v4(), missao_id: missao.id };
 
@@ -408,6 +406,11 @@ pub(crate) mod tests {
         assert_eq!(json["missoes"][0]["criada_em"], 20260703);
         assert_eq!(json["missoes"][0]["prazo_estimado"], 20261015);
         assert_eq!(json["missoes"][0]["status"], "Pendente");
+        assert_eq!(json["missoes"][0]["modo_busca"], "rapida");
+        assert_eq!(json["missoes"][0]["filtros"]["overall"]["min"], 50);
+        assert_eq!(json["missoes"][0]["tipo"], "geral");
+        assert_eq!(json["missoes"][0]["amplitude"], "mundo");
+        assert!(json["missoes"][0]["estimativa"]["custo"].is_number());
         assert_eq!(json["relatorios"][0]["missao_id"], missao.id.to_string());
         let canonico = json["olheiros"][0]["id"].as_str().unwrap_or_default();
         assert_eq!(canonico.len(), 36);

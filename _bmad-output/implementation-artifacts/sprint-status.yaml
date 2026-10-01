@@ -59,8 +59,8 @@ development_status:
   epic-1-retrospective: optional
 
   epic-2: in-progress
-  2-1-define-the-scouting-balance-table: review
-  2-2-create-a-missao-with-an-olheiro-overall-potencial-range-and-modo-de-busca: backlog
+  2-1-define-the-scouting-balance-table: done
+  2-2-create-a-missao-with-an-olheiro-overall-potencial-range-and-modo-de-busca: review
   2-3-follow-the-progress-of-active-missoes: backlog
   2-4-run-due-missoes-and-generate-relatorios: backlog
   2-5-read-a-relatorio-in-the-tabular-view: backlog
