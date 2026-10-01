@@ -218,8 +218,10 @@ pub fn aplicar_estilo(style: &mut Style) {
     style[StyleColor::ScrollbarGrab] = BORDER_HAIRLINE_SUBTLE;
     style[StyleColor::ScrollbarGrabHovered] = BORDER_HAIRLINE;
     style[StyleColor::ScrollbarGrabActive] = ACCENT_PRIMARY;
-    // Foco de teclado/gamepad = borda roxa sólida (EXPERIENCE.md).
-    style[StyleColor::NavHighlight] = ACCENT_PRIMARY;
+    // Foco de teclado/controle: o destaque nativo fica invisível e as telas
+    // desenham a MESMA borda roxa do hover (`screens::contorno_hover`, cards
+    // da aba Olheiros) — UX-DR19, Story 1.6.
+    style[StyleColor::NavHighlight] = TRANSPARENTE;
     style[StyleColor::ModalWindowDimBg] = rgba(0x0b0e0c, 0.6);
 }
 

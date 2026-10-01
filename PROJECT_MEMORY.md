@@ -1388,6 +1388,20 @@ carregada"; data que VOLTA → outro save carregado → cache descartado).
 - Ideias do Felipe para Olheiros pós-v1:
   `_bmad-output/planning-artifacts/melhorias-futuras-olheiros.md`.
 
+## Sessão 11 — Story 1.6: navegação por controle e recarga sem fechar o jogo (2026-10-01)
+
+- O FIFA lê o controle direto pelo XInput: o `MessageFilter` do hudhook não
+  o bloqueia. `gamepad.rs` engancha `XInputGetState` (MinHook do hudhook)
+  nas DLLs de XInput carregadas (no jogo: DLL #0 `xinput1_4` e #2
+  `xinput9_1_0`). Com o painel aberto, e até soltar os botões depois de
+  fechar, o jogo recebe o controle parado. O overlay lê pelo trampolim.
+- L3+START abre/fecha; LB/RB trocam de aba; B volta/fecha; cada card da
+  aba Olheiros é um item navegável inteiro (o scroll mostra o card todo).
+- **Recarga de desenvolvimento**: `fifa_overlay/recarregar_dev.ps1` (com o
+  jogo aberto) cria `%TEMP%/fifa_overlay_eject.pedido`; a DLL (>= 1.6-v2)
+  remove o gancho do XInput e chama `hudhook::eject()`; o script copia a
+  build nova e injeta. Primeiro teste: ciclo completo em ~2 s, jogo seguiu.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —
