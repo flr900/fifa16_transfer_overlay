@@ -4,7 +4,7 @@ baseline_commit: 9a675cb
 
 # Story 2.1: Define the scouting balance table
 
-Status: review
+Status: done
 
 ## Story
 

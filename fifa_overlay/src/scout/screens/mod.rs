@@ -6,8 +6,10 @@
 //! exibição (milhar, data dd/mm/aaaa) é responsabilidade desta camada.
 
 pub mod aviso;
+mod componentes;
 mod confirmacao_contratacao;
 mod missoes;
+mod nova_missao;
 mod olheiros;
 mod relatorios;
 mod sonar;
@@ -48,6 +50,15 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         nav.pop();
         confirmando = false;
     }
+    // O formulário Nova Missão só existe com a tela dele no topo (trocar de
+    // aba descarta o rascunho) e fecha se a carreira deixar de estar pronta.
+    let na_nova_missao = nav.tela_atual() == ScoutScreen::Satelite(Satelite::NovaMissao);
+    if na_nova_missao && state.previa_missao().is_none() {
+        state.cancelar_nova_missao();
+        nav.pop();
+    } else if !na_nova_missao && state.tem_nova_missao() {
+        state.cancelar_nova_missao();
+    }
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -69,7 +80,7 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             ui.dummy([0.0, theme::ESPACO_2]);
             barra_de_abas(ui, fonts, nav, state);
             ui.dummy([0.0, theme::ESPACO_4]);
-            pedido = conteudo(ui, fonts, nav.aba_ativa(), state);
+            pedido = conteudo(ui, fonts, nav.aba_ativa(), nav.tela_atual(), state);
             drop(desabilitado);
             if confirmando {
                 let canto = ui.window_pos();
@@ -82,11 +93,20 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             }
         });
 
-    if let Some((especializacao, tier)) = pedido {
-        if !confirmando {
+    match pedido {
+        Some(Pedido::Contratar(especializacao, tier)) if !confirmando => {
             state.preparar_contratacao(especializacao, tier);
             nav.push(Satelite::ConfirmacaoContratacao);
         }
+        Some(Pedido::AbrirNovaMissao) => {
+            state.abrir_nova_missao();
+            nav.push(Satelite::NovaMissao);
+        }
+        Some(Pedido::FecharNovaMissao) => {
+            state.cancelar_nova_missao();
+            nav.pop();
+        }
+        _ => {}
     }
     if confirmando {
         match confirmacao_contratacao::render(ui, fonts, state) {
@@ -200,7 +220,15 @@ fn barra_de_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: &m
 
 /// Área de conteúdo: um child window por aba, para cada aba guardar o
 /// próprio scroll (o ImGui mantém o estado por ID mesmo sem desenhar).
-fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, state: &mut ScoutState) -> Option<(Especializacao, Tier)> {
+/// O que o conteúdo pediu para a navegação neste frame.
+enum Pedido {
+    Contratar(Especializacao, Tier),
+    AbrirNovaMissao,
+    /// Confirmou ou cancelou o formulário: volta para a aba.
+    FecharNovaMissao,
+}
+
+fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState) -> Option<Pedido> {
     let status = state.status().clone();
     let id = format!("##conteudo_{:?}", aba);
     let mut pedido = None;
@@ -215,13 +243,24 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, state: &mut ScoutState) ->
         CarreiraStatus::ErroLeitura => {
             mensagem(ui, fonts, MSG_ERRO_LEITURA);
             ui.dummy([0.0, theme::ESPACO_2]);
-            if botao_primario(ui, "Tentar novamente") {
+            if componentes::botao(ui, fonts, "Tentar novamente", componentes::EstiloBotao::Primario, true) {
                 state.tentar_novamente();
             }
         }
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::NovaMissao) => {
+            if nova_missao::render(ui, fonts, state) != nova_missao::Acao::Nenhuma {
+                pedido = Some(Pedido::FecharNovaMissao);
+            }
+        }
         CarreiraStatus::Pronta(_) => match aba {
-            Aba::Olheiros => pedido = olheiros::render(ui, fonts, state),
-            Aba::Missoes => missoes::render(ui, fonts),
+            Aba::Olheiros => {
+                pedido = olheiros::render(ui, fonts, state).map(|(e, t)| Pedido::Contratar(e, t));
+            }
+            Aba::Missoes => {
+                if missoes::render(ui, fonts, state) {
+                    pedido = Some(Pedido::AbrirNovaMissao);
+                }
+            }
             Aba::Relatorios => relatorios::render(ui, fonts),
             Aba::Sonar => sonar::render(ui, fonts),
         },
@@ -236,18 +275,6 @@ fn mensagem(ui: &Ui, fonts: Option<&Fonts>, texto: &str) {
 /// Placeholder neutro das abas que ainda não têm conteúdo.
 fn aba_vazia(ui: &Ui, fonts: Option<&Fonts>) {
     com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_ABA_VAZIA));
-}
-
-/// Botão primário (DESIGN.md → button-primary): verde-campo, texto escuro.
-fn botao_primario(ui: &Ui, rotulo: &str) -> bool {
-    let _c1 = ui.push_style_color(StyleColor::Button, theme::FIELD_GREEN);
-    let _c2 = ui.push_style_color(StyleColor::ButtonHovered, theme::FIELD_GREEN);
-    let _c3 = ui.push_style_color(StyleColor::ButtonActive, theme::FIELD_GREEN);
-    let _c4 = ui.push_style_color(StyleColor::Text, theme::BG_BASE);
-    let largura = ui.calc_text_size(rotulo)[0] + theme::ESPACO_5 * 2.0;
-    let clicou = ui.button_with_size(rotulo, [largura, theme::ALVO_MINIMO]);
-    contorno_hover(ui, theme::RAIO_PADRAO);
-    clicou
 }
 
 /// `63999988` → `63.999.988` (separador de milhar brasileiro).

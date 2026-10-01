@@ -18,6 +18,7 @@
 
 use imgui::{DrawListMut, Ui};
 
+use super::componentes::{badge_tier, desenhar_badge};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_milhar};
 use crate::scout::state::{Especializacao, OfertaOlheiro, OlheiroContratado, ScoutState, Tier};
@@ -48,25 +49,6 @@ pub fn descricao(especializacao: Especializacao) -> &'static str {
         Especializacao::CacadorDeMedalhoes => "Foco em jogadores consagrados, prontos para jogar já.",
         Especializacao::Tatico => "Especialista em fit de atributos e posição.",
         Especializacao::Generalista => "Sem especialização: barato, relatórios rasos.",
-    }
-}
-
-/// Texto do badge de Tier (sempre junto da cor — NFR5).
-pub fn texto_badge(tier: Tier) -> &'static str {
-    match tier {
-        Tier::Junior => "JR",
-        Tier::Experiente => "EXP",
-        Tier::Elite => "ELITE",
-    }
-}
-
-/// `(contorno, preenchimento, texto)` do badge: contorno + preenchimento
-/// tênue, nunca sólido (DESIGN.md → tier-badge-*).
-pub fn cores_badge(tier: Tier) -> ([f32; 4], [f32; 4], [f32; 4]) {
-    match tier {
-        Tier::Junior => (theme::TIER_JUNIOR, theme::TRANSPARENTE, theme::TIER_JUNIOR_TEXTO),
-        Tier::Experiente => (theme::TIER_EXPERIENTE, theme::ACCENT_PRIMARY_DIM, theme::TIER_EXPERIENTE),
-        Tier::Elite => (theme::TIER_ELITE, theme::TRANSPARENTE, theme::TIER_ELITE),
     }
 }
 
@@ -121,11 +103,7 @@ pub fn nome_com_badge(ui: &Ui, fonts: Option<&Fonts>, especializacao: Especializ
         ui.calc_text_size(especializacao.nome())[1]
     });
     ui.same_line_with_spacing(0.0, theme::ESPACO_2);
-    let pos = ui.cursor_screen_pos();
-    let dl = ui.get_window_draw_list();
-    let tamanho = desenhar_badge(ui, fonts, &dl, tier, pos, altura_nome);
-    drop(dl);
-    ui.dummy([tamanho[0], altura_nome.max(tamanho[1])]);
+    super::componentes::badge_no_fluxo(ui, fonts, &badge_tier(tier), altura_nome);
 }
 
 /// Rótulo de seção ("Contratados" / "Disponíveis…"). Não é item
@@ -198,7 +176,7 @@ fn card(
         dl.add_text([x_texto, y_nome], theme::TEXT_PRIMARY, especializacao.nome());
         ui.calc_text_size(especializacao.nome())
     });
-    desenhar_badge(ui, fonts, &dl, tier, [x_texto + largura_nome + theme::ESPACO_2, y_nome], altura_nome);
+    desenhar_badge(ui, fonts, &dl, &badge_tier(tier), [x_texto + largura_nome + theme::ESPACO_2, y_nome], altura_nome);
     com_fonte(ui, fonts.map(|f| f.meta), || {
         let y = y_nome + altura_nome + theme::ESPACO_1;
         dl.add_text([x_texto, y], theme::TEXT_SECONDARY, descricao(especializacao));
@@ -268,31 +246,6 @@ fn texto_centralizado(
     });
 }
 
-/// Badge em contorno + preenchimento tênue, com o texto do Tier, na
-/// posição `pos`, centralizado na altura `altura_linha`. Devolve a largura.
-fn desenhar_badge(
-    ui: &Ui,
-    fonts: Option<&Fonts>,
-    dl: &DrawListMut<'_>,
-    tier: Tier,
-    pos: [f32; 2],
-    altura_linha: f32,
-) -> [f32; 2] {
-    let (contorno, fundo, cor_texto) = cores_badge(tier);
-    let texto = texto_badge(tier);
-    com_fonte(ui, fonts.map(|f| f.badge), || {
-        let [w, h] = ui.calc_text_size(texto);
-        let padding = [theme::ESPACO_2, 2.0];
-        let tamanho = [w + padding[0] * 2.0, h + padding[1] * 2.0];
-        let b_min = [pos[0], pos[1] + (altura_linha - tamanho[1]).max(0.0) * 0.5];
-        let b_max = [b_min[0] + tamanho[0], b_min[1] + tamanho[1]];
-        dl.add_rect(b_min, b_max, fundo).filled(true).rounding(theme::RAIO_SM).build();
-        dl.add_rect(b_min, b_max, contorno).rounding(theme::RAIO_SM).build();
-        dl.add_text([b_min[0] + padding[0], b_min[1] + padding[1]], cor_texto, texto);
-        tamanho
-    })
-}
-
 /// "custo" + valor em fonte mono, alinhados à direita de `x_direita`; sem
 /// orçamento, a primeira linha diz quanto falta (vermelho + texto).
 fn custo(ui: &Ui, fonts: Option<&Fonts>, dl: &DrawListMut<'_>, oferta: &OfertaOlheiro, x_direita: f32, y_card: f32) {
@@ -328,18 +281,6 @@ fn status(ui: &Ui, fonts: Option<&Fonts>, dl: &DrawListMut<'_>, em_missao: bool,
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn badges_always_have_text_and_follow_the_three_step_colour_scale() {
-        assert_eq!(Tier::TODOS.map(texto_badge), ["JR", "EXP", "ELITE"]);
-        assert_eq!(cores_badge(Tier::Junior).0, theme::TIER_JUNIOR);
-        assert_eq!(cores_badge(Tier::Experiente).0, theme::TIER_EXPERIENTE);
-        assert_eq!(cores_badge(Tier::Elite).0, theme::TIER_ELITE);
-        // contorno + preenchimento tênue, nunca sólido
-        for tier in Tier::TODOS {
-            assert!(cores_badge(tier).1[3] <= 0.15, "{tier:?}");
-        }
-    }
 
     #[test]
     fn each_especializacao_has_its_own_initials_and_description() {

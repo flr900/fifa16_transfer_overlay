@@ -158,6 +158,26 @@ impl Date {
         let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
         era * 146_097 + doe - 719_468
     }
+
+    /// Inverso de `day_number` (algoritmo `civil_from_days`).
+    pub fn from_day_number(dias: i64) -> Date {
+        let z = dias + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        let yyyymmdd = y * 10_000 + m * 100 + d;
+        Date(i32::try_from(yyyymmdd).unwrap_or(i32::MAX))
+    }
+
+    /// Esta data mais `dias` dias de calendário (prazo de uma Missão).
+    pub fn mais_dias(self, dias: u32) -> Date {
+        Date::from_day_number(self.day_number() + i64::from(dias))
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1255,6 +1275,18 @@ mod tests {
         assert!(!Date(20351302).is_plausible());
         assert!(!Date(20350032).is_plausible());
         assert_eq!((Date(20351102).year(), Date(20351102).month(), Date(20351102).day()), (2035, 11, 2));
+    }
+
+    #[test]
+    fn adding_days_crosses_months_years_and_leap_days() {
+        assert_eq!(Date(20280924).mais_dias(18), Date(20281012));
+        assert_eq!(Date(20281220).mais_dias(20), Date(20290109));
+        assert_eq!(Date(20280220).mais_dias(10), Date(20280301), "2028 é bissexto");
+        assert_eq!(Date(20270220).mais_dias(10), Date(20270302));
+        assert_eq!(Date(20260701).mais_dias(0), Date(20260701));
+        for data in [Date(20080101), Date(20351231), Date(20280229)] {
+            assert_eq!(Date::from_day_number(data.day_number()), data);
+        }
     }
 
     #[test]

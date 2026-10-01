@@ -22,8 +22,14 @@ const fn rgba(rgb: u32, alpha: f32) -> [f32; 4] {
 }
 
 pub const BG_BASE: [f32; 4] = rgba(0x0b0e0c, 1.0);
-pub const BG_PANEL: [f32; 4] = rgba(0x101412, 0.93);
-pub const BG_PANEL_RAISED: [f32; 4] = rgba(0x181d1a, 0.96);
+// Opacidade (2026-10-01, pedido do Felipe): os 93%/96% do DESIGN.md
+// deixavam o jogo atrapalhar a leitura, principalmente no formulário Nova
+// Missão. O hudhook desenha direto sobre a imagem do jogo; o jogo aparece
+// bem mais que os 7% "nominais" — provável mistura em luz linear (backbuffer
+// sRGB), em que as áreas claras do jogo vazam muito. Painel a 98% e
+// superfícies elevadas (cards, modal, banner) opacas. DESIGN.md pede ≥ 90%.
+pub const BG_PANEL: [f32; 4] = rgba(0x101412, 0.98);
+pub const BG_PANEL_RAISED: [f32; 4] = rgba(0x181d1a, 1.0);
 pub const BORDER_HAIRLINE: [f32; 4] = rgba(0xb45cff, 0.28);
 pub const BORDER_HAIRLINE_SUBTLE: [f32; 4] = rgba(0xffffff, 0.08);
 pub const TEXT_PRIMARY: [f32; 4] = rgba(0xe9f2ec, 1.0);
@@ -103,13 +109,26 @@ pub struct Fonts {
     pub mono: Option<FontId>,
 }
 
+/// Nitidez (2026-10-01, Felipe achou o texto borrado): o jogo roda na
+/// resolução nativa do monitor (2560×1080, DPI 100%), então o borrão vinha
+/// da fonte. Com `oversample_h: 2` e sem `pixel_snap_h`, cada letra caía em
+/// posição fracionária e era suavizada pelo filtro da textura. Agora cada
+/// letra é rasterizada uma vez e alinhada ao pixel, com um leve reforço de
+/// contraste no traço (`rasterizer_multiply`). Se ainda ficar macio, o
+/// próximo passo é o rasterizador FreeType (com hinting), que exige
+/// instalar a biblioteca FreeType (`vcpkg`).
+pub const REFORCO_TRACO: f32 = 1.15;
+
 fn fonte(data: &'static [u8], tamanho: f32) -> FontSource<'static> {
     FontSource::TtfData {
         data,
         size_pixels: tamanho,
         config: Some(FontConfig {
             glyph_ranges: FontGlyphRanges::from_slice(&FAIXAS_DE_GLIFOS),
-            oversample_h: 2,
+            oversample_h: 1,
+            oversample_v: 1,
+            pixel_snap_h: true,
+            rasterizer_multiply: REFORCO_TRACO,
             ..FontConfig::default()
         }),
     }
@@ -242,6 +261,8 @@ mod tests {
     fn panels_with_text_are_at_least_90_percent_opaque() {
         assert!(BG_PANEL[3] >= 0.90);
         assert!(BG_PANEL_RAISED[3] >= 0.90);
+        // pedido do Felipe: o jogo não pode atrapalhar a leitura
+        assert!(BG_PANEL[3] >= 0.98 && BG_PANEL_RAISED[3] >= 1.0);
     }
 
     #[test]
