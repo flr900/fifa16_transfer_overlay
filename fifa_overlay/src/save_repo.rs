@@ -636,16 +636,72 @@ fn locate() -> Result<LiveCareer, SaveRepoError> {
     // varredura não espalha cópias da memória do jogo pelo heap.
     let mut buffer = ScrubbedBuffer(vec![0u8; memscan::MAX_REGION_SIZE]);
     let own = OwnMemory::current(careers, &buffer.0);
+    let regions = memscan::enumerate_private_committed_regions();
 
+    // Caminho rápido: a struct de finanças mora na MESMA região (base do
+    // `VirtualQuery`) que guarda a data viva em +0x373E08 (sessão 6).
+    // Varrer só as regiões com data viva confirmada leva uma fração de
+    // segundo em vez de ~15 s. Se não achar, cai na varredura completa.
+    let quick = regions_with_live_date(&regions, &ProcessMemory);
+    let mut found_any = false;
+    if !quick.is_empty() {
+        let inicio = std::time::Instant::now();
+        let (chosen, found) = scan_and_choose(&quick, careers, &own, &mut buffer.0);
+        found_any |= found;
+        if let Some(live) = chosen {
+            tracing::info!(
+                "[save_repo] Localização rápida: {} região(ões) com data viva, {} ms.",
+                quick.len(),
+                inicio.elapsed().as_millis()
+            );
+            return Ok(live);
+        }
+        tracing::info!(
+            "[save_repo] Localização rápida não achou a carreira em {} região(ões); varrendo a memória inteira.",
+            quick.len()
+        );
+    }
+
+    let (chosen, found) = scan_and_choose(&regions, careers, &own, &mut buffer.0);
+    found_any |= found;
+    drop(buffer);
+    match chosen {
+        Some(live) => Ok(live),
+        None if found_any => {
+            tracing::warn!(
+                "[save_repo] Há structs de carreiras na memória, mas nenhuma com data viva confirmada \
+                 (menu principal? são restos de carreiras carregadas antes)."
+            );
+            Err(SaveRepoError::CarreiraNaoCarregada)
+        }
+        None => {
+            tracing::warn!(
+                "[save_repo] Nenhuma assinatura de temporada dos saves está viva na memória \
+                 (carreira não carregada, ou temporada virou depois do último save)."
+            );
+            Err(SaveRepoError::CarreiraNaoCarregada)
+        }
+    }
+}
+
+/// Procura as structs de finanças de `careers` em `regions` e escolhe a
+/// carreira ativa (`choose_career`). Devolve também se ACHOU alguma
+/// struct (mesmo sem data viva), para a mensagem de erro.
+fn scan_and_choose(
+    regions: &[Region],
+    careers: &[SavedCareer],
+    own: &OwnMemory,
+    buffer: &mut [u8],
+) -> (Option<LiveCareer>, bool) {
     let mut matches = Vec::new();
-    for region in memscan::enumerate_private_committed_regions() {
+    for region in regions {
         if own.overlaps_buffer(region.base, region.size) {
             continue;
         }
-        let Some(read) = memscan::read_region_into(&region, &mut buffer.0) else {
+        let Some(read) = memscan::read_region_into(region, buffer) else {
             continue;
         };
-        let bytes = buffer.0.get(..read).unwrap_or_default();
+        let bytes = buffer.get(..read).unwrap_or_default();
         for found in match_live_careers([(region.base, bytes)], careers) {
             if own.contains(found.transfer_budget_addr) {
                 tracing::info!(
@@ -657,7 +713,6 @@ fn locate() -> Result<LiveCareer, SaveRepoError> {
             }
         }
     }
-    drop(buffer);
     for found in &matches {
         tracing::info!(
             "[save_repo] Struct viva candidata: 0x{:X} (região 0x{:X}) → {}",
@@ -698,32 +753,17 @@ fn locate() -> Result<LiveCareer, SaveRepoError> {
     }
 
     let found_any = !candidates.is_empty();
-    match choose_career(candidates, &ProcessMemory) {
-        Some(mut live) => {
-            live.last_date = live_date(&live, &ProcessMemory);
-            tracing::info!(
-                "[save_repo] Carreira ativa: {} (struct viva em 0x{:X}; data viva {:?}).",
-                live.save.identity.joined(),
-                live.transfer_budget_addr,
-                live.last_date.map(|d| d.0)
-            );
-            Ok(live)
-        }
-        None if found_any => {
-            tracing::warn!(
-                "[save_repo] Há structs de carreiras na memória, mas nenhuma com data viva confirmada \
-                 (menu principal? são restos de carreiras carregadas antes)."
-            );
-            Err(SaveRepoError::CarreiraNaoCarregada)
-        }
-        None => {
-            tracing::warn!(
-                "[save_repo] Nenhuma assinatura de temporada dos saves está viva na memória \
-                 (carreira não carregada, ou temporada virou depois do último save)."
-            );
-            Err(SaveRepoError::CarreiraNaoCarregada)
-        }
-    }
+    let chosen = choose_career(candidates, &ProcessMemory).map(|mut live| {
+        live.last_date = live_date(&live, &ProcessMemory);
+        tracing::info!(
+            "[save_repo] Carreira ativa: {} (struct viva em 0x{:X}; data viva {:?}).",
+            live.save.identity.joined(),
+            live.transfer_budget_addr,
+            live.last_date.map(|d| d.0)
+        );
+        live
+    });
+    (chosen, found_any)
 }
 
 /// Escolhe a carreira ativa entre as structs achadas (já em ordem de
@@ -1018,24 +1058,53 @@ fn in_season(date: Date, season_end: Date) -> bool {
 /// se ele estiver exatamente um dia antes do save mais recente,
 /// devolvemos a data do save, que é a que o jogador vê.
 fn live_date(live: &LiveCareer, src: &impl ByteSource) -> Option<Date> {
-    let values: Vec<Date> = LIVE_DATE_REGION_OFFSETS
-        .iter()
-        .filter_map(|&offset| {
-            let addr = live.region_base.checked_add(offset)?;
-            let date = Date(i32_at(&src.read(addr, 4)?, 0)?);
-            (date.is_plausible() && in_season(date, live.save.season_end)).then_some(date)
-        })
-        .collect();
-    let agreed = values
-        .iter()
-        .copied()
-        .find(|date| values.iter().filter(|other| *other == date).count() >= 2)?;
+    let agreed = agreed_date_at(live.region_base, src, |date| in_season(date, live.save.season_end))?;
     let saved = live.save.saved_date;
     if agreed.day_number() + 1 == saved.day_number() {
         Some(saved)
     } else {
         Some(agreed)
     }
+}
+
+/// Data em que pelo menos DUAS das três posições `LIVE_DATE_REGION_OFFSETS`
+/// (a partir de `region_base`) concordam, entre os valores plausíveis
+/// aceitos por `accept`.
+fn agreed_date_at(region_base: usize, src: &impl ByteSource, accept: impl Fn(Date) -> bool) -> Option<Date> {
+    let values: Vec<Date> = LIVE_DATE_REGION_OFFSETS
+        .iter()
+        .filter_map(|&offset| {
+            let addr = region_base.checked_add(offset)?;
+            let date = Date(i32_at(&src.read(addr, 4)?, 0)?);
+            (date.is_plausible() && accept(date)).then_some(date)
+        })
+        .collect();
+    values
+        .iter()
+        .copied()
+        .find(|date| values.iter().filter(|other| *other == date).count() >= 2)
+}
+
+/// Regiões cuja base tem uma data viva confirmada (2 de 3 posições).
+/// Sem olhar saves nem temporada: é o SINAL barato de que há uma carreira
+/// carregada (no menu as duas listas de eventos ficam zeradas — sessão 6).
+fn regions_with_live_date(regions: &[Region], src: &impl ByteSource) -> Vec<Region> {
+    regions
+        .iter()
+        .copied()
+        .filter(|region| agreed_date_at(region.base, src, |_| true).is_some())
+        .collect()
+}
+
+/// Sinal barato (Story 1.7): "parece haver uma carreira carregada?".
+/// Lista as regiões (`VirtualQuery`) e lê 3 × 4 bytes em cada uma —
+/// dezenas de ms, mas ainda assim fora do render, num `AsyncTask` (AD-4).
+/// `true` não garante a carreira (quem confirma é `start_locating`).
+pub fn start_career_probe(task: &AsyncTask<bool>) -> bool {
+    task.start(|| {
+        let regions = memscan::enumerate_private_committed_regions();
+        Ok(!regions_with_live_date(&regions, &ProcessMemory).is_empty())
+    })
 }
 
 /// `GJUr.currdate` VIVO (ver `live_date`).
@@ -1326,6 +1395,26 @@ mod tests {
         assert!(!in_season(Date(20270701), end));
         assert!(!in_season(Date(20280923), end));
         assert!(!in_season(Date(20250101), end));
+    }
+
+    #[test]
+    fn career_signal_finds_only_regions_with_two_agreeing_dates() {
+        // duas "regiões" lado a lado na mesma memória falsa
+        let carreira = memory_with_dates([20_260_630, 20_240_731, 20_260_630]);
+        let menu = memory_with_dates([20_280_923, 0, 0]);
+        let mut mem = menu.clone();
+        mem.extend_from_slice(&carreira);
+        let regioes = [
+            Region { base: 0, size: menu.len() },
+            Region { base: menu.len(), size: carreira.len() },
+            // região cuja base + offsets cai fora da memória: leitura falha
+            Region { base: mem.len(), size: 16 },
+        ];
+        let achadas = regions_with_live_date(&regioes, &SliceSource(&mem));
+        assert_eq!(achadas.iter().map(|r| r.base).collect::<Vec<_>>(), [menu.len()]);
+
+        // menu principal sozinho: sem sinal
+        assert!(regions_with_live_date(&regioes[..1], &SliceSource(&mem)).is_empty());
     }
 
     #[test]

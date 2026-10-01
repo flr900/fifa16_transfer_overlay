@@ -5,3 +5,11 @@ edition = "2021"
 
 [dependencies]
 hudhook = { version = "0.9", features = ["inject"] }
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_UI_WindowsAndMessaging",
+]

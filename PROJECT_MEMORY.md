@@ -1356,6 +1356,23 @@ carregada"; data que VOLTA → outro save carregado → cache descartado).
   com o jogo fechado (o log mostra os 8 primeiros caracteres do hash em
   `[scout::state] Carreira ativa: estado xxxxxxxx…`).
 
+## Sessão 9 — Story 1.7: início com o jogo e carreira pré-carregada (2026-10-01)
+
+- `fifa_overlay\iniciar_fifa.ps1` (como Administrador; pede UAC sozinho)
+  abre o servidor do FIFA Friends (`D:\Program Files\FIFA 16\Server16Python.exe`,
+  alvo do atalho da área de trabalho) e deixa `fifa_injector --aguardar
+  --enquanto-pid <servidor>` esperando o `fifa16.exe`. Ele injeta quando o
+  jogo tem `d3d11.dll` e janela visível, depois de 5 s de folga.
+- Vigia no `scout::state`: com o painel fechado, a cada 2 s um `AsyncTask`
+  lê 3 × 4 bytes por região (offsets da data viva). Se 2 de 3 concordam, há
+  carreira, e ele localiza sozinho.
+- **Localização rápida confirmada no jogo**: varrendo só as regiões com data
+  viva, achou a struct em **4 ms** (~110 ms com a leitura dos saves), contra
+  ~15 s da varredura completa. A struct de finanças e a data viva ficam na
+  MESMA região (`0x8CCB0000`, struct em +0xEE74C, data em +0x373E08).
+- Banner no canto superior direito (3 s): "Central de Scout ativa",
+  "Carregando carreira…", "Carreira pronta", falha.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —

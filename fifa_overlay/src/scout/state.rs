@@ -15,6 +15,15 @@
 //! - nunca relocaliza sozinho em loop: se a localização falhar, só
 //!   reabrindo o painel ou clicando "Tentar novamente".
 //!
+//! Vigia (Story 1.7): o `tick` roda a cada frame, com o painel aberto OU
+//! fechado. Sem carreira pronta, a cada `INTERVALO_SINAL` um `AsyncTask`
+//! barato pergunta ao `save_repo` se parece haver uma carreira carregada;
+//! quando o sinal acende, dispara UMA localização (o jogador entrou na
+//! carreira — o painel abre pronto). O sinal só "rearma" depois de
+//! apagar (voltou ao menu) ou de uma localização bem-sucedida, então uma
+//! localização que falha não vira loop. Cada mudança relevante gera um
+//! `Aviso` para o banner do canto da tela (`scout::screens::aviso`).
+//!
 //! Estado persistido (Story 1.3): `scout::state` é o ÚNICO chamador de
 //! `scout::persistence` (AD-1). Quando a carreira fica pronta, o arquivo
 //! dela (`<hash>.json`, AD-11) é carregado uma vez por sessão e guardado
@@ -37,8 +46,32 @@ use super::persistence::{self, EstadoPersistido};
 use super::search::{CareerSnapshot, CareerSource, SaveRepoSource};
 use super::Aba;
 
-/// Com o painel aberto, relê o estado vivo nesse intervalo.
+/// Com a carreira pronta, relê o estado vivo nesse intervalo.
 const INTERVALO_RELEITURA: Duration = Duration::from_secs(1);
+
+/// Sem carreira pronta, pergunta "há carreira carregada?" nesse intervalo.
+const INTERVALO_SINAL: Duration = Duration::from_secs(2);
+
+/// Quanto tempo um aviso fica no canto da tela (pedido do Felipe,
+/// 2026-10-01: "precisa sumir após 3 segundos"). "Carregando carreira…"
+/// é a exceção: fica enquanto a localização roda.
+pub const DURACAO_AVISO: Duration = Duration::from_secs(3);
+
+/// O que o banner do canto da tela anuncia.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TipoAviso {
+    /// A DLL acabou de ser injetada e o overlay está desenhando.
+    Injetado,
+    Carregando,
+    Pronta(CareerSnapshot),
+    Falhou,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Aviso {
+    pub tipo: TipoAviso,
+    pub desde: Instant,
+}
 
 // ---------------------------------------------------------------------
 // Entidades persistidas (Structural Seed / ERD; ids UUID v4 — AD-12)
@@ -106,6 +139,17 @@ pub struct ScoutState {
     /// Aba salva da carreira que acabou de ficar ativa, para o `Scout`
     /// aplicar na navegação (ver `tomar_aba_restaurada`).
     aba_restaurada: Option<Aba>,
+    /// Sinal barato "há carreira carregada?" (ver o vigia no topo).
+    tarefa_sinal: AsyncTask<bool>,
+    /// Há um resultado do sinal ainda não tratado (`poll` não consome).
+    sinal_pendente: bool,
+    /// O sinal já disparou uma localização e só rearma ao apagar.
+    sinal_consumido: bool,
+    proximo_sinal: Option<Instant>,
+    aviso: Option<Aviso>,
+    /// O aviso "Central de Scout ativa" sai no primeiro `tick` (o primeiro
+    /// frame pode vir segundos depois da injeção, com o jogo carregando).
+    aviso_inicial_pendente: bool,
 }
 
 impl ScoutState {
@@ -124,7 +168,27 @@ impl ScoutState {
             estados: HashMap::new(),
             save_ativo: None,
             aba_restaurada: None,
+            tarefa_sinal: AsyncTask::new(),
+            sinal_pendente: false,
+            sinal_consumido: false,
+            proximo_sinal: None,
+            aviso: None,
+            aviso_inicial_pendente: true,
         }
+    }
+
+    /// Aviso a mostrar agora no canto da tela, se houver.
+    pub fn aviso_visivel(&self, agora: Instant) -> Option<&TipoAviso> {
+        let aviso = self.aviso.as_ref()?;
+        let visivel = match aviso.tipo {
+            TipoAviso::Carregando => self.status == CarreiraStatus::Localizando,
+            _ => agora.saturating_duration_since(aviso.desde) < DURACAO_AVISO,
+        };
+        visivel.then_some(&aviso.tipo)
+    }
+
+    fn avisar(&mut self, tipo: TipoAviso) {
+        self.aviso = Some(Aviso { tipo, desde: Instant::now() });
     }
 
     pub fn status(&self) -> &CarreiraStatus {
@@ -149,9 +213,15 @@ impl ScoutState {
         self.iniciar_localizacao();
     }
 
-    /// Chamado a cada frame com o painel aberto. Barato: um `poll` do
-    /// `AsyncTask` e, no máximo, uma leitura de alguns bytes por segundo.
+    /// Chamado a cada frame, com o painel aberto ou fechado. Barato: dois
+    /// `poll` de `AsyncTask` e, no máximo, uma leitura de alguns bytes por
+    /// segundo; o sinal e a localização rodam em background (AD-4).
     pub fn tick(&mut self) {
+        if self.aviso_inicial_pendente {
+            self.aviso_inicial_pendente = false;
+            self.avisar(TipoAviso::Injetado);
+        }
+
         match self.tarefa_localizar.poll() {
             TaskState::Running => {
                 self.definir_status(CarreiraStatus::Localizando);
@@ -159,11 +229,15 @@ impl ScoutState {
             }
             TaskState::Done(()) if self.status == CarreiraStatus::Localizando => {
                 self.reler();
+                if !matches!(self.status, CarreiraStatus::Pronta(_) | CarreiraStatus::Localizando) {
+                    self.avisar(TipoAviso::Falhou);
+                }
                 return;
             }
             TaskState::Failed(err) if self.status == CarreiraStatus::Localizando => {
                 self.definir_status(status_de_erro(&err));
                 self.ultima_leitura = Some(Instant::now());
+                self.avisar(TipoAviso::Falhou);
                 return;
             }
             _ => {}
@@ -175,6 +249,39 @@ impl ScoutState {
         let acompanhando = matches!(self.status, CarreiraStatus::Pronta(_) | CarreiraStatus::SemCarreira);
         if acompanhando && releitura_devida {
             self.reler();
+        }
+
+        if !matches!(self.status, CarreiraStatus::Pronta(_) | CarreiraStatus::Localizando) {
+            self.vigiar_carreira();
+        }
+    }
+
+    /// Sem carreira pronta: trata o último sinal e agenda o próximo.
+    fn vigiar_carreira(&mut self) {
+        match self.tarefa_sinal.poll() {
+            TaskState::Running => return,
+            TaskState::Done(acesa) if self.sinal_pendente => {
+                self.sinal_pendente = false;
+                if !acesa {
+                    self.sinal_consumido = false;
+                } else if !self.sinal_consumido {
+                    self.sinal_consumido = true;
+                    tracing::info!("[scout::state] Carreira detectada na memória; localizando sem esperar o F10.");
+                    self.iniciar_localizacao();
+                    return;
+                }
+            }
+            TaskState::Failed(err) if self.sinal_pendente => {
+                self.sinal_pendente = false;
+                tracing::warn!("[scout::state] Sinal de carreira falhou: {err:?}");
+            }
+            _ => {}
+        }
+
+        let agora = Instant::now();
+        if self.proximo_sinal.is_none_or(|quando| agora >= quando) {
+            self.proximo_sinal = Some(agora + INTERVALO_SINAL);
+            self.sinal_pendente = self.fonte.start_career_probe(&self.tarefa_sinal);
         }
     }
 
@@ -196,20 +303,28 @@ impl ScoutState {
         if self.fonte.start_locating(&self.tarefa_localizar) {
             tracing::info!("[scout::state] Localizando a carreira em background.");
             self.definir_status(CarreiraStatus::Localizando);
+            self.avisar(TipoAviso::Carregando);
         }
     }
 
     /// Único ponto que muda `status`: mantém `save_ativo` coerente com ele.
     fn definir_status(&mut self, status: CarreiraStatus) {
-        let id_save = match &status {
-            CarreiraStatus::Pronta(snapshot) => Some(snapshot.id_save.clone()),
+        let ativada = match &status {
+            CarreiraStatus::Pronta(snapshot) if self.save_ativo.as_deref() != Some(snapshot.id_save.as_str()) => {
+                Some(snapshot.clone())
+            }
             _ => None,
         };
+        if !matches!(status, CarreiraStatus::Pronta(_)) {
+            self.save_ativo = None;
+        }
         self.status = status;
-        match id_save {
-            Some(id) if self.save_ativo.as_deref() != Some(id.as_str()) => self.ativar_save(id),
-            Some(_) => {}
-            None => self.save_ativo = None,
+        if let Some(snapshot) = ativada {
+            // Localizou: o sinal rearma (uma troca de carreira sem passar
+            // pelo menu precisa poder disparar outra localização).
+            self.sinal_consumido = false;
+            self.ativar_save(snapshot.id_save.clone());
+            self.avisar(TipoAviso::Pronta(snapshot));
         }
     }
 
@@ -276,9 +391,16 @@ mod tests {
         leituras: Mutex<Vec<Result<CareerSnapshot, SaveRepoError>>>,
         resultado_localizacao: Result<(), SaveRepoError>,
         localizacoes: Arc<AtomicUsize>,
+        /// Resposta do sinal "há carreira carregada?", controlada pelo teste.
+        sinal: Arc<Mutex<bool>>,
     }
 
     impl CareerSource for FonteFalsa {
+        fn start_career_probe(&self, task: &AsyncTask<bool>) -> bool {
+            let aceso = *self.sinal.lock().unwrap_or_else(|p| p.into_inner());
+            task.start(move || Ok(aceso))
+        }
+
         fn start_locating(&self, task: &AsyncTask<()>) -> bool {
             self.localizacoes.fetch_add(1, Ordering::SeqCst);
             let resultado = self.resultado_localizacao.clone();
@@ -324,13 +446,39 @@ mod tests {
         resultado_localizacao: Result<(), SaveRepoError>,
         diretorio: Option<PathBuf>,
     ) -> (ScoutState, Arc<AtomicUsize>) {
+        estado_com_sinal(leituras, resultado_localizacao, diretorio, Arc::new(Mutex::new(false)))
+    }
+
+    fn estado_com_sinal(
+        leituras: Vec<Result<CareerSnapshot, SaveRepoError>>,
+        resultado_localizacao: Result<(), SaveRepoError>,
+        diretorio: Option<PathBuf>,
+        sinal: Arc<Mutex<bool>>,
+    ) -> (ScoutState, Arc<AtomicUsize>) {
         let localizacoes = Arc::new(AtomicUsize::new(0));
         let fonte = FonteFalsa {
             leituras: Mutex::new(leituras),
             resultado_localizacao,
             localizacoes: Arc::clone(&localizacoes),
+            sinal,
         };
         (ScoutState::com_fonte(Box::new(fonte), diretorio), localizacoes)
+    }
+
+    /// Força uma sondagem agora e trata a resposta (painel fechado).
+    fn sondar(st: &mut ScoutState) {
+        st.proximo_sinal = None;
+        st.tick();
+        let inicio = Instant::now();
+        while matches!(st.tarefa_sinal.poll(), TaskState::Running) {
+            assert!(inicio.elapsed() < Duration::from_secs(5), "sinal falso travou");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        st.tick();
+    }
+
+    fn acender(sinal: &Arc<Mutex<bool>>, aceso: bool) {
+        *sinal.lock().unwrap_or_else(|p| p.into_inner()) = aceso;
     }
 
     /// Roda `tick` até a localização em background terminar.
@@ -539,5 +687,81 @@ mod tests {
         assert_eq!(st.status(), &CarreiraStatus::Pronta(snapshot()));
         st.definir_aba_ativa(Aba::Sonar); // só avisa no log
         assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Olheiros));
+    }
+
+    #[test]
+    fn first_tick_announces_the_injection_for_three_seconds() {
+        let (mut st, _) = estado(vec![Err(SaveRepoError::NaoLocalizado)], Ok(()));
+        assert_eq!(st.aviso_visivel(Instant::now()), None);
+        st.tick();
+        let agora = Instant::now();
+        assert_eq!(st.aviso_visivel(agora), Some(&TipoAviso::Injetado));
+        assert_eq!(st.aviso_visivel(agora + DURACAO_AVISO), None);
+    }
+
+    #[test]
+    fn signal_locates_the_career_without_opening_the_panel() {
+        let sinal = Arc::new(Mutex::new(true));
+        let (mut st, localizacoes) = estado_com_sinal(
+            vec![Err(SaveRepoError::NaoLocalizado), Ok(snapshot())],
+            Ok(()),
+            None,
+            Arc::clone(&sinal),
+        );
+        sondar(&mut st);
+        assert_eq!(st.status(), &CarreiraStatus::Localizando);
+        // "Carregando" fica enquanto localiza, mesmo passado o tempo do aviso
+        let depois = Instant::now() + DURACAO_AVISO * 5;
+        assert_eq!(st.aviso_visivel(depois), Some(&TipoAviso::Carregando));
+
+        ticks_ate_terminar(&mut st);
+        assert_eq!(st.status(), &CarreiraStatus::Pronta(snapshot()));
+        let agora = Instant::now();
+        assert_eq!(st.aviso_visivel(agora), Some(&TipoAviso::Pronta(snapshot())));
+        assert_eq!(st.aviso_visivel(agora + DURACAO_AVISO), None);
+        assert_eq!(localizacoes.load(Ordering::SeqCst), 1);
+
+        // com a carreira pronta o sinal não é mais consultado
+        st.proximo_sinal = None;
+        st.tick();
+        assert_eq!(st.proximo_sinal, None);
+    }
+
+    #[test]
+    fn failed_locating_is_announced_and_the_signal_only_rearms_after_going_off() {
+        let sinal = Arc::new(Mutex::new(true));
+        let (mut st, localizacoes) = estado_com_sinal(
+            vec![Err(SaveRepoError::NaoLocalizado)],
+            Err(SaveRepoError::CarreiraNaoCarregada),
+            None,
+            Arc::clone(&sinal),
+        );
+        sondar(&mut st);
+        ticks_ate_terminar(&mut st);
+        assert_eq!(st.status(), &CarreiraStatus::SemCarreira);
+        assert_eq!(st.aviso_visivel(Instant::now()), Some(&TipoAviso::Falhou));
+
+        // sinal continua aceso: nada de loop
+        for _ in 0..3 {
+            sondar(&mut st);
+        }
+        assert_eq!(localizacoes.load(Ordering::SeqCst), 1);
+
+        // voltou ao menu (apagou) e entrou de novo (acendeu): nova tentativa
+        acender(&sinal, false);
+        sondar(&mut st);
+        acender(&sinal, true);
+        sondar(&mut st);
+        assert_eq!(localizacoes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn signal_off_never_locates() {
+        let (mut st, localizacoes) = estado(vec![Err(SaveRepoError::NaoLocalizado)], Ok(()));
+        for _ in 0..3 {
+            sondar(&mut st);
+        }
+        assert_eq!(st.status(), &CarreiraStatus::SemCarreira);
+        assert_eq!(localizacoes.load(Ordering::SeqCst), 0);
     }
 }
