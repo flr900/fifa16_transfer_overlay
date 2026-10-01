@@ -1,5 +1,5 @@
 # generated: 2026-09-30
-# last_updated: 2026-09-30
+# last_updated: 2026-10-01
 # project: Central de Scout (FIFA 16 Companion)
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-09-30
-last_updated: 2026-09-30
+last_updated: 2026-10-01
 project: Central de Scout (FIFA 16 Companion)
 project_key: NOKEY
 tracking_system: file-system
@@ -51,7 +51,7 @@ development_status:
   epic-1: in-progress
   1-1-read-career-state-and-identify-the-active-save: review
   1-2-open-and-close-the-scout-panel-with-a-dedicated-shortcut: review
-  1-3-persist-scout-state-per-save: backlog
+  1-3-persist-scout-state-per-save: review
   1-4-browse-the-olheiros-available-to-hire: backlog
   1-5-hire-an-olheiro: backlog
   1-6-navigate-the-panel-with-a-gamepad: backlog

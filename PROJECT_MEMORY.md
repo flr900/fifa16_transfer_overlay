@@ -1338,6 +1338,24 @@ carregada"; data que VOLTA → outro save carregado → cache descartado).
 - Observação visual: o jogo aparece mais através do painel do que a
   opacidade de 93% sugere; reavaliar quando houver tabelas.
 
+## Sessão 8 — Story 1.3: estado do Scout por save (2026-10-01)
+
+- Cada carreira tem o próprio JSON em
+  `%LOCALAPPDATA%\FifaCompanion\scout\<hash>.json` (hash = SHA-256 da
+  identidade da Story 1.1). Formato: `versao`, `olheiros`, `missoes`,
+  `relatorios`, `ui_prefs.aba_ativa` (`"olheiros"`/`"missoes"`/
+  `"relatorios"`/`"sonar"`).
+- Gravação write-through (`.tmp` + rename) por um único mutex por
+  arquivo (`scout::persistence::EstadoPersistido`); o `scout::state`
+  guarda um estado por hash durante a sessão inteira.
+- Arquivo corrompido vira `<hash>.json.corrompido-<ms>` antes de começar
+  vazio; arquivo ilegível ou de formato mais novo nunca é sobrescrito.
+- A aba ativa volta ao reabrir a mesma carreira (depois da localização
+  de ~15 s). Clique em aba sem carreira pronta não é salvo.
+- Para inspecionar/zerar o estado de uma carreira: apagar o arquivo dela
+  com o jogo fechado (o log mostra os 8 primeiros caracteres do hash em
+  `[scout::state] Carreira ativa: estado xxxxxxxx…`).
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —

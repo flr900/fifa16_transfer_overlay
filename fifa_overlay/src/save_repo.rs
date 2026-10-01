@@ -119,7 +119,10 @@ impl fmt::Display for SaveRepoError {
 }
 
 /// Data no formato cru `YYYYMMDD` (mesma forma de `GJUr.currdate`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// No JSON de estado do Scout vira o inteiro puro (`20261015`), nunca
+/// struct nem string ISO (AD-12) — por isso o `transparent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct Date(pub i32);
 
 impl Date {
@@ -952,7 +955,7 @@ impl CareerIdentity {
         )
     }
 
-    #[allow(dead_code)] // nome do arquivo de estado por save (Story 1.3)
+    /// Nome do arquivo de estado do Scout desta carreira (Story 1.3).
     pub fn hash(&self) -> String {
         hash_identity(&self.joined())
     }
@@ -1049,7 +1052,7 @@ pub fn read_career_identity() -> Result<CareerIdentity, SaveRepoError> {
 
 /// SHA-256 (hex minúsculo) de `startdate|firstname|surname|clubteamid`
 /// (AD-11) — nome do arquivo de estado do Scout para esta carreira.
-#[allow(dead_code)] // Story 1.3 (persistência por save, AD-11)
+#[allow(dead_code)] // o Scout usa `read_career_identity().hash()` (uma leitura só)
 pub fn identify_active_save() -> Result<String, SaveRepoError> {
     read_career_identity().map(|identity| identity.hash())
 }
@@ -1062,7 +1065,6 @@ fn i32_at(bytes: &[u8], pos: usize) -> Option<i32> {
 
 /// SHA-256 em hex minúsculo (64 chars `[0-9a-f]`, sempre um nome de
 /// arquivo válido no Windows, mesmo com acentos/reservados na entrada).
-#[allow(dead_code)] // Story 1.3 (persistência por save, AD-11)
 pub fn hash_identity(joined: &str) -> String {
     let digest = Sha256::digest(joined.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
