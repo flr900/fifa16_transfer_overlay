@@ -6,7 +6,8 @@
 //! ação primária, bordas hairline e **sem sombra, glow ou gradiente**
 //! (o ImGui 0.12 nem desenha sombra; aqui também não simulamos).
 
-use imgui::{Context, FontConfig, FontGlyphRanges, FontId, FontSource, Style, StyleColor, Ui};
+use imgui::internal::RawCast;
+use imgui::{Context, FontAtlas, FontConfig, FontGlyphRanges, FontId, FontSource, Style, StyleColor, Ui};
 
 // ---------------------------------------------------------------------
 // Cores (DESIGN.md → colors)
@@ -110,25 +111,79 @@ pub struct Fonts {
 }
 
 /// Nitidez (2026-10-01, Felipe achou o texto borrado): o jogo roda na
-/// resolução nativa do monitor (2560×1080, DPI 100%), então o borrão vinha
-/// da fonte. Com `oversample_h: 2` e sem `pixel_snap_h`, cada letra caía em
-/// posição fracionária e era suavizada pelo filtro da textura. Agora cada
-/// letra é rasterizada uma vez e alinhada ao pixel, com um leve reforço de
-/// contraste no traço (`rasterizer_multiply`). Se ainda ficar macio, o
-/// próximo passo é o rasterizador FreeType (com hinting), que exige
-/// instalar a biblioteca FreeType (`vcpkg`).
-pub const REFORCO_TRACO: f32 = 1.15;
+/// resolução nativa do monitor (2560×1080, DPI 100%), então o borrão vem
+/// da fonte, não de escala.
+///
+/// - 2.2-v4: com o stb_truetype (padrão do ImGui), `oversample_h: 1` +
+///   `pixel_snap_h` tirou o filtro de textura do caminho, mas o stb não
+///   tem hinting: hastes e barras caem entre dois pixels e viram duas
+///   colunas cinzas. Continuou "meio borrado".
+/// - 2.2-v5: rasterizador FreeType (compilado pelo `build.rs`, estático)
+///   com hinting, que encaixa hastes e alturas (x-height, maiúsculas) na
+///   grade de pixels. A escolha dos flags veio da comparação lado a lado
+///   em PNG (teste `nitidez`, `target/nitidez/`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rasterizacao {
+    /// `true`: FreeType; `false`: stb_truetype (o padrão do ImGui).
+    pub freetype: bool,
+    /// `ImGuiFreeTypeBuilderFlags_*` (ignorado pelo stb).
+    pub flags_freetype: u32,
+    /// Reforço de contraste no traço (`rasterizer_multiply`).
+    pub reforco_traco: f32,
+}
 
-fn fonte(data: &'static [u8], tamanho: f32) -> FontSource<'static> {
+/// `ImGuiFreeTypeBuilderFlags` do Dear ImGui 1.89.2
+/// (`misc/freetype/imgui_freetype.h`); o imgui-rs não os exporta.
+#[allow(dead_code)]
+pub mod flags_freetype {
+    pub const SEM_HINTING: u32 = 1 << 0;
+    pub const SEM_AUTO_HINT: u32 = 1 << 1;
+    pub const FORCAR_AUTO_HINT: u32 = 1 << 2;
+    pub const HINTING_LEVE: u32 = 1 << 3;
+    pub const HINTING_MONO: u32 = 1 << 4;
+}
+
+/// Rasterização usada no jogo: FreeType com o auto-hinter forçado.
+///
+/// Por que forçar o auto-hinter: o FreeType 2.13 interpreta as instruções
+/// TrueType no modo "v40", que só encaixa na VERTICAL (altura de x,
+/// linha de base). A Inter variável nem tem instruções por glifo, e o
+/// hinting da Oswald (ttfautohint) e da Consolas também acaba só
+/// vertical. Resultado: hinting nativo e `HINTING_LEVE` saíram quase
+/// iguais ao stb (hastes ainda em duas colunas cinzas). O auto-hinter no
+/// modo normal encaixa também as hastes verticais, que viram uma coluna
+/// cheia: no teste, a fração de pixels "cinza" do texto caiu de 49% para
+/// 40% no corpo, de 43% para 28% na meta e de 38% para 22% nos títulos.
+///
+/// Efeito colateral: a Oswald ganha ~0,5 px por letra (títulos ~8% mais
+/// largos, badges ~13%), perto do `letter-spacing` 0,3–1 px dos mockups;
+/// a Inter do corpo fica do mesmo tamanho (-1%), a meta +5%; os dígitos
+/// da Consolas continuam tabulares (teste). O reforço de traço do 2.2-v4
+/// continua.
+pub const RASTERIZACAO: Rasterizacao = Rasterizacao {
+    freetype: true,
+    flags_freetype: flags_freetype::FORCAR_AUTO_HINT,
+    reforco_traco: 1.15,
+};
+
+extern "C" {
+    /// `ImGuiFreeType::GetBuilderForFreeType()` (ponte em
+    /// `native/ponte_freetype.cpp`, compilada pelo `build.rs`).
+    fn fifa_overlay_construtor_freetype() -> *const imgui::sys::ImFontBuilderIO;
+}
+
+fn fonte(data: &'static [u8], tamanho: f32, r: &Rasterizacao) -> FontSource<'static> {
     FontSource::TtfData {
         data,
         size_pixels: tamanho,
         config: Some(FontConfig {
             glyph_ranges: FontGlyphRanges::from_slice(&FAIXAS_DE_GLIFOS),
+            // O FreeType ignora o oversample; vale para o stb.
             oversample_h: 1,
             oversample_v: 1,
             pixel_snap_h: true,
-            rasterizer_multiply: REFORCO_TRACO,
+            rasterizer_multiply: r.reforco_traco,
+            font_builder_flags: r.flags_freetype,
             ..FontConfig::default()
         }),
     }
@@ -167,23 +222,36 @@ impl FontSlots {
 /// hudhook montar a textura de fontes. A PRIMEIRA fonte adicionada vira a
 /// padrão do ImGui (por isso o corpo vem primeiro).
 pub fn carregar_fontes(ctx: &mut Context) -> FontSlots {
-    let atlas = ctx.fonts();
-    let mut adicionar = |source: FontSource<'static>| {
-        atlas.add_font(&[source]);
+    registrar_fontes(ctx.fonts(), &RASTERIZACAO)
+}
+
+/// Escolhe o rasterizador e adiciona as fontes. Separado de
+/// `carregar_fontes` para o teste de nitidez montar atlas sem `Context`.
+fn registrar_fontes(atlas: &mut FontAtlas, r: &Rasterizacao) -> FontSlots {
+    if r.freetype {
+        // SAFETY: `FontBuilderIO` é um ponteiro para uma tabela estática do
+        // imgui_freetype.cpp (vive enquanto a DLL estiver carregada), e o
+        // atlas ainda não foi montado: o ImGui só lê o campo em `Build()`.
+        unsafe {
+            atlas.raw_mut().FontBuilderIO = fifa_overlay_construtor_freetype();
+        }
+    }
+    let mut adicionar = |data: &'static [u8], tamanho: f32| {
+        atlas.add_font(&[fonte(data, tamanho, r)]);
         atlas.fonts().len().saturating_sub(1)
     };
-    let body = adicionar(fonte(INTER, 17.0));
-    let meta = adicionar(fonte(INTER, 14.0));
-    let heading = adicionar(fonte(OSWALD_MEDIUM, 21.0));
-    let display = adicionar(fonte(OSWALD_SEMIBOLD, 30.0));
-    let badge = adicionar(fonte(OSWALD_SEMIBOLD, 13.0));
+    let body = adicionar(INTER, 17.0);
+    let meta = adicionar(INTER, 14.0);
+    let heading = adicionar(OSWALD_MEDIUM, 21.0);
+    let display = adicionar(OSWALD_SEMIBOLD, 30.0);
+    let badge = adicionar(OSWALD_SEMIBOLD, 13.0);
 
     // O ImGui guarda o ponteiro dos dados da fonte enquanto o atlas
     // existir; o vazamento (uma vez, ~400 KB) dá a eles vida `'static`.
     let mono = match std::fs::read(CONSOLAS) {
         Ok(bytes) => {
             let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-            Some(adicionar(fonte(bytes, 16.0)))
+            Some(adicionar(bytes, 16.0))
         }
         Err(err) => {
             tracing::warn!("[scout::theme] Consolas indisponível ({err}); colunas numéricas usam Inter.");
@@ -191,7 +259,11 @@ pub fn carregar_fontes(ctx: &mut Context) -> FontSlots {
         }
     };
 
-    tracing::info!("[scout::theme] Fontes carregadas (Inter, Oswald, Consolas: {}).", mono.is_some());
+    tracing::info!(
+        "[scout::theme] Fontes carregadas (Inter, Oswald, Consolas: {}; rasterizador: {}).",
+        mono.is_some(),
+        if r.freetype { "FreeType" } else { "stb_truetype" }
+    );
     FontSlots { display, heading, body, meta, badge, mono }
 }
 
@@ -243,6 +315,10 @@ pub fn aplicar_estilo(style: &mut Style) {
     style[StyleColor::NavHighlight] = TRANSPARENTE;
     style[StyleColor::ModalWindowDimBg] = rgba(0x0b0e0c, 0.6);
 }
+
+#[cfg(test)]
+#[path = "theme_nitidez.rs"]
+mod nitidez;
 
 #[cfg(test)]
 mod tests {

@@ -10,6 +10,9 @@ crate-type = ["cdylib"]
 [dependencies]
 hudhook = { version = "0.9", features = ["dx11"] }
 imgui = "0.12"
+# Dependência direta só para o build.rs receber `DEP_IMGUI_*` (pasta e
+# #defines do Dear ImGui) e compilar o rasterizador FreeType (2.2-v5).
+imgui-sys = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
@@ -19,6 +22,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.26", features = ["v4", "serde"] }
 dirs = "7.0"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+# Só para o teste de nitidez das fontes gravar PNGs (target/nitidez).
+png = "0.17"
 
 [dependencies.windows]
 version = "0.62"
