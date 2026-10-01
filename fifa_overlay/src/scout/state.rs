@@ -42,7 +42,7 @@ use uuid::Uuid;
 
 use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
-pub use crate::save_repo::{Atributo, Funcao};
+pub use crate::save_repo::{Atributo, Confederacao, Funcao, Nacao};
 
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::Densidade;
@@ -265,6 +265,10 @@ pub struct FiltrosMissao {
     /// entre os seus `quality::TOP_DOMINANTE` maiores (Story 2.8).
     #[serde(default)]
     pub atributo_dominante: Option<Atributo>,
+    /// Países escolhidos no mapa (`Crbb.nationid`; `search::NACAO_OUTROS` =
+    /// quadro "Outros"). Vazio = todos os países (Story 2.9).
+    #[serde(default)]
+    pub paises: Vec<u16>,
 }
 
 impl Default for FiltrosMissao {
@@ -274,6 +278,7 @@ impl Default for FiltrosMissao {
             overall: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
             potencial: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
             atributo_dominante: None,
+            paises: Vec::new(),
         }
     }
 }
@@ -312,6 +317,8 @@ pub struct PreviaMissao {
     /// Todos os contratados: os "Em Missão" aparecem, mas não são escolhíveis.
     pub olheiros: Vec<OlheiroContratado>,
     pub tipo: quality::TipoMissao,
+    /// Amplitude do filtro geográfico (Story 2.9).
+    pub amplitude: quality::AmplitudeGeografica,
     /// O Olheiro escolhido combina com o tipo (bônus de Qualidade).
     pub combina: bool,
     /// `None` sem Olheiro escolhido.
@@ -585,6 +592,8 @@ pub struct ScoutState {
     relatorio_aberto: Option<Uuid>,
     /// Rostos dos jogadores da visão Cards (Story 2.6).
     minifaces: Minifaces,
+    /// Nações do mapa (Story 2.9), lidas uma vez em background.
+    tarefa_nacoes: AsyncTask<Arc<Vec<Nacao>>>,
     /// Aba Relatórios mostrando o filtro "Arquivados" (Story 2.7; não
     /// persiste: reabrir o painel volta à lista principal).
     vendo_arquivados: bool,
@@ -623,6 +632,7 @@ impl ScoutState {
             painel_aberto: false,
             relatorio_aberto: None,
             minifaces: Minifaces::new(crate::save_repo::ler_miniface),
+            tarefa_nacoes: AsyncTask::new(),
             vendo_arquivados: false,
         }
     }
@@ -1003,6 +1013,61 @@ impl ScoutState {
         r.erro = None;
     }
 
+    /// Nações do mapa, ou `None` enquanto carregam (a primeira chamada
+    /// dispara a leitura em background; uma falha é tentada de novo).
+    pub fn nacoes(&self) -> Option<Arc<Vec<Nacao>>> {
+        match self.tarefa_nacoes.poll() {
+            TaskState::Done(nacoes) => Some(nacoes),
+            TaskState::Running => None,
+            TaskState::Idle | TaskState::Failed(_) => {
+                let fonte = Arc::clone(&self.fonte);
+                self.tarefa_nacoes.start(move || fonte.read_nations().map(Arc::new));
+                None
+            }
+        }
+    }
+
+    /// Amplitude da seleção de países (sem as nações ainda carregadas,
+    /// conta só o número de países).
+    fn amplitude_dos_paises(&self, paises: &[u16]) -> quality::AmplitudeGeografica {
+        let nacoes = match self.tarefa_nacoes.poll() {
+            TaskState::Done(nacoes) => nacoes,
+            _ => Arc::new(Vec::new()),
+        };
+        let conf = |id: &u16| nacoes.iter().find(|n| n.id == *id).map_or(Confederacao::Outras, |n| n.confederacao);
+        let selecao: Vec<Confederacao> = paises.iter().map(conf).collect();
+        let total_da = |c: Confederacao| {
+            if nacoes.is_empty() {
+                usize::MAX
+            } else {
+                nacoes.iter().filter(|n| n.confederacao == c).count()
+            }
+        };
+        quality::amplitude_da_selecao(&selecao, total_da)
+    }
+
+    /// Clique num país do mapa: entra ou sai da seleção (cumulativo, sem
+    /// tecla modificadora — Story 2.9).
+    pub fn alternar_pais_da_missao(&mut self, id: u16) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            match r.filtros.paises.iter().position(|p| *p == id) {
+                Some(i) => {
+                    r.filtros.paises.remove(i);
+                }
+                None => r.filtros.paises.push(id),
+            }
+            r.erro = None;
+        }
+    }
+
+    /// "Limpar": volta a todos os países.
+    pub fn limpar_paises_da_missao(&mut self) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.paises.clear();
+            r.erro = None;
+        }
+    }
+
     /// Atributo dominante escolhido no painel de campo (Story 2.8);
     /// `None` = sem esse filtro.
     pub fn definir_atributo_da_missao(&mut self, atributo: Option<Atributo>) {
@@ -1037,13 +1102,14 @@ impl ScoutState {
             rascunho.filtros.potencial,
             rascunho.filtros.atributo_dominante,
         );
+        let amplitude = self.amplitude_dos_paises(&rascunho.filtros.paises);
         let estimativa = escolhido.as_ref().map(|o| {
             quality::estimar_missao(&quality::PedidoMissao {
                 tier: o.tier,
                 especializacao: o.especializacao,
                 modo: rascunho.modo,
                 tipo,
-                amplitude: quality::AmplitudeGeografica::Mundo,
+                amplitude,
             })
         });
         let bloqueio = if escolhido.is_none() {
@@ -1062,6 +1128,7 @@ impl ScoutState {
             rascunho,
             olheiros,
             tipo,
+            amplitude,
             estimativa,
             orcamento_atual,
             data_atual,
@@ -1091,7 +1158,7 @@ impl ScoutState {
             filtros: previa.rascunho.filtros.clone(),
             modo_busca: previa.rascunho.modo,
             tipo: previa.tipo,
-            amplitude: quality::AmplitudeGeografica::Mundo,
+            amplitude: previa.amplitude,
             estimativa,
         };
         let nova = missao.clone();
@@ -1501,6 +1568,14 @@ mod tests {
             } else {
                 fila.remove(0)
             }
+        }
+
+        fn read_nations(&self) -> Result<Vec<Nacao>, SaveRepoError> {
+            Ok(vec![
+                Nacao { id: 52, nome: "Argentina".to_string(), iso: "AR".to_string(), confederacao: Confederacao::AmericaDoSul },
+                Nacao { id: 54, nome: "Brazil".to_string(), iso: "BR".to_string(), confederacao: Confederacao::AmericaDoSul },
+                Nacao { id: 14, nome: "England".to_string(), iso: "GB".to_string(), confederacao: Confederacao::Europa },
+            ])
         }
 
         fn read_all_players(&self) -> Result<PlayerPool, SaveRepoError> {
@@ -2569,5 +2644,33 @@ mod tests {
         assert!(st.relatorios(true).is_empty());
         assert_eq!(st.missoes().len(), 1);
         assert!(!st.restaurar_relatorio(id), "já está na lista principal");
+    }
+
+    #[test]
+    fn choosing_countries_changes_breadth_and_the_estimate_live() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &o);
+        st.ao_abrir_painel();
+        // nações carregam em background
+        let inicio = Instant::now();
+        while st.nacoes().is_none() {
+            assert!(inicio.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        st.abrir_nova_missao();
+        let mundo = st.previa_missao().expect("formulário");
+        assert_eq!(mundo.amplitude, quality::AmplitudeGeografica::Mundo);
+        st.alternar_pais_da_missao(54);
+        let pais = st.previa_missao().expect("formulário");
+        assert_eq!(pais.amplitude, quality::AmplitudeGeografica::Pais);
+        let (m, p) = (mundo.estimativa.expect("estimativa"), pais.estimativa.expect("estimativa"));
+        assert!(p.precisao_mais_menos < m.precisao_mais_menos, "mais estreito = mais preciso");
+        st.alternar_pais_da_missao(52);
+        assert_eq!(st.previa_missao().map(|x| x.amplitude), Some(quality::AmplitudeGeografica::Continente), "os 2 da América do Sul do teste");
+        st.alternar_pais_da_missao(54);
+        assert_eq!(st.previa_missao().map(|x| x.rascunho.filtros.paises), Some(vec![52]), "clicar de novo tira");
+        st.limpar_paises_da_missao();
+        assert_eq!(st.previa_missao().map(|x| x.amplitude), Some(quality::AmplitudeGeografica::Mundo));
     }
 }

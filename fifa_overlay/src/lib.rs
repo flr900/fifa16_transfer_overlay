@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "2.8-v1 — atributo dominante";
+const BUILD_TAG: &str = "2.9-v1 — filtro por país";
 
 /// Arquivo que pede para a DLL se descarregar sem fechar o jogo
 /// (script `recarregar_dev.ps1` da pasta `fifa_overlay`, só para

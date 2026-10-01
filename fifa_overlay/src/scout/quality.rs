@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{Atributo, Especializacao, FaixaAtributo, Funcao, ModoBusca, Qualidade, Tier};
+use super::state::{Atributo, Confederacao, Especializacao, FaixaAtributo, Funcao, ModoBusca, Qualidade, Tier};
 
 // ---------------------------------------------------------------------
 // Contratação (Story 1.4)
@@ -84,10 +84,9 @@ impl TipoMissao {
     pub const TODOS: [TipoMissao; 4] = [TipoMissao::Jovens, TipoMissao::Medalhoes, TipoMissao::Tatica, TipoMissao::Geral];
 }
 
-/// Amplitude do filtro geográfico. Até a Story 2.9 (filtro por país) toda
-/// Missão é `Mundo`. Em ordem: `Pais < VariosPaises < Continente < Mundo`.
+/// Amplitude do filtro geográfico (Story 2.9, `amplitude_da_selecao`).
+/// Em ordem: `Pais < VariosPaises < Continente < Mundo`.
 /// No JSON: `"pais"`, `"varios_paises"`, `"continente"`, `"mundo"`.
-#[allow(dead_code)] // as demais amplitudes chegam com o filtro geográfico (Story 2.9)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AmplitudeGeografica {
@@ -101,7 +100,7 @@ pub enum AmplitudeGeografica {
 }
 
 impl AmplitudeGeografica {
-    #[allow(dead_code)] // usado nos testes e pela Story 2.9
+    #[allow(dead_code)] // usado nos testes
     pub const TODAS: [AmplitudeGeografica; 4] = [
         AmplitudeGeografica::Pais,
         AmplitudeGeografica::VariosPaises,
@@ -302,6 +301,29 @@ pub fn eh_dominante(valores: &[(Atributo, u8)], alvo: Atributo) -> bool {
     };
     let maiores = valores.iter().filter(|(_, v)| *v > valor_alvo).count();
     maiores < TOP_DOMINANTE
+}
+
+/// Amplitude de uma seleção de países (Story 2.9). `selecao`: a
+/// confederação de cada país escolhido; `total_da`: quantos países a
+/// confederação tem no mapa.
+/// - nenhum país = todos os países → `Mundo`;
+/// - um país → `Pais`;
+/// - vários, todos do mesmo continente: o continente inteiro → `Continente`,
+///   senão `VariosPaises`;
+/// - países de mais de um continente → `Mundo`.
+pub fn amplitude_da_selecao(selecao: &[Confederacao], total_da: impl Fn(Confederacao) -> usize) -> AmplitudeGeografica {
+    match selecao {
+        [] => AmplitudeGeografica::Mundo,
+        [_] => AmplitudeGeografica::Pais,
+        [primeira, resto @ ..] if resto.iter().all(|c| c == primeira) => {
+            if selecao.len() >= total_da(*primeira) {
+                AmplitudeGeografica::Continente
+            } else {
+                AmplitudeGeografica::VariosPaises
+            }
+        }
+        _ => AmplitudeGeografica::Mundo,
+    }
 }
 
 /// A Especialização do Olheiro combina com o tipo da Missão (bônus de
@@ -700,5 +722,16 @@ mod tests {
         assert!(!eh_dominante(&valores, Atributo::Finalizacao), "4º maior");
         assert!(!eh_dominante(&valores, Atributo::Marcacao));
         assert!(!eh_dominante(&valores, Atributo::GkReflexos), "fora da função");
+    }
+
+    #[test]
+    fn breadth_comes_from_the_selected_countries() {
+        let total = |c| if c == Confederacao::AmericaDoSul { 3 } else { 50 };
+        use Confederacao::*;
+        assert_eq!(amplitude_da_selecao(&[], total), AmplitudeGeografica::Mundo);
+        assert_eq!(amplitude_da_selecao(&[Europa], total), AmplitudeGeografica::Pais);
+        assert_eq!(amplitude_da_selecao(&[AmericaDoSul, AmericaDoSul], total), AmplitudeGeografica::VariosPaises);
+        assert_eq!(amplitude_da_selecao(&[AmericaDoSul; 3], total), AmplitudeGeografica::Continente);
+        assert_eq!(amplitude_da_selecao(&[Europa, AmericaDoSul], total), AmplitudeGeografica::Mundo);
     }
 }

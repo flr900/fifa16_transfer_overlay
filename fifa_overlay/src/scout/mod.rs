@@ -435,6 +435,9 @@ mod tests {
         fn read_all_players(&self) -> Result<crate::save_repo::PlayerPool, crate::save_repo::SaveRepoError> {
             Err(crate::save_repo::SaveRepoError::NaoLocalizado)
         }
+        fn read_nations(&self) -> Result<Vec<crate::save_repo::Nacao>, crate::save_repo::SaveRepoError> {
+            Ok(Vec::new())
+        }
         fn read_snapshot(&self) -> Result<search::CareerSnapshot, crate::save_repo::SaveRepoError> {
             Ok(search::CareerSnapshot {
                 orcamento_transferencias: 1,

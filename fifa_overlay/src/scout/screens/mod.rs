@@ -10,10 +10,12 @@ mod componentes;
 mod confirmacao_contratacao;
 mod missoes;
 mod campo_atributo;
+mod cartograma;
 mod nova_missao;
 mod olheiros;
 mod relatorio;
 mod relatorios;
+mod selecao_geografica;
 mod sonar;
 pub mod theme;
 
@@ -285,6 +287,11 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
                 nova_missao::Acao::Nenhuma => {}
                 nova_missao::Acao::AbrirCampo(satelite) => pedido = Some(Pedido::AbrirCampo(satelite)),
                 nova_missao::Acao::Confirmou | nova_missao::Acao::Cancelou => pedido = Some(Pedido::FecharNovaMissao),
+            }
+        }
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::SelecaoGeografica) => {
+            if selecao_geografica::render(ui, fonts, state) {
+                pedido = Some(Pedido::FecharCampo);
             }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::CampoAtributo) => {

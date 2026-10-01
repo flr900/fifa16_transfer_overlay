@@ -140,6 +140,21 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 CampoFaixa::PotencialMax,
             );
             divisor(ui);
+            let nacoes = state.nacoes();
+            let paises = super::selecao_geografica::resumo_paises(
+                &previa.rascunho.filtros.paises,
+                nacoes.as_deref().map(Vec::as_slice).unwrap_or_default(),
+            );
+            if campo_painel(ui, fonts, "Filtro geográfico", &paises) {
+                campo = Some(Satelite::SelecaoGeografica);
+            }
+            if previa.rascunho.filtros.paises.is_empty() {
+                ui.set_cursor_pos([ui.cursor_pos()[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+                com_fonte(ui, fonts.map(|f| f.meta), || {
+                    ui.text_colored(theme::TEXT_SECONDARY, super::selecao_geografica::MSG_TODOS)
+                });
+            }
+            divisor(ui);
             if campo_painel(ui, fonts, "Atributo dominante", &texto_atributo(previa.rascunho.filtros.atributo_dominante)) {
                 campo = Some(Satelite::CampoAtributo);
             }
@@ -393,6 +408,7 @@ mod tests {
             rascunho: RascunhoMissao { olheiro_id: None, filtros: FiltrosMissao::default(), modo: ModoBusca::Rapida, erro: None },
             olheiros: Vec::new(),
             tipo,
+            amplitude: crate::scout::quality::AmplitudeGeografica::Mundo,
             combina,
             estimativa: None,
             orcamento_atual: 0,

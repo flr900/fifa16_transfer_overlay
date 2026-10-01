@@ -16,7 +16,11 @@ use uuid::Uuid;
 use super::quality;
 use super::state::{Atributo, AtributoRevelado, JogadorEncontrado, Missao, Relatorio};
 use crate::async_task::AsyncTask;
-use crate::save_repo::{self, Date, PlayerPool, PlayerRaw, SaveRepoError};
+use crate::save_repo::{self, Date, Nacao, PlayerPool, PlayerRaw, SaveRepoError};
+
+/// Id do quadro "Outros" do mapa: nações dos jogadores que não existem na
+/// tabela de nações (nunca somem em silêncio — Story 2.9).
+pub const NACAO_OUTROS: u16 = u16::MAX;
 
 /// O que o painel mostra da carreira ativa.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +47,8 @@ pub trait CareerSource: Send + Sync {
     fn write_transfer_budget(&self, anterior: i32, novo: i32) -> Result<i32, SaveRepoError>;
     /// Todos os jogadores do save ativo (pesado: só em `AsyncTask`).
     fn read_all_players(&self) -> Result<PlayerPool, SaveRepoError>;
+    /// Nações do banco estático, para o mapa (lê disco: `AsyncTask`).
+    fn read_nations(&self) -> Result<Vec<Nacao>, SaveRepoError>;
 }
 
 /// Fonte real: o `save_repo` da Story 1.1.
@@ -63,6 +69,10 @@ impl CareerSource for SaveRepoSource {
 
     fn read_all_players(&self) -> Result<PlayerPool, SaveRepoError> {
         save_repo::read_all_players()
+    }
+
+    fn read_nations(&self) -> Result<Vec<Nacao>, SaveRepoError> {
+        save_repo::read_nations()
     }
 
     fn read_snapshot(&self) -> Result<CareerSnapshot, SaveRepoError> {
@@ -117,6 +127,16 @@ pub fn passa_nos_filtros(missao: &Missao, pool: &PlayerPool, jogador: &PlayerRaw
         && (filtros.overall.min..=filtros.overall.max).contains(&jogador.overall)
         && (filtros.potencial.min..=filtros.potencial.max).contains(&jogador.potencial)
         && filtros.atributo_dominante.is_none_or(|a| tem_dominante(jogador, a))
+        && do_pais(&filtros.paises, pool, jogador)
+}
+
+/// Filtro geográfico (Story 2.9): lista vazia = todos os países; "Outros"
+/// pega as nações que não estão no mapa.
+pub fn do_pais(paises: &[u16], pool: &PlayerPool, jogador: &PlayerRaw) -> bool {
+    if paises.is_empty() || paises.contains(&jogador.nacionalidade) {
+        return true;
+    }
+    paises.contains(&NACAO_OUTROS) && !pool.nacoes.iter().any(|n| n.id == jogador.nacionalidade)
 }
 
 /// O atributo está entre os maiores do jogador (Story 2.8)? Conta só os
@@ -213,7 +233,10 @@ pub mod tests {
     pub fn pool(jogadores: Vec<PlayerRaw>) -> PlayerPool {
         PlayerPool {
             jogadores,
-            nacoes: vec![Nacao { id: 54, nome: "Brazil".to_string(), iso: "BR".to_string(), confederacao: Confederacao::AmericaDoSul }],
+            nacoes: vec![
+                Nacao { id: 52, nome: "Argentina".to_string(), iso: "AR".to_string(), confederacao: Confederacao::AmericaDoSul },
+                Nacao { id: 54, nome: "Brazil".to_string(), iso: "BR".to_string(), confederacao: Confederacao::AmericaDoSul },
+            ],
             clube_usuario: 241,
         }
     }
@@ -302,5 +325,21 @@ pub mod tests {
         let lista = escolher_jogadores(&m, &p, Date(20260801), &HashSet::new(), 2);
         assert_eq!(lista.first().map(|j| j.player_id), Some(2), "o melhor driblador primeiro");
         assert_eq!(lista[0].atributos.first().map(|a| a.atributo), Some(Atributo::Drible), "observado primeiro");
+    }
+
+    #[test]
+    fn the_country_filter_keeps_only_the_chosen_nations_and_others_is_never_dropped() {
+        let mut argentino = jogador(2, 70, 75, 24);
+        argentino.nacionalidade = 52;
+        let mut sem_mapa = jogador(3, 70, 75, 24);
+        sem_mapa.nacionalidade = 999;
+        let p = pool(vec![jogador(1, 70, 75, 24), argentino, sem_mapa]);
+        let mut m = missao_com((50, 99), (50, 99));
+        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j)).map(|j| j.player_id).collect() };
+        assert_eq!(ids(&m), vec![1, 2, 3], "nenhum país = todos");
+        m.filtros.paises = vec![54];
+        assert_eq!(ids(&m), vec![1]);
+        m.filtros.paises = vec![54, NACAO_OUTROS];
+        assert_eq!(ids(&m), vec![1, 3], "Outros pega quem não tem quadro no mapa");
     }
 }
