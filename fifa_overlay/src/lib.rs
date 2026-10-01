@@ -21,9 +21,13 @@ use imgui::Condition;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
 
+mod async_task;
 mod fifa_db;
 mod memscan;
 mod pointer_scan;
+mod save_repo;
+
+use async_task::{AsyncTask, TaskState};
 
 /// Playerid usado como alvo de teste nesta fase de prova de conceito
 /// (Ibrahim Mbaye, já validado em sessões anteriores). No futuro isso
@@ -265,6 +269,10 @@ pub struct FifaOverlay {
     value_scan_in_progress: Arc<AtomicBool>,
     value_scan_input: String,
     write_test_result: Option<String>,
+    /// Localização da database da carreira (Story 1.1) — andaime de
+    /// verificação manual; a Story 1.2 troca isto pelo painel real.
+    career_task: AsyncTask<()>,
+    career_lines: Vec<String>,
 }
 
 impl FifaOverlay {
@@ -282,7 +290,29 @@ impl FifaOverlay {
             value_scan_in_progress: Arc::new(AtomicBool::new(false)),
             value_scan_input: String::new(),
             write_test_result: None,
+            career_task: AsyncTask::new(),
+            career_lines: Vec::new(),
         }
+    }
+
+    /// Relê data, orçamento e hash do save (leituras de poucos bytes,
+    /// seguras para chamar do render — o scan pesado já foi feito pelo
+    /// `AsyncTask` de localização).
+    fn refresh_career_lines(&mut self) {
+        let mut lines = Vec::new();
+        lines.push(match save_repo::read_current_date() {
+            Ok(date) => format!("Data da carreira: {}", date.0),
+            Err(err) => format!("Data: {err}"),
+        });
+        lines.push(match save_repo::read_transfer_budget() {
+            Ok(budget) => format!("Orçamento de transferência: {budget}"),
+            Err(err) => format!("Orçamento: {err}"),
+        });
+        lines.push(match save_repo::identify_active_save() {
+            Ok(hash) => format!("Hash do save: {hash}"),
+            Err(err) => format!("Hash do save: {err}"),
+        });
+        self.career_lines = lines;
     }
 
     /// Testa escrita no blob CZUM: acha o registro do jogador de
@@ -375,6 +405,39 @@ impl ImguiRenderLoop for FifaOverlay {
                 }
 
                 ui.spacing();
+                ui.separator();
+                ui.text("Carreira (save_repo)");
+
+                let career_state = self.career_task.poll();
+                let career_locating = matches!(career_state, TaskState::Running);
+                let career_label = if career_locating {
+                    "Localizando carreira... (background)"
+                } else {
+                    "Localizar carreira"
+                };
+                if ui.button(career_label) && !career_locating {
+                    save_repo::start_locating(&self.career_task);
+                }
+
+                match &career_state {
+                    TaskState::Idle => ui.text("(carreira ainda não localizada)"),
+                    TaskState::Running => ui.text("Localizando carreira, aguarde (~17s)..."),
+                    TaskState::Failed(err) => {
+                        ui.text_colored([1.0, 0.4, 0.4, 1.0], format!("{err}"));
+                    }
+                    TaskState::Done(()) => {
+                        ui.text("Carreira localizada.");
+                        if ui.button("Reler valores") {
+                            self.refresh_career_lines();
+                        }
+                        for line in &self.career_lines {
+                            ui.text(line);
+                        }
+                    }
+                }
+
+                ui.spacing();
+                ui.separator();
 
                 let button_label = if is_running {
                     "Escaneando... (rodando em background)"

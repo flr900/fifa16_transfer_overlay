@@ -1,0 +1,83 @@
+# generated: 2026-09-30
+# last_updated: 2026-09-30
+# project: Central de Scout (FIFA 16 Companion)
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; sprint-status surfaces open ones
+
+generated: 2026-09-30
+last_updated: 2026-09-30
+project: Central de Scout (FIFA 16 Companion)
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: in-progress
+  1-1-read-career-state-and-identify-the-active-save: in-progress
+  1-2-open-and-close-the-scout-panel-with-a-dedicated-shortcut: backlog
+  1-3-persist-scout-state-per-save: backlog
+  1-4-browse-the-olheiros-available-to-hire: backlog
+  1-5-hire-an-olheiro: backlog
+  1-6-navigate-the-panel-with-a-gamepad: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-define-the-scouting-balance-table: backlog
+  2-2-create-a-missao-with-an-olheiro-overall-potencial-range-and-modo-de-busca: backlog
+  2-3-follow-the-progress-of-active-missoes: backlog
+  2-4-run-due-missoes-and-generate-relatorios: backlog
+  2-5-read-a-relatorio-in-the-tabular-view: backlog
+  2-6-switch-between-tabular-and-cards-with-real-minifaces: backlog
+  2-7-archive-and-restore-relatorios: backlog
+  2-8-filter-a-missao-by-dominant-attribute: backlog
+  2-9-filter-a-missao-by-country-on-the-map: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-open-a-players-ficha-with-the-radar-de-atributos: backlog
+  3-2-compare-a-found-player-with-a-squad-player: backlog
+  3-3-filter-a-missao-by-jogador-de-referencia: backlog
+  3-4-filter-a-missao-by-fit-posicional: backlog
+  3-5-see-fit-posicional-in-the-relatorio: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-see-coverage-by-country-on-the-sonar-map: backlog
+  4-2-read-a-countrys-missao-counts: backlog
+  epic-4-retrospective: optional

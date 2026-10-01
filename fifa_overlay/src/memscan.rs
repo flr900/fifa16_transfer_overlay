@@ -45,7 +45,7 @@ const MAX_REGION_SIZE: usize = 64 * 1024 * 1024;
 
 /// Assinatura de cabeçalho de database FIFA (t3db v8), a mesma usada
 /// em `fifa16_db_parser.py` (`DB_SIGNATURE`).
-const DB_SIGNATURE: &[u8] = b"DB\x00\x08\x00\x00\x00\x00";
+pub const DB_SIGNATURE: &[u8] = b"DB\x00\x08\x00\x00\x00\x00";
 
 #[derive(Debug, Clone, Copy)]
 pub struct Region {
