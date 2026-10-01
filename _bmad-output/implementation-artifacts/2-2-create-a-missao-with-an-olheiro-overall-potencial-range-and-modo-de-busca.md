@@ -4,7 +4,7 @@ baseline_commit: f583960
 
 # Story 2.2: Create a Missão with an Olheiro, Overall/Potencial range and Modo de Busca
 
-Status: review
+Status: done
 
 ## Story
 
