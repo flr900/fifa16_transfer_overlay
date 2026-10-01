@@ -4,7 +4,7 @@ baseline_commit: b46ea7f9d7e632ebafe1156c7f9f3bd2047f3123
 
 # Story 1.1: Read career state and identify the active save
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

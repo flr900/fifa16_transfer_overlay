@@ -131,6 +131,34 @@ impl Tier {
     }
 }
 
+/// Modo de Busca de uma Missão (PRD, Glossário): Rápida = mais nomes,
+/// Qualidade menor, conclui antes; Completa = menos nomes, Qualidade
+/// maior, mais devagar. No JSON: `"rapida"` / `"completa"`.
+#[allow(dead_code)] // persistido na Missão a partir da Story 2.2
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModoBusca {
+    Rapida,
+    Completa,
+}
+
+impl ModoBusca {
+    #[allow(dead_code)] // opções do formulário Nova Missão (Story 2.2)
+    pub const TODOS: [ModoBusca; 2] = [ModoBusca::Rapida, ModoBusca::Completa];
+}
+
+/// Qualidade de um Relatório (PRD, Glossário): define precisão dos
+/// atributos, quantos atributos aparecem e quantos jogadores voltam. Em
+/// ordem: `Baixa < Media < Alta`. No JSON: `"baixa"` etc.
+#[allow(dead_code)] // badge no formulário (2.2) e no Relatório (2.4/2.5)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Qualidade {
+    Baixa,
+    Media,
+    Alta,
+}
+
 /// Olheiro contratado.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Olheiro {

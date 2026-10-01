@@ -4,7 +4,7 @@ baseline_commit: dfd611d
 
 # Story 1.2: Open and close the Scout panel with a dedicated shortcut
 
-Status: review
+Status: done
 
 ## Story
 
