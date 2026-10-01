@@ -48,9 +48,9 @@ tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
 
 development_status:
-  epic-1: in-progress
-  1-1-read-career-state-and-identify-the-active-save: review
-  1-2-open-and-close-the-scout-panel-with-a-dedicated-shortcut: review
+  epic-1: done
+  1-1-read-career-state-and-identify-the-active-save: done
+  1-2-open-and-close-the-scout-panel-with-a-dedicated-shortcut: done
   1-3-persist-scout-state-per-save: done
   1-4-browse-the-olheiros-available-to-hire: done
   1-5-hire-an-olheiro: done
@@ -58,8 +58,8 @@ development_status:
   1-7-start-with-the-game-and-preload-the-career: done
   epic-1-retrospective: optional
 
-  epic-2: backlog
-  2-1-define-the-scouting-balance-table: backlog
+  epic-2: in-progress
+  2-1-define-the-scouting-balance-table: review
   2-2-create-a-missao-with-an-olheiro-overall-potencial-range-and-modo-de-busca: backlog
   2-3-follow-the-progress-of-active-missoes: backlog
   2-4-run-due-missoes-and-generate-relatorios: backlog
