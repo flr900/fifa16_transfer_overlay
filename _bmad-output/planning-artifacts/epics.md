@@ -612,6 +612,37 @@ So that I can target regions and see how breadth affects quality.
 **When** the map renders
 **Then** it falls under an explicit "outros" tile and is never silently dropped.
 
+### Story 2.10: Follow a partial Relatório and run continuous Missões
+
+*(Added 2026-10-01 at Felipe's request after testing Story 2.3. Not designed yet; the defaults below are proposals to confirm when the story starts.)*
+
+As Felipe,
+I want to see the players an Olheiro has already found while the Missão is still running, keep an Olheiro on an open-ended search, and be told when the Relatório gets new names,
+So that scouting feels like a living process instead of a single delivery at the deadline.
+
+**Acceptance Criteria (draft):**
+
+**Given** a Missão in progress
+**When** I open it
+**Then** a partial Relatório shows the players found so far, and more appear as career days pass
+**And** the number shown follows the Missão progress, up to the Relatório target at the deadline. The precision and revealed attributes of each player follow the Missão Qualidade (Story 2.1).
+
+**Given** I create a Missão
+**When** I choose "sem prazo" (continuous)
+**Then** the Olheiro stays "Em Missão" on that search until I cancel it
+**And** new players keep being added over time
+**And** cancelling frees the Olheiro and keeps the players found so far as a Relatório.
+
+**Given** a Relatório received new players since I last looked
+**When** the panel is closed
+**Then** the top-right banner (Story 1.7) says so, e.g. "Relatório atualizado: +2 jogadores · Missão Jovens", for 3 seconds, without taking input from the game.
+
+**Design notes and open questions (to settle when the story starts):**
+- **AD-8 changes.** Today the search runs only after the deadline. A partial Relatório needs the full search (`CZUM` scan, Story 2.4 `AsyncTask`) to run early, e.g. at the first panel opening after the Missão is created. Players are then *revealed* gradually in a fixed order. Proposed: revealed = ceil(progress × target), in a deterministic order seeded by the Missão id. The Architecture Spine must be updated.
+- **Paying for a continuous Missão.** FR-3/NFR1 allow budget writes only on explicit confirmation, so there can be no automatic recurring charge. Proposal: prepaid blocks (e.g. 30 career days). When a block ends, the Missão pauses and asks for renewal with an explicit confirmation.
+- **Notifications** need a cheap change check while the panel is closed. The live date is already read every second when a career is ready. This does not contradict FR-8, which is about the progress shown in the open panel.
+- Depends on Stories 2.4 (search) and 2.5 (Relatório view). It fits after 2.5 or in place of part of 2.7.
+
 ## Epic 3: Find players by profile and compare them with your squad
 
 Add Fit Posicional and Jogador de Referência filters to a Missão, and open any found player in a Ficha with a Radar that can be overlaid on a squad player.
