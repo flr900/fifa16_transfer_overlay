@@ -9,8 +9,8 @@
 //! jogo não está mapeada — mesma decisão do cabeçalho na Story 1.2).
 //!
 //! Os dados vêm de `scout::state` (AD-1); custos, de `scout::quality`.
-//! A confirmação de contratação é a Story 1.5: por enquanto o botão só
-//! registra o pedido no log.
+//! "Contratar" devolve o pedido para `screens::render_painel`, que abre a
+//! Confirmação de Contratação (Story 1.5).
 
 use imgui::{DrawListMut, ItemHoveredFlags, StyleColor, Ui};
 
@@ -76,7 +76,9 @@ enum Lado {
     Status { em_missao: bool },
 }
 
-pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) {
+/// Desenha a aba; devolve a combinação cujo "Contratar" foi clicado.
+pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) -> Option<(Especializacao, Tier)> {
+    let mut pedido = None;
     rotulo_secao(ui, fonts, "Contratados");
     let contratados = state.olheiros_contratados();
     if contratados.is_empty() {
@@ -92,14 +94,22 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) {
     for oferta in state.olheiros_disponiveis() {
         let chave = format!("oferta_{:?}_{:?}", oferta.especializacao, oferta.tier);
         if card(ui, fonts, &chave, oferta.especializacao, oferta.tier, &Lado::Contratar(oferta)) {
-            tracing::info!(
-                "[scout::olheiros] Contratar {} {:?} ({}) pedido; a confirmação chega na Story 1.5.",
-                oferta.especializacao.nome(),
-                oferta.tier,
-                oferta.custo
-            );
+            pedido = Some((oferta.especializacao, oferta.tier));
         }
     }
+    pedido
+}
+
+/// Nome da Especialização com o badge do Tier ao lado (também usado na
+/// Confirmação de Contratação).
+pub fn nome_com_badge(ui: &Ui, fonts: Option<&Fonts>, especializacao: Especializacao, tier: Tier) {
+    let altura_nome = com_fonte(ui, fonts.map(|f| f.heading), || {
+        ui.text(especializacao.nome());
+        ui.calc_text_size(especializacao.nome())[1]
+    });
+    ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+    let dl = ui.get_window_draw_list();
+    badge_tier(ui, fonts, &dl, tier, altura_nome);
 }
 
 fn rotulo_secao(ui: &Ui, fonts: Option<&Fonts>, texto: &str) {

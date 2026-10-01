@@ -4,7 +4,7 @@ baseline_commit: a73e169
 
 # Story 1.4: Browse the Olheiros available to hire
 
-Status: review
+Status: done
 
 ## Story
 

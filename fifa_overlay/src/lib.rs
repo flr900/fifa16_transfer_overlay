@@ -33,7 +33,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "1.4-v1 — aba Olheiros";
+const BUILD_TAG: &str = "1.5-v1 — contratar Olheiro";
 
 fn setup_tracing() {
     let file_appender = tracing_appender::rolling::never(std::env::temp_dir(), "fifa_overlay.log");

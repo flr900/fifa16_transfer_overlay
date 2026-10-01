@@ -100,6 +100,9 @@ pub enum SaveRepoError {
     CarreiraNaoCarregada,
     /// `start_locating` ainda não terminou (ou o cache foi invalidado).
     NaoLocalizado,
+    /// O orçamento vivo não é mais o valor que o usuário viu ao confirmar
+    /// (o jogo mexeu nele no meio): nada foi escrito. Traz o valor atual.
+    OrcamentoMudou(i32),
     /// Falha inesperada, com descrição para o log.
     Interno(String),
 }
@@ -113,6 +116,7 @@ impl fmt::Display for SaveRepoError {
             SaveRepoError::ProcessoInacessivel => write!(f, "Não foi possível ler o save ativo."),
             SaveRepoError::CarreiraNaoCarregada => write!(f, "Nenhuma carreira carregada."),
             SaveRepoError::NaoLocalizado => write!(f, "Carreira ainda não localizada."),
+            SaveRepoError::OrcamentoMudou(atual) => write!(f, "O orçamento mudou para {atual}."),
             SaveRepoError::Interno(msg) => write!(f, "Erro interno: {msg}"),
         }
     }
@@ -294,6 +298,17 @@ struct ProcessMemory;
 impl ByteSource for ProcessMemory {
     fn read(&self, address: usize, len: usize) -> Option<Vec<u8>> {
         memscan::read_region_bytes(&Region { base: address, size: len })
+    }
+}
+
+/// Escrita de bytes na memória do processo (só o `transferbudget` usa).
+trait ByteSink {
+    fn write(&self, address: usize, bytes: &[u8]) -> bool;
+}
+
+impl ByteSink for ProcessMemory {
+    fn write(&self, address: usize, bytes: &[u8]) -> bool {
+        memscan::write_bytes_at(address, bytes)
     }
 }
 
@@ -1015,6 +1030,48 @@ pub fn read_transfer_budget() -> Result<i32, SaveRepoError> {
     with_live(|live| live_finances(live, &ProcessMemory).map(|(budget, _)| budget))
 }
 
+/// Escreve o `dqXv.transferbudget` VIVO (Story 1.5). É o ÚNICO campo do
+/// jogo que o Scout escreve (NFR1), e só quando o usuário confirma.
+///
+/// Compare-and-write: só escreve se o valor vivo ainda for `anterior` (o
+/// que o usuário viu no modal); senão devolve `OrcamentoMudou(atual)` sem
+/// escrever. Depois de escrever, relê a struct (com a assinatura de
+/// temporada) e devolve o valor relido — que tem de ser `novo`.
+///
+/// Sessão 4: o valor escrito nesse campo aparece no jogo ao trocar de
+/// tela e vai para o arquivo no próximo save (o próprio jogo recalcula o
+/// checksum).
+pub fn write_transfer_budget(anterior: i32, novo: i32) -> Result<i32, SaveRepoError> {
+    with_live(|live| write_budget_at(live, &ProcessMemory, anterior, novo))
+}
+
+fn write_budget_at(
+    live: &LiveCareer,
+    mem: &(impl ByteSource + ByteSink),
+    anterior: i32,
+    novo: i32,
+) -> Result<i32, SaveRepoError> {
+    if novo < 0 {
+        return Err(SaveRepoError::Interno(format!("orçamento negativo recusado: {novo}")));
+    }
+    let (atual, _) = live_finances(live, mem)?;
+    if atual != anterior {
+        tracing::warn!("[save_repo] Orçamento mudou antes da escrita ({anterior} -> {atual}); nada escrito.");
+        return Err(SaveRepoError::OrcamentoMudou(atual));
+    }
+    if !mem.write(live.transfer_budget_addr, &novo.to_le_bytes()) {
+        tracing::warn!("[save_repo] Falha ao escrever o orçamento em 0x{:X}.", live.transfer_budget_addr);
+        return Err(SaveRepoError::ProcessoInacessivel);
+    }
+    let (relido, _) = live_finances(live, mem)?;
+    if relido != novo {
+        tracing::warn!("[save_repo] Releitura do orçamento não confere: escrito {novo}, lido {relido}.");
+        return Err(SaveRepoError::Interno(format!("releitura {relido} diferente do escrito {novo}")));
+    }
+    tracing::info!("[save_repo] Orçamento de transferências: {anterior} -> {relido} (0x{:X}).", live.transfer_budget_addr);
+    Ok(relido)
+}
+
 /// `dqXv.wagebudget` VIVO (vizinho do orçamento na mesma struct).
 #[allow(dead_code)] // API do repositório; ainda sem tela que mostre
 pub fn read_wage_budget() -> Result<i32, SaveRepoError> {
@@ -1561,6 +1618,82 @@ mod tests {
         let mut sig = TESTE_SIG;
         scrub_signature(&mut sig);
         assert_eq!(sig, SeasonSignature { start_wage_budget: 0, start_transfer_budget: 0, start_player_wages: 0 });
+    }
+
+    /// Memória falsa que aceita escrita (ou recusa, para testar a falha).
+    struct MemoriaGravavel {
+        bytes: std::cell::RefCell<Vec<u8>>,
+        aceita: bool,
+        /// Simula o jogo sobrescrevendo o campo logo depois da escrita.
+        sobrescreve_com: Option<i32>,
+    }
+
+    impl ByteSource for MemoriaGravavel {
+        fn read(&self, address: usize, len: usize) -> Option<Vec<u8>> {
+            self.bytes.borrow().get(address..address.checked_add(len)?).map(<[u8]>::to_vec)
+        }
+    }
+
+    impl ByteSink for MemoriaGravavel {
+        fn write(&self, address: usize, bytes: &[u8]) -> bool {
+            if !self.aceita {
+                return false;
+            }
+            let mut mem = self.bytes.borrow_mut();
+            let Some(alvo) = mem.get_mut(address..address + bytes.len()) else {
+                return false;
+            };
+            alvo.copy_from_slice(bytes);
+            if let Some(valor) = self.sobrescreve_com {
+                alvo.copy_from_slice(&valor.to_le_bytes());
+            }
+            true
+        }
+    }
+
+    fn memoria_com_orcamento(orcamento: i32) -> (MemoriaGravavel, LiveCareer) {
+        let mut mem = vec![0u8; 8];
+        mem.extend(live_struct(692_307, orcamento, TESTE_SIG));
+        let live = LiveCareer { transfer_budget_addr: 12, region_base: 0, last_date: None, save: saved(TESTE_SIG, 243) };
+        (MemoriaGravavel { bytes: std::cell::RefCell::new(mem), aceita: true, sobrescreve_com: None }, live)
+    }
+
+    #[test]
+    fn budget_write_changes_only_the_transfer_budget_and_reads_it_back() {
+        let (mem, live) = memoria_com_orcamento(63_999_988);
+        let antes = mem.bytes.borrow().clone();
+        assert_eq!(write_budget_at(&live, &mem, 63_999_988, 58_199_988), Ok(58_199_988));
+        assert_eq!(live_finances(&live, &mem), Ok((58_199_988, 692_307)), "salário intacto");
+        // só os 4 bytes do transferbudget mudaram (NFR1)
+        let depois = mem.bytes.borrow().clone();
+        let mudados: Vec<usize> = (0..antes.len()).filter(|&i| antes[i] != depois[i]).collect();
+        assert!(mudados.iter().all(|&i| (12..16).contains(&i)), "{mudados:?}");
+    }
+
+    #[test]
+    fn budget_write_refuses_when_the_live_value_moved_and_writes_nothing() {
+        let (mem, live) = memoria_com_orcamento(60_000_000);
+        let antes = mem.bytes.borrow().clone();
+        assert_eq!(write_budget_at(&live, &mem, 63_999_988, 58_199_988), Err(SaveRepoError::OrcamentoMudou(60_000_000)));
+        assert_eq!(*mem.bytes.borrow(), antes);
+    }
+
+    #[test]
+    fn budget_write_failures_are_errors_never_success() {
+        // escrita recusada pelo sistema
+        let (mut mem, live) = memoria_com_orcamento(63_999_988);
+        mem.aceita = false;
+        assert_eq!(write_budget_at(&live, &mem, 63_999_988, 1), Err(SaveRepoError::ProcessoInacessivel));
+
+        // o jogo sobrescreveu logo depois: a releitura não confere
+        let (mut mem, live) = memoria_com_orcamento(63_999_988);
+        mem.sobrescreve_com = Some(63_999_988);
+        assert!(matches!(write_budget_at(&live, &mem, 63_999_988, 1), Err(SaveRepoError::Interno(_))));
+
+        // valor negativo nunca é escrito
+        let (mem, live) = memoria_com_orcamento(63_999_988);
+        assert!(matches!(write_budget_at(&live, &mem, 63_999_988, -1), Err(SaveRepoError::Interno(_))));
+        assert_eq!(live_finances(&live, &mem), Ok((63_999_988, 692_307)));
     }
 
     #[test]

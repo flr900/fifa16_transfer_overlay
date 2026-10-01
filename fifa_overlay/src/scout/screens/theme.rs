@@ -42,6 +42,9 @@ pub const TIER_EXPERIENTE: [f32; 4] = rgba(0xb45cff, 1.0);
 /// o texto porque `#5c6b5f` sobre o painel escuro quase some.
 pub const TIER_JUNIOR: [f32; 4] = rgba(0x5c6b5f, 1.0);
 pub const TIER_JUNIOR_TEXTO: [f32; 4] = rgba(0x8a988c, 1.0);
+/// Véu sobre o painel quando há um modal por cima (mesmo tom do
+/// `ModalWindowDimBg`).
+pub const FUNDO_MODAL: [f32; 4] = rgba(0x0b0e0c, 0.6);
 /// Botão desabilitado (mockup `olheiros.html`, `.btn-disabled`).
 pub const BOTAO_DESABILITADO: [f32; 4] = rgba(0xffffff, 0.06);
 pub const TRANSPARENTE: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
