@@ -5,12 +5,16 @@
 use imgui::Ui;
 use uuid::Uuid;
 
-use super::componentes::{badge_novo, badge_qualidade, badge_tier, card, desenhar_badge, texto_em};
+use super::componentes::{self, badge_novo, badge_qualidade, badge_tier, card_com_largura, desenhar_badge, texto_em, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data};
 use crate::scout::state::{RelatorioNaLista, ScoutState};
 
 const ALTURA_CARD: f32 = 76.0;
+/// Coluna do botão Arquivar/Restaurar à direita de cada card (Story 2.7).
+const LARGURA_ACAO: f32 = 130.0;
+
+pub const MSG_SEM_ARQUIVADOS: &str = "Nenhum Relatório arquivado.";
 
 pub const MSG_SEM_RELATORIOS: &str =
     "Nenhum Relatório ainda. Quando o prazo de uma Missão passar, o Relatório aparece aqui.";
@@ -32,10 +36,19 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Option<
     // Tabular / Cards sempre visível no topo (Story 2.6): vale para os
     // Relatórios abertos a partir daqui.
     super::relatorio::alternador_densidade(ui, fonts, state);
+    // Lista principal / "Arquivados" (Story 2.7).
+    ui.same_line_with_spacing(0.0, theme::ESPACO_5);
+    let arquivados = state.vendo_arquivados();
+    match componentes::alternador(ui, fonts, &["Ativos", "Arquivados"], usize::from(arquivados), 130.0) {
+        Some(indice) => state.ver_arquivados(indice == 1),
+        None => {}
+    }
     ui.dummy([0.0, theme::ESPACO_2]);
-    let lista = state.relatorios(false);
+    let arquivados = state.vendo_arquivados();
+    let lista = state.relatorios(arquivados);
     if lista.is_empty() {
-        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_RELATORIOS));
+        let msg = if arquivados { MSG_SEM_ARQUIVADOS } else { MSG_SEM_RELATORIOS };
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, msg));
         return None;
     }
     let mut abrir = None;
@@ -43,13 +56,31 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Option<
         if card_relatorio(ui, fonts, item) {
             abrir = Some(item.relatorio.id);
         }
+        // Arquivar só para Relatório já aberto; Restaurar no filtro.
+        ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        let y = ui.cursor_pos()[1];
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + (ALTURA_CARD - theme::ALVO_MINIMO) * 0.5]);
+        let _id = ui.push_id(item.relatorio.id.to_string());
+        if arquivados {
+            if componentes::botao_com_largura(ui, fonts, "Restaurar", EstiloBotao::Secundario, true, Some(LARGURA_ACAO)) {
+                state.restaurar_relatorio(item.relatorio.id);
+            }
+        } else if ScoutState::pode_arquivar(item) {
+            if componentes::botao_com_largura(ui, fonts, "Arquivar", EstiloBotao::Secundario, true, Some(LARGURA_ACAO)) {
+                state.arquivar_relatorio(item.relatorio.id);
+            }
+        } else {
+            ui.dummy([LARGURA_ACAO, theme::ALVO_MINIMO]);
+        }
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + ALTURA_CARD + theme::ESPACO_2]);
     }
     abrir
 }
 
 /// Card de um Relatório; `true` = ativado (clique ou A).
 pub fn card_relatorio(ui: &Ui, fonts: Option<&Fonts>, item: &RelatorioNaLista) -> bool {
-    let c = card(ui, &item.relatorio.id.to_string(), ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
+    let largura = (ui.content_region_avail()[0] - LARGURA_ACAO - theme::ESPACO_2).max(200.0);
+    let c = card_com_largura(ui, &item.relatorio.id.to_string(), largura, ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
     let dl = ui.get_window_draw_list();
     let x = c.min[0] + theme::ESPACO_4;
     let mut y = c.min[1] + theme::ESPACO_3;
@@ -89,5 +120,6 @@ mod tests {
         let item = RelatorioNaLista { relatorio, missao: Some(missao), olheiro: None };
         assert_eq!(detalhe_card(&item), "nenhum jogador · gerado em 03/07/2026 · Rápida");
         assert!(!MSG_SEM_RELATORIOS.contains('!'));
+        assert_eq!(MSG_SEM_ARQUIVADOS, "Nenhum Relatório arquivado.");
     }
 }

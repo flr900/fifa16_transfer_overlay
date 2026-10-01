@@ -132,6 +132,14 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     if componentes::botao(ui, fonts, "Voltar", EstiloBotao::Secundario, true) {
         acao = Acao::Voltar;
     }
+    // Arquivar daqui também (o Relatório já está aberto): volta à lista,
+    // onde ele passa para "Arquivados" (Story 2.7).
+    if ScoutState::pode_arquivar(&item) {
+        ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        if componentes::botao(ui, fonts, "Arquivar", EstiloBotao::Secundario, true) && state.arquivar_relatorio(item.relatorio.id) {
+            acao = Acao::Voltar;
+        }
+    }
     ui.same_line_with_spacing(0.0, theme::ESPACO_4);
     cabecalho(ui, fonts, &item);
     // Tabular / Cards sempre visível no topo, à direita (Story 2.6).

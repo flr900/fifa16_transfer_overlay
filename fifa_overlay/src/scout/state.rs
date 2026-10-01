@@ -580,6 +580,9 @@ pub struct ScoutState {
     relatorio_aberto: Option<Uuid>,
     /// Rostos dos jogadores da visão Cards (Story 2.6).
     minifaces: Minifaces,
+    /// Aba Relatórios mostrando o filtro "Arquivados" (Story 2.7; não
+    /// persiste: reabrir o painel volta à lista principal).
+    vendo_arquivados: bool,
 }
 
 impl ScoutState {
@@ -615,6 +618,7 @@ impl ScoutState {
             painel_aberto: false,
             relatorio_aberto: None,
             minifaces: Minifaces::new(crate::save_repo::ler_miniface),
+            vendo_arquivados: false,
         }
     }
 
@@ -662,6 +666,7 @@ impl ScoutState {
         self.cancelar_contratacao();
         self.cancelar_nova_missao();
         self.fechar_relatorio();
+        self.vendo_arquivados = false;
     }
 
     /// Botão "Tentar novamente": localiza a carreira de novo.
@@ -1116,6 +1121,7 @@ impl ScoutState {
                 .missoes
                 .iter()
                 .rev()
+                .filter(|m| !dados.relatorios.iter().any(|r| r.missao_id == m.id && r.arquivado))
                 .map(|m| {
                     let relatorio = dados.relatorios.iter().find(|r| r.missao_id == m.id);
                     MissaoNaLista {
@@ -1328,6 +1334,52 @@ impl ScoutState {
         }
         if let Err(err) = estado.mutar(|d| d.ui_prefs.densidade = densidade) {
             tracing::warn!("[scout::state] Visão dos Relatórios não foi salva: {err:?}");
+        }
+    }
+
+    pub fn vendo_arquivados(&self) -> bool {
+        self.vendo_arquivados
+    }
+
+    pub fn ver_arquivados(&mut self, arquivados: bool) {
+        self.vendo_arquivados = arquivados;
+    }
+
+    /// Pode arquivar: já foi aberto ao menos uma vez e a Missão terminou
+    /// (Story 2.7). Arquivar nunca apaga nada.
+    pub fn pode_arquivar(item: &RelatorioNaLista) -> bool {
+        item.relatorio.aberto
+            && !item.relatorio.arquivado
+            && item.missao.as_ref().is_none_or(|m| m.status == StatusMissao::Concluida)
+    }
+
+    /// "Arquivar": some da lista principal (e a Missão some da aba
+    /// Missões), aparece em "Arquivados". `false` = não permitido/não salvo.
+    pub fn arquivar_relatorio(&mut self, id: Uuid) -> bool {
+        let permitido = self.relatorios(false).iter().any(|item| item.relatorio.id == id && Self::pode_arquivar(item));
+        permitido && self.marcar_arquivado(id, true)
+    }
+
+    /// "Restaurar": volta para a lista principal.
+    pub fn restaurar_relatorio(&mut self, id: Uuid) -> bool {
+        let arquivado = self.relatorios(true).iter().any(|item| item.relatorio.id == id);
+        arquivado && self.marcar_arquivado(id, false)
+    }
+
+    fn marcar_arquivado(&mut self, id: Uuid, arquivado: bool) -> bool {
+        let Some(estado) = self.estado_ativo() else {
+            return false;
+        };
+        match estado.mutar(|dados| {
+            for r in dados.relatorios.iter_mut().filter(|r| r.id == id) {
+                r.arquivado = arquivado;
+            }
+        }) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!("[scout::state] Relatório não foi (des)arquivado: {err:?}");
+                false
+            }
         }
     }
 
@@ -2468,5 +2520,36 @@ mod tests {
         assert_eq!(st.densidade(), Densidade::Cards);
         let relido = EstadoPersistido::carregar(Some(&pasta.0), ID_A).ler(|d| d.ui_prefs.densidade);
         assert_eq!(relido, Densidade::Cards);
+    }
+
+    #[test]
+    fn opened_reports_can_be_archived_and_restored_never_deleted() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let id = st.relatorios(false)[0].relatorio.id;
+
+        // ainda não aberto: Arquivar não é oferecido nem aceito
+        assert!(!ScoutState::pode_arquivar(&st.relatorios(false)[0]));
+        assert!(!st.arquivar_relatorio(id));
+
+        st.abrir_relatorio(id);
+        st.fechar_relatorio();
+        assert!(ScoutState::pode_arquivar(&st.relatorios(false)[0]));
+        assert!(st.arquivar_relatorio(id));
+        assert!(st.relatorios(false).is_empty());
+        assert_eq!(st.relatorios(true).len(), 1);
+        assert!(st.missoes().is_empty(), "a Missão sai da aba Missões com o Relatório arquivado");
+        let arquivado = EstadoPersistido::carregar(Some(&pasta.0), ID_A).ler(|d| (d.relatorios.len(), d.relatorios[0].arquivado));
+        assert_eq!(arquivado, (1, true), "nunca apagado");
+
+        assert!(st.restaurar_relatorio(id));
+        assert_eq!(st.relatorios(false).len(), 1);
+        assert!(st.relatorios(true).is_empty());
+        assert_eq!(st.missoes().len(), 1);
+        assert!(!st.restaurar_relatorio(id), "já está na lista principal");
     }
 }
