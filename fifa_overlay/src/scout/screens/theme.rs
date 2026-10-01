@@ -32,7 +32,6 @@ pub const TEXT_DISABLED: [f32; 4] = rgba(0x4d564f, 1.0);
 pub const ACCENT_PRIMARY: [f32; 4] = rgba(0xb45cff, 1.0);
 pub const ACCENT_PRIMARY_DIM: [f32; 4] = rgba(0xb45cff, 0.13);
 pub const FIELD_GREEN: [f32; 4] = rgba(0x3ecf6e, 1.0);
-#[allow(dead_code)]
 pub const DANGER: [f32; 4] = rgba(0xe5484d, 1.0);
 pub const TRANSPARENTE: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 

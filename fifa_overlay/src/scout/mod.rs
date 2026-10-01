@@ -184,15 +184,18 @@ impl Scout {
         }
     }
 
-    /// Chamado a cada frame pelo `render()` do overlay.
+    /// Chamado a cada frame pelo `render()` do overlay. O estado anda com
+    /// o painel fechado também (o vigia da carreira — Story 1.7); fechado,
+    /// só o banner do canto da tela é desenhado, e só quando há aviso.
     pub fn frame(&mut self, ui: &Ui, fonts: Option<&Fonts>) {
         self.atualizar_atalho(tecla_pressionada(ATALHO_PAINEL));
-        if !self.painel_aberto {
-            return;
-        }
         self.state.tick();
         self.aplicar_aba_restaurada();
-        screens::render_painel(ui, fonts, &mut self.nav, &mut self.state);
+        if self.painel_aberto {
+            screens::render_painel(ui, fonts, &mut self.nav, &mut self.state);
+        } else if let Some(aviso) = self.state.aviso_visivel(std::time::Instant::now()) {
+            screens::aviso::render(ui, fonts, aviso);
+        }
     }
 
     /// Carreira acabou de ficar ativa: a navegação vai para a aba salva
@@ -293,6 +296,9 @@ mod tests {
 
     impl search::CareerSource for CarreiraFixa {
         fn start_locating(&self, _task: &crate::async_task::AsyncTask<()>) -> bool {
+            false
+        }
+        fn start_career_probe(&self, _task: &crate::async_task::AsyncTask<bool>) -> bool {
             false
         }
         fn read_snapshot(&self) -> Result<search::CareerSnapshot, crate::save_repo::SaveRepoError> {

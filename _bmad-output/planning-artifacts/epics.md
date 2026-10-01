@@ -331,6 +331,34 @@ So that I never have to put the controller down to use it.
 **When** the story is started
 **Then** feasibility is checked first, and if it is not achievable, the limitation and a keyboard-navigation fallback are documented.
 
+### Story 1.7: Start with the game and preload the career
+
+*(Added 2026-10-01 at Felipe's request after Story 1.3: manual injection and a ~15 s locate on the first F10 made a poor first experience.)*
+
+As Felipe,
+I want the Central de Scout to load with the game and to have my career ready before I press F10,
+So that I never run the injector by hand or wait in front of an empty panel.
+
+**Acceptance Criteria:**
+
+**Given** I start my session with the launcher script instead of the FIFA Friends shortcut
+**When** it runs
+**Then** it opens the FIFA Friends server (the same target as the shortcut), waits for `fifa16.exe`, and injects the overlay once the game has loaded DirectX and shows a visible window
+**And** it never injects twice into the same game process, waits again if the game is reopened, and exits when the FIFA Friends server closes.
+
+**Given** the overlay has just been injected
+**When** the first frame renders
+**Then** a banner in the top-right corner shows "Central de Scout ativa" and disappears after 3 seconds, without taking mouse, keyboard or focus from the game.
+
+**Given** the panel is closed and I enter a career
+**When** the overlay notices a career is loaded (cheap background check, never on the render thread — AD-4)
+**Then** it locates the career by itself and the banner shows "Carregando carreira…" while it runs, then "Carreira pronta" with the manager and date for 3 seconds, or a short failure message with the F10 hint for 3 seconds
+**And** a failed locate is not retried in a loop: only after leaving the career, or through F10 / "Tentar novamente".
+
+**Given** the career was already located in the background
+**When** I press F10
+**Then** the panel opens directly on the career's saved tab, with no "Localizando carreira…" wait.
+
 ## Epic 2: Commission a Missão and receive a Relatório
 
 Create a Missão with a hired Olheiro, see its cost, time and expected Qualidade before confirming, and when the career date passes the deadline, open a Relatório whose precision depends on Qualidade.

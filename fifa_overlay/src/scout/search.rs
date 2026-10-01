@@ -27,6 +27,8 @@ pub trait CareerSource: Send + Sync {
     fn start_locating(&self, task: &AsyncTask<()>) -> bool;
     /// Leitura barata (poucos bytes) do estado vivo da carreira localizada.
     fn read_snapshot(&self) -> Result<CareerSnapshot, SaveRepoError>;
+    /// Dispara o sinal barato "parece haver carreira carregada?" (Story 1.7).
+    fn start_career_probe(&self, task: &AsyncTask<bool>) -> bool;
 }
 
 /// Fonte real: o `save_repo` da Story 1.1.
@@ -35,6 +37,10 @@ pub struct SaveRepoSource;
 impl CareerSource for SaveRepoSource {
     fn start_locating(&self, task: &AsyncTask<()>) -> bool {
         save_repo::start_locating(task)
+    }
+
+    fn start_career_probe(&self, task: &AsyncTask<bool>) -> bool {
+        save_repo::start_career_probe(task)
     }
 
     fn read_snapshot(&self) -> Result<CareerSnapshot, SaveRepoError> {

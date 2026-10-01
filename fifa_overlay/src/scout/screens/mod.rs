@@ -5,6 +5,7 @@
 //! AD-1: as telas só falam com `scout::state`. Formatar valores para
 //! exibição (milhar, data dd/mm/aaaa) é responsabilidade desta camada.
 
+pub mod aviso;
 mod missoes;
 mod olheiros;
 mod relatorios;
