@@ -344,7 +344,7 @@ So that I never run the injector by hand or wait in front of an empty panel.
 **Given** I start my session with the launcher script instead of the FIFA Friends shortcut
 **When** it runs
 **Then** it opens the FIFA Friends server (the same target as the shortcut), waits for `fifa16.exe`, and injects the overlay once the game has loaded DirectX and shows a visible window
-**And** it never injects twice into the same game process, waits again if the game is reopened, and exits when the FIFA Friends server closes.
+**And** it never injects twice into the same game process, and it exits (closing its window) when the game closes, or when the FIFA Friends server closes before the game opens. *(Changed 2026-10-01 at Felipe's request: originally it waited for the game to be reopened.)*
 
 **Given** the overlay has just been injected
 **When** the first frame renders
@@ -814,3 +814,7 @@ So that I can decide whether to scout it again.
 **Given** a gamepad
 **When** I move between tiles and press confirm
 **Then** the same summary appears, and the focused tile shows the purple focus border (UX-DR19).
+
+## Future improvements (post-v1)
+
+Ideas raised by Felipe after Story 1.4 (2026-10-01), **out of v1 scope** and not designed yet: custom names and nationality for each Olheiro; 0–5 star attributes (Caçador de Jovens / Medalhões / Tático / Generalista as attributes, plus Rede de contatos); market specialities with temporary penalties outside them (speed down to −2 stars, quality down to −1, in 0.5 steps; about 6 months to adapt to a new market and 6–12 months to a new scope); offered Olheiros driven by club popularity, titles and rarity; a user-chosen budget range per Missão; Qualidade including false positives. Details and open questions: [`melhorias-futuras-olheiros.md`](melhorias-futuras-olheiros.md).

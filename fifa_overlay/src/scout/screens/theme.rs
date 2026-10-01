@@ -33,6 +33,17 @@ pub const ACCENT_PRIMARY: [f32; 4] = rgba(0xb45cff, 1.0);
 pub const ACCENT_PRIMARY_DIM: [f32; 4] = rgba(0xb45cff, 0.13);
 pub const FIELD_GREEN: [f32; 4] = rgba(0x3ecf6e, 1.0);
 pub const DANGER: [f32; 4] = rgba(0xe5484d, 1.0);
+/// Status "Em Missão" (DESIGN.md `warning`).
+pub const WARNING: [f32; 4] = rgba(0xf5a623, 1.0);
+pub const TIER_ELITE: [f32; 4] = rgba(0xf5a623, 1.0);
+pub const TIER_EXPERIENTE: [f32; 4] = rgba(0xb45cff, 1.0);
+/// Contorno do badge Júnior (`tier-junior`). O texto usa
+/// `TIER_JUNIOR_TEXTO`, um tom acima: o mockup v2 (`olheiros.html`) clareou
+/// o texto porque `#5c6b5f` sobre o painel escuro quase some.
+pub const TIER_JUNIOR: [f32; 4] = rgba(0x5c6b5f, 1.0);
+pub const TIER_JUNIOR_TEXTO: [f32; 4] = rgba(0x8a988c, 1.0);
+/// Botão desabilitado (mockup `olheiros.html`, `.btn-disabled`).
+pub const BOTAO_DESABILITADO: [f32; 4] = rgba(0xffffff, 0.06);
 pub const TRANSPARENTE: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
 // ---------------------------------------------------------------------
@@ -83,8 +94,9 @@ pub struct Fonts {
     pub body: FontId,
     /// Inter 400 menor — texto secundário.
     pub meta: FontId,
+    /// Oswald 600 pequena — badges de Tier/Qualidade (únicos em maiúsculas).
+    pub badge: FontId,
     /// Consolas — colunas numéricas; `None` se o arquivo não existir.
-    #[allow(dead_code)]
     pub mono: Option<FontId>,
 }
 
@@ -110,6 +122,7 @@ pub struct FontSlots {
     heading: usize,
     body: usize,
     meta: usize,
+    badge: usize,
     mono: Option<usize>,
 }
 
@@ -122,6 +135,7 @@ impl FontSlots {
             heading: *ids.get(self.heading)?,
             body: *ids.get(self.body)?,
             meta: *ids.get(self.meta)?,
+            badge: *ids.get(self.badge)?,
             mono: self.mono.and_then(|i| ids.get(i).copied()),
         })
     }
@@ -140,6 +154,7 @@ pub fn carregar_fontes(ctx: &mut Context) -> FontSlots {
     let meta = adicionar(fonte(INTER, 14.0));
     let heading = adicionar(fonte(OSWALD_MEDIUM, 21.0));
     let display = adicionar(fonte(OSWALD_SEMIBOLD, 30.0));
+    let badge = adicionar(fonte(OSWALD_SEMIBOLD, 13.0));
 
     // O ImGui guarda o ponteiro dos dados da fonte enquanto o atlas
     // existir; o vazamento (uma vez, ~400 KB) dá a eles vida `'static`.
@@ -155,7 +170,7 @@ pub fn carregar_fontes(ctx: &mut Context) -> FontSlots {
     };
 
     tracing::info!("[scout::theme] Fontes carregadas (Inter, Oswald, Consolas: {}).", mono.is_some());
-    FontSlots { display, heading, body, meta, mono }
+    FontSlots { display, heading, body, meta, badge, mono }
 }
 
 /// Aplica os tokens ao estilo global do ImGui.

@@ -301,7 +301,7 @@ fn guardar_copia(caminho: &Path) -> io::Result<PathBuf> {
 pub(crate) mod tests {
     use super::*;
     use crate::save_repo::Date;
-    use crate::scout::state::StatusMissao;
+    use crate::scout::state::{Especializacao, StatusMissao, Tier};
     use uuid::Uuid;
 
     /// Pasta temporária única por teste, apagada no `drop`.
@@ -380,7 +380,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ids_and_dates_follow_ad12() {
-        let olheiro = Olheiro { id: Uuid::new_v4() };
+        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente };
         let missao = Missao {
             id: Uuid::new_v4(),
             olheiro_id: olheiro.id,
@@ -403,6 +403,8 @@ pub(crate) mod tests {
 
         let json = json_do_arquivo(&pasta, ID_A);
         assert_eq!(json["olheiros"][0]["id"], olheiro.id.to_string());
+        assert_eq!(json["olheiros"][0]["especializacao"], "tatico");
+        assert_eq!(json["olheiros"][0]["tier"], "experiente");
         assert_eq!(json["missoes"][0]["olheiro_id"], olheiro.id.to_string());
         assert_eq!(json["missoes"][0]["criada_em"], 20260703);
         assert_eq!(json["missoes"][0]["prazo_estimado"], 20261015);
@@ -450,11 +452,15 @@ pub(crate) mod tests {
     fn invalid_ui_prefs_do_not_cost_the_domain_data() {
         let pasta = PastaTemporaria::nova();
         let id = Uuid::new_v4();
-        let conteudo = format!(r#"{{"olheiros": [{{"id": "{id}"}}], "ui_prefs": {{"aba_ativa": "Mercado"}}}}"#);
+        let conteudo = format!(
+            r#"{{"olheiros": [{{"id": "{id}", "especializacao": "cacador_de_jovens", "tier": "elite"}}],
+                "ui_prefs": {{"aba_ativa": "Mercado"}}}}"#
+        );
         let _ = fs::write(pasta.0.join(format!("{ID_A}.json")), conteudo);
 
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        assert_eq!(estado.ler(|d| d.olheiros.clone()), vec![Olheiro { id }]);
+        let esperado = Olheiro { id, especializacao: Especializacao::CacadorDeJovens, tier: Tier::Elite };
+        assert_eq!(estado.ler(|d| d.olheiros.clone()), vec![esperado]);
         assert_eq!(estado.ler(|d| d.ui_prefs.clone()), UiPrefs::default());
         assert_eq!(estado.ler(|d| d.versao), VERSAO_FORMATO, "versão ausente = atual");
     }

@@ -43,6 +43,7 @@ use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
 
 use super::persistence::{self, EstadoPersistido};
+use super::quality;
 use super::search::{CareerSnapshot, CareerSource, SaveRepoSource};
 use super::Aba;
 
@@ -76,15 +77,100 @@ pub struct Aviso {
 // ---------------------------------------------------------------------
 // Entidades persistidas (Structural Seed / ERD; ids UUID v4 — AD-12)
 // ---------------------------------------------------------------------
-// Só os campos que o ERD e as ADs já fixam. Especialização/Tier do
-// Olheiro chegam nas Stories 1.4/1.5; filtros, modo de busca e Qualidade
-// no Épico 2 — cada um com `#[serde(default)]` quando entrar, para os
-// arquivos já gravados continuarem válidos.
+// Só os campos que o ERD e as ADs já fixam. Filtros, modo de busca e
+// Qualidade chegam no Épico 2 — cada um com `#[serde(default)]` quando
+// entrar, para os arquivos já gravados continuarem válidos.
+
+/// Foco do Olheiro (PRD, Glossário). No JSON: `"cacador_de_jovens"` etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Especializacao {
+    CacadorDeJovens,
+    CacadorDeMedalhoes,
+    Tatico,
+    Generalista,
+}
+
+impl Especializacao {
+    /// Ordem do PRD (FR-2), usada na lista de contratação.
+    pub const TODAS: [Especializacao; 4] = [
+        Especializacao::CacadorDeJovens,
+        Especializacao::CacadorDeMedalhoes,
+        Especializacao::Tatico,
+        Especializacao::Generalista,
+    ];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Especializacao::CacadorDeJovens => "Caçador de Jovens",
+            Especializacao::CacadorDeMedalhoes => "Caçador de Medalhões",
+            Especializacao::Tatico => "Tático",
+            Especializacao::Generalista => "Generalista",
+        }
+    }
+}
+
+/// Nível do Olheiro (PRD, Glossário). No JSON: `"junior"` etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    Junior,
+    Experiente,
+    Elite,
+}
+
+impl Tier {
+    pub const TODOS: [Tier; 3] = [Tier::Junior, Tier::Experiente, Tier::Elite];
+
+    #[allow(dead_code)] // rótulo por extenso: modal de contratação (Story 1.5)
+    pub fn nome(self) -> &'static str {
+        match self {
+            Tier::Junior => "Júnior",
+            Tier::Experiente => "Experiente",
+            Tier::Elite => "Elite",
+        }
+    }
+}
 
 /// Olheiro contratado.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Olheiro {
     pub id: Uuid,
+    pub especializacao: Especializacao,
+    pub tier: Tier,
+}
+
+/// Uma das 12 combinações Especialização × Tier à venda (FR-2). Sem
+/// limite de vagas no v1: as 12 ficam sempre disponíveis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OfertaOlheiro {
+    pub especializacao: Especializacao,
+    pub tier: Tier,
+    pub custo: i32,
+    /// Quanto falta no orçamento para contratar (`None` = dá para pagar).
+    pub faltam: Option<i32>,
+}
+
+/// Olheiro contratado como a aba Olheiros o mostra.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OlheiroContratado {
+    pub olheiro: Olheiro,
+    /// Tem Missão ainda não concluída (AD-8): "Em Missão" em vez de "Disponível".
+    pub em_missao: bool,
+}
+
+/// As 12 ofertas na ordem da tela (Tier crescente, depois a ordem do PRD),
+/// com o que falta para cada uma diante de `orcamento`.
+pub fn ofertas_de_olheiros(orcamento: Option<i32>) -> Vec<OfertaOlheiro> {
+    Tier::TODOS
+        .iter()
+        .flat_map(|&tier| Especializacao::TODAS.iter().map(move |&especializacao| (especializacao, tier)))
+        .map(|(especializacao, tier)| {
+            let custo = quality::custo_contratacao(especializacao, tier);
+            let faltam = orcamento.and_then(|saldo| (saldo < custo).then(|| custo.saturating_sub(saldo)));
+            OfertaOlheiro { especializacao, tier, custo, faltam }
+        })
+        .collect()
 }
 
 /// Ciclo de vida de uma Missão (AD-8).
@@ -344,6 +430,39 @@ impl ScoutState {
     /// Estado persistido da carreira pronta agora.
     fn estado_ativo(&self) -> Option<&EstadoPersistido> {
         self.estados.get(self.save_ativo.as_deref()?)
+    }
+
+    /// `transferbudget` vivo da carreira pronta (o mesmo do cabeçalho).
+    pub fn orcamento(&self) -> Option<i32> {
+        match &self.status {
+            CarreiraStatus::Pronta(carreira) => Some(carreira.orcamento_transferencias),
+            _ => None,
+        }
+    }
+
+    /// Lista de contratação (FR-2) contra o orçamento atual.
+    pub fn olheiros_disponiveis(&self) -> Vec<OfertaOlheiro> {
+        ofertas_de_olheiros(self.orcamento())
+    }
+
+    /// Olheiros já contratados nesta carreira, na ordem de contratação.
+    pub fn olheiros_contratados(&self) -> Vec<OlheiroContratado> {
+        let Some(estado) = self.estado_ativo() else {
+            return Vec::new();
+        };
+        estado.ler(|dados| {
+            dados
+                .olheiros
+                .iter()
+                .map(|olheiro| OlheiroContratado {
+                    olheiro: olheiro.clone(),
+                    em_missao: dados
+                        .missoes
+                        .iter()
+                        .any(|m| m.olheiro_id == olheiro.id && m.status != StatusMissao::Concluida),
+                })
+                .collect()
+        })
     }
 
     /// Aba que a navegação deve assumir porque uma carreira acabou de
@@ -763,5 +882,60 @@ mod tests {
         }
         assert_eq!(st.status(), &CarreiraStatus::SemCarreira);
         assert_eq!(localizacoes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn offers_list_the_twelve_combinations_in_tier_order_with_the_shortfall() {
+        let ofertas = ofertas_de_olheiros(Some(1_000_000));
+        assert_eq!(ofertas.len(), 12);
+        let primeiras: Vec<_> = ofertas.iter().take(4).map(|o| (o.especializacao, o.tier)).collect();
+        assert_eq!(primeiras, Especializacao::TODAS.map(|e| (e, Tier::Junior)).to_vec());
+        assert!(ofertas.iter().take(4).all(|o| o.faltam.is_none()), "Júnior cabe em 1 M");
+        let exp_generalista = ofertas
+            .iter()
+            .find(|o| (o.especializacao, o.tier) == (Especializacao::Generalista, Tier::Experiente))
+            .map(|o| o.faltam);
+        assert_eq!(exp_generalista, Some(Some(200_000)));
+        // custo exatamente igual ao saldo: dá para pagar
+        let custo = quality::custo_contratacao(Especializacao::Tatico, Tier::Elite);
+        let exata = ofertas_de_olheiros(Some(custo));
+        assert!(exata.iter().any(|o| o.custo == custo && o.faltam.is_none()));
+    }
+
+    #[test]
+    fn hired_olheiros_come_from_the_career_file_with_their_mission_status() {
+        let pasta = PastaTemporaria::nova();
+        let (mut st, _) = estado_em(vec![Ok(snapshot())], Ok(()), Some(pasta.0.clone()));
+        assert!(st.olheiros_contratados().is_empty(), "sem carreira, nada");
+        st.ao_abrir_painel();
+        assert!(st.olheiros_contratados().is_empty());
+        assert_eq!(st.orcamento(), Some(63_999_988));
+
+        let ocupado = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente };
+        let livre = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Generalista, tier: Tier::Junior };
+        let missao = |olheiro: &Olheiro, status| Missao {
+            id: Uuid::new_v4(),
+            olheiro_id: olheiro.id,
+            status,
+            criada_em: Date(20260701),
+            prazo_estimado: Date(20260715),
+        };
+        let missoes = vec![missao(&ocupado, StatusMissao::Pendente), missao(&livre, StatusMissao::Concluida)];
+        let (o1, o2) = (ocupado.clone(), livre.clone());
+        st.estado_ativo()
+            .map(|e| e.mutar(move |d| {
+                d.olheiros = vec![o1, o2];
+                d.missoes = missoes;
+            }))
+            .expect("carreira ativa")
+            .expect("gravou");
+
+        assert_eq!(
+            st.olheiros_contratados(),
+            vec![
+                OlheiroContratado { olheiro: ocupado, em_missao: true },
+                OlheiroContratado { olheiro: livre, em_missao: false },
+            ]
+        );
     }
 }

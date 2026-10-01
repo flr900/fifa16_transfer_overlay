@@ -147,7 +147,7 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, state: &mut ScoutState) {
             }
         }
         CarreiraStatus::Pronta(_) => match aba {
-            Aba::Olheiros => olheiros::render(ui, fonts),
+            Aba::Olheiros => olheiros::render(ui, fonts, state),
             Aba::Missoes => missoes::render(ui, fonts),
             Aba::Relatorios => relatorios::render(ui, fonts),
             Aba::Sonar => sonar::render(ui, fonts),

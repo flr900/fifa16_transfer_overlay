@@ -4,7 +4,7 @@ baseline_commit: 7ddff7d
 
 # Story 1.3: Persist Scout state per save
 
-Status: review
+Status: done
 
 ## Story
 

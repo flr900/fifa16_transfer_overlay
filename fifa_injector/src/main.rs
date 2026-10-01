@@ -6,9 +6,10 @@
 //!
 //!     fifa_injector.exe --aguardar [--enquanto-pid <PID>] [caminho_para_dll]
 //!         Fica esperando o jogo abrir e injeta quando ele estiver pronto
-//!         (Story 1.7). Se o jogo fechar, volta a esperar a próxima
-//!         abertura. Com `--enquanto-pid`, termina quando esse processo
-//!         (o servidor do FIFA Friends) fechar.
+//!         (Story 1.7). Termina quando o jogo fecha (pedido do Felipe,
+//!         2026-10-01: nada do Scout fica aberto depois do FIFA). Com
+//!         `--enquanto-pid`, também termina se esse processo (o servidor
+//!         do FIFA Friends) fechar antes de o jogo abrir.
 //!
 //! Se o caminho não for informado, procura `fifa_overlay.dll` no
 //! mesmo diretório do executável do injetor (útil quando ambos os
@@ -192,9 +193,12 @@ fn aguardar_e_injetar(dll_path: &Path, enquanto_pid: Option<u32>) -> ExitCode {
         }
 
         let jogo = examinar_jogo(&processos, dll_path);
+        if jogo_fechou(ultimo, jogo) {
+            println!("[fifa_injector] Jogo fechado. Saindo.");
+            return ExitCode::SUCCESS;
+        }
         if ultimo != Some(jogo) {
             match jogo {
-                Jogo::Fechado if ultimo.is_some() => println!("[fifa_injector] Jogo fechado. Aguardando a próxima abertura..."),
                 Jogo::Fechado => {}
                 Jogo::Iniciando(pid) => println!("[fifa_injector] Jogo abrindo (pid {pid}), esperando o DirectX..."),
                 Jogo::Pronto(pid) => println!(
@@ -219,6 +223,11 @@ fn aguardar_e_injetar(dll_path: &Path, enquanto_pid: Option<u32>) -> ExitCode {
 
         std::thread::sleep(INTERVALO);
     }
+}
+
+/// O jogo estava aberto na verificação anterior e não está mais.
+fn jogo_fechou(anterior: Option<Jogo>, atual: Jogo) -> bool {
+    atual == Jogo::Fechado && anterior.is_some_and(|j| j != Jogo::Fechado)
 }
 
 fn examinar_jogo(processos: &[(u32, String)], dll_path: &Path) -> Jogo {
@@ -359,6 +368,15 @@ mod tests {
         vigia.decidir(Jogo::Iniciando(7), t0 + CARENCIA / 2);
         assert_eq!(vigia.decidir(Jogo::Pronto(7), t0 + CARENCIA), Acao::Esperar);
         assert_eq!(vigia.decidir(Jogo::Pronto(7), t0 + CARENCIA * 2), Acao::Injetar(7));
+    }
+
+    #[test]
+    fn exits_only_after_a_game_it_saw_has_closed() {
+        assert!(!jogo_fechou(None, Jogo::Fechado), "jogo ainda não abriu");
+        assert!(!jogo_fechou(Some(Jogo::Fechado), Jogo::Fechado));
+        assert!(!jogo_fechou(Some(Jogo::Iniciando(7)), Jogo::Pronto(7)));
+        assert!(jogo_fechou(Some(Jogo::ComOverlay(7)), Jogo::Fechado));
+        assert!(jogo_fechou(Some(Jogo::Iniciando(7)), Jogo::Fechado), "fechou antes de injetar");
     }
 
     #[test]
