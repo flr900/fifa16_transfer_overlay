@@ -28,7 +28,11 @@ pub fn detalhe_card(item: &RelatorioNaLista) -> String {
 }
 
 /// Desenha a aba; devolve o Relatório a abrir, se algum foi ativado.
-pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) -> Option<Uuid> {
+pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Option<Uuid> {
+    // Tabular / Cards sempre visível no topo (Story 2.6): vale para os
+    // Relatórios abertos a partir daqui.
+    super::relatorio::alternador_densidade(ui, fonts, state);
+    ui.dummy([0.0, theme::ESPACO_2]);
     let lista = state.relatorios(false);
     if lista.is_empty() {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_RELATORIOS));

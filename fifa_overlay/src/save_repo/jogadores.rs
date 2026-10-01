@@ -691,6 +691,20 @@ fn juntar_nome(apelido: &str, primeiro: &str, sobrenome: &str) -> String {
     format!("{} {}", primeiro.trim(), sobrenome.trim()).trim().to_string()
 }
 
+/// Rosto do jogador (`data\ui\imgAssets\heads\p<id>.dds`), já em
+/// RGBA. `None` se o arquivo não existe (regens) ou não é um DDS que
+/// sabemos ler. Lê disco: chamar fora do thread de render (Story 2.6).
+pub fn ler_miniface(player_id: u32) -> Option<crate::dds::Imagem> {
+    let caminho = pasta_do_jogo()
+        .join("data")
+        .join("ui")
+        .join("imgAssets")
+        .join("heads")
+        .join(format!("p{player_id}.dds"));
+    let dados = std::fs::read(caminho).ok()?;
+    crate::dds::decodificar(&dados)
+}
+
 /// Lê jogadores de um `DATA` + banco estático em disco (testes e
 /// diagnóstico, sem a carreira localizada).
 #[cfg(test)]

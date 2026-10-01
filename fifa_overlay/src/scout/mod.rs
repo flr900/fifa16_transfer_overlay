@@ -18,6 +18,7 @@
 //! (`bloqueia_controle`, aplicado em `crate::gamepad`): sem isso o B ou o
 //! START que fechou o painel chegaria ao FIFA ao ser solto.
 
+pub mod minifaces;
 pub mod persistence;
 pub mod quality;
 pub mod screens;
@@ -299,6 +300,11 @@ impl Scout {
             }
             ScoutScreen::Aba(_) => self.alternar_painel(),
         }
+    }
+
+    /// No `before_render`: sobe para a GPU os rostos já lidos (Story 2.6).
+    pub fn enviar_minifaces(&self, carregar: &mut dyn FnMut(&crate::dds::Imagem, Option<imgui::TextureId>) -> Option<imgui::TextureId>) {
+        self.state.minifaces().enviar(carregar);
     }
 
     /// Painel aberto numa aba, sem tela satélite: ←/→ do D-pad trocam de

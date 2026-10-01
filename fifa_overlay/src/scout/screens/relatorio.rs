@@ -11,11 +11,12 @@
 
 use imgui::{SelectableFlags, StyleColor, TableColumnFlags, TableColumnSetup, TableFlags, TableRowFlags, Ui};
 
-use super::componentes::{self, badge_qualidade, badge_tier, EstiloBotao};
+use super::componentes::{self, badge_qualidade, badge_tier, card_com_largura, texto_em, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data};
 use crate::save_repo::nome_posicao;
-use crate::scout::state::{Atributo, FaixaAtributo, JogadorEncontrado, Qualidade, RelatorioNaLista, ScoutState};
+use crate::scout::minifaces::Rosto;
+use crate::scout::state::{Atributo, Densidade, FaixaAtributo, JogadorEncontrado, Qualidade, RelatorioNaLista, ScoutState};
 
 const LARGURA_NOME: f32 = 210.0;
 const LARGURA_NACAO: f32 = 120.0;
@@ -23,6 +24,12 @@ const LARGURA_CLUBE: f32 = 150.0;
 const LARGURA_NUMERO: f32 = 62.0;
 const LARGURA_ATRIBUTO: f32 = 58.0;
 const ALTURA_LINHA: f32 = 30.0;
+const LARGURA_CARD: f32 = 380.0;
+const ALTURA_CARD: f32 = 128.0;
+const LADO_ROSTO: f32 = 96.0;
+const LARGURA_ALTERNADOR: f32 = 110.0;
+/// Atributos mostrados em cada card (os primeiros que o Olheiro observou).
+const ATRIBUTOS_NO_CARD: usize = 3;
 
 pub const MSG_BAIXA: &str =
     "Relatório de Qualidade baixa: os valores aparecem em faixas largas e só alguns atributos foram observados.";
@@ -121,11 +128,18 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         return Acao::Voltar;
     };
     let mut acao = Acao::Nenhuma;
+    let inicio = ui.cursor_pos();
     if componentes::botao(ui, fonts, "Voltar", EstiloBotao::Secundario, true) {
         acao = Acao::Voltar;
     }
     ui.same_line_with_spacing(0.0, theme::ESPACO_4);
     cabecalho(ui, fonts, &item);
+    // Tabular / Cards sempre visível no topo, à direita (Story 2.6).
+    let fim = ui.cursor_pos();
+    let largura_total = LARGURA_ALTERNADOR * 2.0 + theme::ESPACO_1;
+    ui.set_cursor_pos([inicio[0] + ui.content_region_avail()[0] - largura_total, inicio[1]]);
+    alternador_densidade(ui, fonts, state);
+    ui.set_cursor_pos(fim);
     ui.dummy([0.0, theme::ESPACO_2]);
 
     let r = &item.relatorio;
@@ -136,8 +150,104 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_JOGADORES));
         return acao;
     }
-    tabela(ui, fonts, &r.jogadores);
+    match state.densidade() {
+        Densidade::Tabular => tabela(ui, fonts, &r.jogadores),
+        Densidade::Cards => cards(ui, fonts, state, &r.jogadores),
+    }
     acao
+}
+
+/// Botões Tabular / Cards; a escolha fica salva em `ui_prefs`.
+pub fn alternador_densidade(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
+    let atual = match state.densidade() {
+        Densidade::Tabular => 0,
+        Densidade::Cards => 1,
+    };
+    match componentes::alternador(ui, fonts, &["Tabular", "Cards"], atual, LARGURA_ALTERNADOR) {
+        Some(0) => state.definir_densidade(Densidade::Tabular),
+        Some(_) => state.definir_densidade(Densidade::Cards),
+        None => {}
+    }
+}
+
+/// Visão Cards: grade de cards com o rosto, nome, idade, posição, nação,
+/// clube, Overall/Potencial e os primeiros atributos observados.
+fn cards(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, jogadores: &[JogadorEncontrado]) {
+    ui.child_window("##cards_relatorio").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
+        let disponivel = ui.content_region_avail()[0];
+        let por_linha = (((disponivel + theme::ESPACO_3) / (LARGURA_CARD + theme::ESPACO_3)).floor() as usize).max(1);
+        for (indice, j) in ordenar(jogadores).into_iter().enumerate() {
+            if indice % por_linha != 0 {
+                ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+            }
+            card_jogador(ui, fonts, state, j);
+            if indice % por_linha == por_linha - 1 {
+                ui.dummy([0.0, theme::ESPACO_1]);
+            }
+        }
+    });
+}
+
+fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorEncontrado) {
+    let c = card_com_largura(ui, &j.player_id.to_string(), LARGURA_CARD, ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
+    let ativo = ui.is_item_hovered() || (ui.is_item_focused() && ui.io().nav_visible);
+    // Rosto só para cards visíveis: a lista pode ser longa (carga preguiçosa).
+    let visivel = ui.is_rect_visible(c.min, c.max);
+    let dl = ui.get_window_draw_list();
+
+    let r_min = [c.min[0] + theme::ESPACO_3, c.min[1] + (ALTURA_CARD - LADO_ROSTO) * 0.5];
+    let r_max = [r_min[0] + LADO_ROSTO, r_min[1] + LADO_ROSTO];
+    dl.add_rect(r_min, r_max, theme::BG_BASE).filled(true).rounding(theme::RAIO_MD).build();
+    match if visivel { state.rosto(j.player_id) } else { Rosto::Carregando } {
+        Rosto::Pronto(textura) => dl.add_image(textura, r_min, r_max).build(),
+        Rosto::Ausente => silhueta(&dl, r_min, LADO_ROSTO),
+        Rosto::Carregando => {}
+    }
+
+    let x = r_max[0] + theme::ESPACO_3;
+    let largura_texto = c.max[0] - theme::ESPACO_3 - x;
+    let mut y = c.min[1] + theme::ESPACO_3;
+    let medir = |fonte: Option<imgui::FontId>| move |t: &str| com_fonte(ui, fonte, || ui.calc_text_size(t)[0]);
+
+    let (nome, nome_cortado) = truncar(&j.nome, largura_texto, medir(fonts.map(|f| f.heading)));
+    y += texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, &nome)[1];
+
+    let clube = if j.clube.is_empty() { "Sem clube" } else { j.clube.as_str() };
+    let linha2 = format!("{} anos · {} · {}", j.idade, nome_posicao(j.posicao), j.nacao);
+    let (linha2, cortou2) = truncar(&linha2, largura_texto, medir(fonts.map(|f| f.meta)));
+    y += texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::TEXT_SECONDARY, &linha2)[1];
+    let (clube_visivel, cortou3) = truncar(clube, largura_texto, medir(fonts.map(|f| f.meta)));
+    y += texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::TEXT_SECONDARY, &clube_visivel)[1] + theme::ESPACO_1;
+
+    let mono = fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body));
+    let ovr = format!("OVR {}", formatar_faixa(j.overall));
+    let [w_ovr, h_ovr] = texto_em(ui, mono, &dl, [x, y], theme::TEXT_PRIMARY, &ovr);
+    texto_em(ui, mono, &dl, [x + w_ovr + theme::ESPACO_3, y], theme::FIELD_GREEN, &format!("POT {}", formatar_faixa(j.potencial)));
+    y += h_ovr;
+    let chave: Vec<String> =
+        j.atributos.iter().take(ATRIBUTOS_NO_CARD).map(|a| format!("{} {}", a.atributo.sigla(), formatar_faixa(a.valor))).collect();
+    if !chave.is_empty() {
+        let (linha, _) = truncar(&chave.join(" · "), largura_texto, medir(mono));
+        texto_em(ui, mono, &dl, [x, y], theme::TEXT_SECONDARY, &linha);
+    }
+
+    if ativo && (nome_cortado || cortou2 || cortou3) {
+        ui.tooltip(|| {
+            com_fonte(ui, fonts.map(|f| f.body), || ui.text(&j.nome));
+            com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, format!("{} · {clube}", j.nacao)));
+        });
+    }
+}
+
+/// Silhueta neutra (cabeça + ombros) para jogador sem rosto no jogo.
+fn silhueta(dl: &imgui::DrawListMut<'_>, min: [f32; 2], lado: f32) {
+    let cor = theme::TEXT_DISABLED;
+    let centro = [min[0] + lado * 0.5, min[1] + lado * 0.38];
+    dl.add_circle(centro, lado * 0.18, cor).filled(true).build();
+    dl.add_rect([min[0] + lado * 0.2, min[1] + lado * 0.62], [min[0] + lado * 0.8, min[1] + lado * 0.92], cor)
+        .filled(true)
+        .rounding(lado * 0.2)
+        .build();
 }
 
 fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, item: &RelatorioNaLista) {

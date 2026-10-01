@@ -44,6 +44,8 @@ use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Funcao};
 
+use super::minifaces::{Minifaces, Rosto};
+pub use super::persistence::Densidade;
 use super::persistence::{self, EstadoPersistido};
 use super::quality;
 use super::search::{self, CareerSnapshot, CareerSource, SaveRepoSource};
@@ -576,6 +578,8 @@ pub struct ScoutState {
     painel_aberto: bool,
     /// Relatório na tela (Story 2.5).
     relatorio_aberto: Option<Uuid>,
+    /// Rostos dos jogadores da visão Cards (Story 2.6).
+    minifaces: Minifaces,
 }
 
 impl ScoutState {
@@ -610,6 +614,7 @@ impl ScoutState {
             falhas_busca: HashMap::new(),
             painel_aberto: false,
             relatorio_aberto: None,
+            minifaces: Minifaces::new(crate::save_repo::ler_miniface),
         }
     }
 
@@ -673,6 +678,7 @@ impl ScoutState {
             self.avisar(TipoAviso::Injetado);
         }
         self.processar_buscas();
+        self.minifaces.tick();
 
         match self.tarefa_localizar.poll() {
             TaskState::Running => {
@@ -1296,6 +1302,33 @@ impl ScoutState {
             }
         }
         self.relatorio_aberto = Some(id);
+    }
+
+    /// Rosto do jogador para a visão Cards (pede o carregamento se preciso).
+    pub fn rosto(&self, player_id: u32) -> Rosto {
+        self.minifaces.rosto(player_id)
+    }
+
+    pub fn minifaces(&self) -> &Minifaces {
+        &self.minifaces
+    }
+
+    /// Visão dos Relatórios salva para a carreira (Tabular por padrão).
+    pub fn densidade(&self) -> Densidade {
+        self.estado_ativo().map_or(Densidade::Tabular, |e| e.ler(|d| d.ui_prefs.densidade))
+    }
+
+    /// O jogador trocou Tabular/Cards: persiste em `ui_prefs` (AD-7).
+    pub fn definir_densidade(&mut self, densidade: Densidade) {
+        let Some(estado) = self.estado_ativo() else {
+            return;
+        };
+        if estado.ler(|d| d.ui_prefs.densidade) == densidade {
+            return;
+        }
+        if let Err(err) = estado.mutar(|d| d.ui_prefs.densidade = densidade) {
+            tracing::warn!("[scout::state] Visão dos Relatórios não foi salva: {err:?}");
+        }
     }
 
     pub fn fechar_relatorio(&mut self) {
@@ -2422,5 +2455,18 @@ mod tests {
         // id que não existe não abre nada
         st.abrir_relatorio(Uuid::new_v4());
         assert_eq!(st.relatorio_aberto(), None);
+    }
+
+    #[test]
+    fn report_density_is_saved_per_career() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &o);
+        st.ao_abrir_painel();
+        assert_eq!(st.densidade(), Densidade::Tabular);
+        st.definir_densidade(Densidade::Cards);
+        assert_eq!(st.densidade(), Densidade::Cards);
+        let relido = EstadoPersistido::carregar(Some(&pasta.0), ID_A).ler(|d| d.ui_prefs.densidade);
+        assert_eq!(relido, Densidade::Cards);
     }
 }

@@ -175,8 +175,13 @@ pub struct Card {
 /// é desenhado pelo chamador com o draw list, dentro de `min..max`.
 /// `borda_repouso`: cor da borda sem hover/foco.
 pub fn card(ui: &Ui, chave: &str, altura: f32, borda_repouso: [f32; 4]) -> Card {
-    let _id = ui.push_id(chave);
     let largura = ui.content_region_avail()[0];
+    card_com_largura(ui, chave, largura, altura, borda_repouso)
+}
+
+/// Card de largura fixa (grade da visão Cards, Story 2.6).
+pub fn card_com_largura(ui: &Ui, chave: &str, largura: f32, altura: f32, borda_repouso: [f32; 4]) -> Card {
+    let _id = ui.push_id(chave);
     let min = ui.cursor_screen_pos();
     let max = [min[0] + largura, min[1] + altura];
     let ativou = ui.invisible_button("##card", [largura, altura]);
@@ -187,6 +192,22 @@ pub fn card(ui: &Ui, chave: &str, altura: f32, borda_repouso: [f32; 4]) -> Card 
     dl.add_rect(min, max, theme::BG_PANEL_RAISED).filled(true).rounding(theme::RAIO_MD).build();
     dl.add_rect(min, max, borda).rounding(theme::RAIO_MD).thickness(espessura).build();
     Card { min, max, ativou }
+}
+
+/// Seletor de dois ou mais botões (ex.: Tabular / Cards): o escolhido em
+/// roxo. Devolve o índice clicado neste frame.
+pub fn alternador(ui: &Ui, fonts: Option<&Fonts>, opcoes: &[&str], escolhida: usize, largura: f32) -> Option<usize> {
+    let mut clicada = None;
+    for (indice, rotulo) in opcoes.iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_1);
+        }
+        let estilo = if indice == escolhida { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        if botao_com_largura(ui, fonts, rotulo, estilo, true, Some(largura)) && indice != escolhida {
+            clicada = Some(indice);
+        }
+    }
+    clicada
 }
 
 /// Texto pelo draw list numa fonte do tema; devolve o tamanho.

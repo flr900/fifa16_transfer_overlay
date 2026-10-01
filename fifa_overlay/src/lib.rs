@@ -12,6 +12,7 @@
 //! Nada pesado aqui: varreduras de memória vão para `AsyncTask` (AD-4).
 
 mod async_task;
+mod dds;
 mod gamepad;
 // Infraestrutura de memória (AD-2): usada só através do `save_repo`;
 // partes dela (escrita, CZUM, pointer scan) servem a stories futuras.
@@ -34,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "2.5-v1 — Relatório Tabular";
+const BUILD_TAG: &str = "2.6-v1 — Cards com minifaces";
 
 /// Arquivo que pede para a DLL se descarregar sem fechar o jogo
 /// (script `recarregar_dev.ps1` da pasta `fifa_overlay`, só para
@@ -114,7 +115,19 @@ impl ImguiRenderLoop for FifaOverlay {
         theme::aplicar_estilo(ctx.style_mut());
     }
 
-    fn before_render<'a>(&'a mut self, ctx: &mut Context, _render_context: &'a mut dyn RenderContext) {
+    fn before_render<'a>(&'a mut self, ctx: &mut Context, render_context: &'a mut dyn RenderContext) {
+        // Rostos da visão Cards (Story 2.6): só aqui há acesso ao
+        // renderizador para criar texturas; poucas por frame.
+        self.scout.enviar_minifaces(&mut |imagem, reuso| {
+            let resultado = match reuso {
+                Some(textura) => render_context
+                    .replace_texture(textura, &imagem.rgba, imagem.largura, imagem.altura)
+                    .map(|()| textura),
+                None => render_context.load_texture(&imagem.rgba, imagem.largura, imagem.altura),
+            };
+            resultado.ok()
+        });
+
         // Em tela cheia o jogo esconde o cursor do Windows: com o painel
         // aberto o ImGui desenha o próprio.
         let aberto = self.scout.painel_aberto();
