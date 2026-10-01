@@ -1402,6 +1402,35 @@ carregada"; data que VOLTA → outro save carregado → cache descartado).
   remove o gancho do XInput e chama `hudhook::eject()`; o script copia a
   build nova e injeta. Primeiro teste: ciclo completo em ~2 s, jogo seguiu.
 
+## Sessão 12 — Épico 2 inteiro: busca, Relatórios, filtros, Missão contínua (2026-10-01)
+
+Stories 2.4 a 2.10 implementadas em sequência, sem teste em jogo entre
+elas (Felipe pediu "desenvolva todas do épico 2"). Branch
+`claude/epico-2-restante` (um commit por story, em cima da 2.3);
+build `2.10-v1`.
+
+- **Jogadores vêm do `DATA` do save ativo no disco** (o arquivo que a
+  localização escolheu pela memória), não da memória: o blob `CZUM` do
+  heap é o buffer do último load/save, mesmo conteúdo. Leitura completa
+  (39.229 jogadores, nomes, clube, nação) em < 0,5 s. Consequência: o
+  Relatório reflete o último save do jogo.
+- **Nomes:** `editedplayernames` (save, por playerid) → `commonnameid`
+  ou primeiro+último nome, procurados em `dcplayernames` (save, regens,
+  ids ≥ 29000) e depois em `playernames` (banco estático, Huffman). Ids
+  presentes nas duas tabelas têm o mesmo texto. Clube via
+  `teamplayerlinks` ignorando seleções (`teamnationlinks`); liga 76 =
+  "Rest of World" (fora do mercado). `Crbb.confederation`: 2 Europa,
+  3 África, 4 América do Sul, 5 Ásia, 6 Oceania, 7 América do Norte,
+  1 "Rest of World".
+- **Minifaces:** `data/ui/imgAssets/heads/p<id>.dds`, 128×128 DXT5
+  (40.504 arquivos soltos no disco do Felipe); `notfound.dds` existe.
+- **AD-8 emendado** (Story 2.10): a busca roda na primeira abertura do
+  painel depois de criar/renovar a Missão; o Relatório é revelado aos
+  poucos (`ceil(progresso × alvo)`); Missão contínua em blocos de 30
+  dias, renovação só por compra confirmada.
+- Clippy da toolchain nova (1.98) aponta lints novos em código antigo
+  (`div_ceil`, `as_chunks`, `is_multiple_of`); o código novo está limpo.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —
