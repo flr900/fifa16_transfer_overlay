@@ -1431,6 +1431,32 @@ build `2.10-v1`.
 - Clippy da toolchain nova (1.98) aponta lints novos em código antigo
   (`div_ceil`, `as_chunks`, `is_multiple_of`); o código novo está limpo.
 
+## Sessão 13 — Épico 3 inteiro: Ficha, Radar, comparação, Fit Posicional, Jogador de Referência (2026-10-03)
+
+Stories 3.1 a 3.5 implementadas de uma vez, em paralelo com o teste do
+Épico 2 pelo Felipe (sem teste em jogo). Branch
+`claude/desenvolvimento-paramo-489fb3`, build `3.5-v1`; 202 testes.
+
+- **Pé preferido:** `CZUM.preferredfoot` (`MDvm`, rangelow 1: 1 = direito,
+  2 = esquerdo). Canhotos são minoria no save, como esperado.
+- **Elenco vem do `DATA`, não da memória:** `read_squad_players` filtra
+  `read_all_players` pelo `mPrV.clubteamid` (~0,5 s). Por isso roda num
+  `AsyncTask` (emenda do AD-4/AD-13), relido a cada abertura do painel.
+- **AD-6 emendado:** até 3 telas satélite (Relatório → Ficha → seletor).
+- **Fit Posicional:** 11 perfis ideais com pesos que somam 100
+  (`quality::PERFIS`); força = nota no perfil-alvo ÷ nota no perfil da
+  posição nativa (teto 100%). Limiar 95: com 92 metade da base passava
+  (posições vizinhas têm perfis parecidos).
+- **Similaridade:** `0,75 × forma + 0,25 × nível` (forma = diferença média
+  descontada a média de cada um). Limiar 75: passam de ~30 a ~3.300
+  jogadores por referência no save do Felipe; o mais parecido fica em
+  81–92%. Zagueiros têm perfis muito homogêneos.
+- **Calibração reproduzível:** `cargo test --release calibracao --
+  --ignored --nocapture` imprime quantos passam em cada limiar.
+- O filtro usa os valores reais; o que o Relatório mostra (similaridade,
+  fit) é recalculado só com as faixas reveladas e leva "≈" abaixo da
+  Qualidade Alta.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —
