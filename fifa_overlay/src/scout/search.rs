@@ -8,13 +8,18 @@
 //!   da Missão aqui e pede a `scout::quality` as fórmulas de escolha e de
 //!   revelação. É pesada (arquivo de ~10 MB, ~39 mil jogadores): só roda
 //!   dentro de um `AsyncTask` (AD-4), disparado por `scout::state`.
+//!
+//! Os filtros de perfil do Épico 3 (Fit Posicional, Jogador de Referência)
+//! usam os valores REAIS para decidir quem entra — o Olheiro sabe o que
+//! procura —, mas o que o Relatório guarda de similaridade e de fit é
+//! recalculado só com o que ele revelou (`revelar`).
 
 use std::collections::HashSet;
 
 use uuid::Uuid;
 
 use super::quality;
-use super::state::{Atributo, AtributoRevelado, JogadorEncontrado, Missao, Relatorio};
+use super::state::{Atributo, AtributoRevelado, JogadorEncontrado, JogadorReferencia, Missao, PosicaoAlvo, Relatorio};
 use crate::async_task::AsyncTask;
 use crate::save_repo::{self, Date, Nacao, PlayerPool, PlayerRaw, SaveRepoError};
 
@@ -49,6 +54,11 @@ pub trait CareerSource: Send + Sync {
     fn read_all_players(&self) -> Result<PlayerPool, SaveRepoError>;
     /// Nações do banco estático, para o mapa (lê disco: `AsyncTask`).
     fn read_nations(&self) -> Result<Vec<Nacao>, SaveRepoError>;
+    /// Elenco do técnico (lê o save: `AsyncTask`). Por padrão, os jogadores
+    /// do clube do técnico em `read_all_players`.
+    fn read_squad_players(&self) -> Result<PlayerPool, SaveRepoError> {
+        Ok(self.read_all_players()?.elenco())
+    }
 }
 
 /// Fonte real: o `save_repo` da Story 1.1.
@@ -73,6 +83,10 @@ impl CareerSource for SaveRepoSource {
 
     fn read_nations(&self) -> Result<Vec<Nacao>, SaveRepoError> {
         save_repo::read_nations()
+    }
+
+    fn read_squad_players(&self) -> Result<PlayerPool, SaveRepoError> {
+        save_repo::read_squad_players()
     }
 
     fn read_snapshot(&self) -> Result<CareerSnapshot, SaveRepoError> {
@@ -145,6 +159,37 @@ pub fn passa_nos_filtros(missao: &Missao, pool: &PlayerPool, jogador: &PlayerRaw
         && (filtros.potencial.min..=filtros.potencial.max).contains(&jogador.potencial)
         && filtros.atributo_dominante.is_none_or(|a| tem_dominante(jogador, a))
         && do_pais(&filtros.paises, pool, jogador)
+        && filtros.fit_posicional.is_none_or(|alvo| serve_no_alvo(jogador, alvo))
+        && filtros.referencia.as_ref().is_none_or(|r| similaridade_real(jogador, r).is_some_and(|s| s >= quality::LIMIAR_SIMILARIDADE))
+}
+
+/// Valores reais de um jogador para as fórmulas de perfil.
+fn valores(jogador: &PlayerRaw) -> impl Fn(Atributo) -> Option<f32> + '_ {
+    move |a| Some(f32::from(jogador.atributo(a)))
+}
+
+/// Fit Posicional (Story 3.4): posição nativa diferente do alvo e força
+/// do fit ≥ `quality::LIMIAR_FIT`.
+pub fn serve_no_alvo(jogador: &PlayerRaw, alvo: PosicaoAlvo) -> bool {
+    !alvo.posicoes_nativas().contains(&jogador.posicao)
+        && quality::forca_fit(alvo, jogador.posicao, valores(jogador)).is_some_and(|f| f >= quality::LIMIAR_FIT)
+}
+
+/// Similaridade real com a referência (Story 3.3).
+pub fn similaridade_real(jogador: &PlayerRaw, referencia: &JogadorReferencia) -> Option<u8> {
+    quality::similaridade(valores(jogador), |a| referencia.atributo(a).map(f32::from), referencia.goleiro())
+}
+
+/// Notas dos critérios de perfil pedidos na Missão, para a relevância.
+fn notas_de_perfil(missao: &Missao, jogador: &PlayerRaw) -> Vec<u8> {
+    let filtros = &missao.filtros;
+    let dominante = filtros.atributo_dominante.map(|a| jogador.atributo(a));
+    let similar = filtros.referencia.as_ref().and_then(|r| similaridade_real(jogador, r));
+    let no_alvo = filtros
+        .fit_posicional
+        .and_then(|alvo| quality::nota_no_perfil(alvo.perfil(), valores(jogador)))
+        .map(|nota| nota.round().clamp(0.0, 99.0) as u8);
+    [dominante, similar, no_alvo].into_iter().flatten().collect()
 }
 
 /// Filtro geográfico (Story 2.9): lista vazia = todos os países; "Outros"
@@ -181,8 +226,7 @@ pub fn escolher_jogadores(
         .iter()
         .filter(|j| !excluir.contains(&j.player_id) && passa_nos_filtros(missao, pool, j))
         .map(|j| {
-            let dominante = missao.filtros.atributo_dominante.map(|a| j.atributo(a));
-            let relevancia = quality::relevancia(missao.tipo, j.overall, j.potencial, dominante);
+            let relevancia = quality::relevancia(missao.tipo, j.overall, j.potencial, &notas_de_perfil(missao, j));
             (quality::nota_de_escolha(relevancia, qualidade, quality::semente(id, j.player_id, 0)), j)
         })
         .collect();
@@ -198,7 +242,8 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
     let pid = jogador.player_id;
     let precisao = missao.estimativa.precisao_mais_menos;
     let funcao = save_repo::funcao_da_posicao(jogador.posicao);
-    let atributos = quality::ordem_de_observacao(funcao, missao.filtros.atributo_dominante)
+    let filtros = &missao.filtros;
+    let atributos = quality::ordem_de_observacao(funcao, filtros.atributo_dominante, filtros.fit_posicional)
         .into_iter()
         .take(usize::from(missao.estimativa.atributos_revelados))
         .map(|atributo| {
@@ -210,7 +255,7 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         })
         .collect();
     let nacao = pool.nacoes.iter().find(|n| n.id == jogador.nacionalidade);
-    JogadorEncontrado {
+    let mut encontrado = JogadorEncontrado {
         player_id: pid,
         nome: jogador.nome.clone(),
         idade: jogador.idade(hoje),
@@ -221,7 +266,20 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         overall: quality::faixa_revelada(jogador.overall, precisao, quality::semente(id, pid, 1)),
         potencial: quality::faixa_revelada(jogador.potencial, precisao, quality::semente(id, pid, 2)),
         atributos,
-    }
+        pe: Some(jogador.pe),
+        similaridade: None,
+        fit: None,
+    };
+    // Similaridade e fit "pelo que o Olheiro viu" (nunca o valor real).
+    let visto = |a: Atributo| encontrado.valor_visto(a);
+    let similaridade = filtros
+        .referencia
+        .as_ref()
+        .and_then(|r| quality::similaridade(visto, |a| r.atributo(a).map(f32::from), r.goleiro()));
+    let fit = filtros.fit_posicional.and_then(|alvo| quality::forca_fit(alvo, jogador.posicao, visto));
+    encontrado.similaridade = similaridade;
+    encontrado.fit = fit;
+    encontrado
 }
 
 #[cfg(test)]
@@ -245,6 +303,7 @@ pub mod tests {
             clube_id: Some(10),
             clube: "Clube".to_string(),
             resto_do_mundo: false,
+            pe: crate::save_repo::Pe::Direito,
         }
     }
 
@@ -359,5 +418,129 @@ pub mod tests {
         assert_eq!(ids(&m), vec![1]);
         m.filtros.paises = vec![54, NACAO_OUTROS];
         assert_eq!(ids(&m), vec![1, 3], "Outros pega quem não tem quadro no mapa");
+    }
+
+    // -----------------------------------------------------------------
+    // Épico 3
+    // -----------------------------------------------------------------
+
+    /// Meia-atacante (17) com passe/drible altos e defesa em `defesa`.
+    fn meia(id: u32, defesa: u8) -> PlayerRaw {
+        use Atributo::*;
+        let mut j = jogador(id, 75, 78, 17);
+        j.atributos = [50; TOTAL_ATRIBUTOS];
+        for a in [PasseCurto, PasseLongo, Visao, ControleDeBola, Drible, PosicionamentoOfensivo, Agilidade, Reacao] {
+            j.atributos[a.indice()] = 82;
+        }
+        for a in [Interceptacao, DesarmeEmPe, Marcacao, Carrinho, Agressividade, Folego, Forca] {
+            j.atributos[a.indice()] = defesa;
+        }
+        j
+    }
+
+    #[test]
+    fn fit_keeps_other_positions_whose_profile_serves_the_target() {
+        let mut volante_nato = meia(3, 82);
+        volante_nato.posicao = 9; // já é VOL: não é um "fit"
+        let p = pool(vec![meia(1, 80), meia(2, 40), volante_nato]);
+        let mut m = missao_com((50, 99), (50, 99));
+        m.filtros.fit_posicional = Some(PosicaoAlvo::Volante);
+        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j)).map(|j| j.player_id).collect();
+        assert_eq!(ids, vec![1], "o 2 não defende; o 3 já é volante");
+        // combina (E) com as faixas
+        m.filtros.overall = FaixaAtributo { min: 80, max: 99 };
+        assert!(p.jogadores.iter().all(|j| !passa_nos_filtros(&m, &p, j)));
+    }
+
+    #[test]
+    fn the_report_stores_fit_and_similarity_from_what_was_revealed_only() {
+        let meu_meia = meia(50, 80);
+        let referencia = JogadorReferencia {
+            player_id: 50,
+            nome: "Meu Meia".to_string(),
+            posicao: 17,
+            atributos: meu_meia.atributos.to_vec(),
+        };
+        let mut gemeo = meia(1, 80);
+        gemeo.pe = crate::save_repo::Pe::Esquerdo;
+        let p = pool(vec![gemeo, meia(2, 40), jogador(3, 75, 78, 4)]);
+        let mut m = missao_com((50, 99), (50, 99));
+        m.filtros.referencia = Some(referencia.clone());
+        m.filtros.fit_posicional = Some(PosicaoAlvo::Volante);
+        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j)).map(|j| j.player_id).collect();
+        assert_eq!(ids, vec![1], "referência E fit, juntos");
+        assert_eq!(similaridade_real(&p.jogadores[0], &referencia), Some(100));
+
+        let lista = escolher_jogadores(&m, &p, Date(20260801), &HashSet::new(), 5);
+        let j = lista.first().expect("um jogador");
+        assert_eq!(j.pe, Some(crate::save_repo::Pe::Esquerdo));
+        // Qualidade baixa da Missão de teste: poucos atributos, faixas largas
+        assert!(j.atributos.len() < 28);
+        let visto = j.similaridade.expect("similaridade pelo revelado");
+        assert!(visto <= 100);
+        let fit = j.fit.expect("fit pelo revelado");
+        assert!(fit > 0);
+        // os atributos do alvo vêm logo no começo da observação
+        assert_eq!(j.atributos.first().map(|a| a.atributo), Some(Atributo::PasseCurto));
+    }
+
+    #[test]
+    fn similar_profiles_rank_first() {
+        let referencia = meia(50, 80);
+        let r = JogadorReferencia { player_id: 50, nome: "R".to_string(), posicao: 17, atributos: referencia.atributos.to_vec() };
+        let mut quase = meia(2, 74);
+        quase.atributos[Atributo::Visao.indice()] = 76;
+        let p = pool(vec![quase, meia(1, 80)]);
+        let mut m = missao_com((50, 99), (50, 99));
+        m.filtros.referencia = Some(r);
+        m.estimativa.qualidade = crate::scout::state::Qualidade::Alta;
+        let ordem: Vec<u32> = {
+            let mut c: Vec<(u8, u32)> = p
+                .jogadores
+                .iter()
+                .filter(|j| passa_nos_filtros(&m, &p, j))
+                .map(|j| (quality::relevancia(m.tipo, j.overall, j.potencial, &notas_de_perfil(&m, j)), j.player_id))
+                .collect();
+            c.sort_by(|a, b| b.cmp(a));
+            c.into_iter().map(|(_, id)| id).collect()
+        };
+        assert_eq!(ordem, vec![1, 2], "o gêmeo antes do parecido");
+    }
+
+    /// Calibração dos limiares com o save versionado (rodar à mão:
+    /// `cargo test --release calibracao -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn calibracao_dos_limiares_no_save_real() {
+        use crate::save_repo::jogadores::{ler_de_arquivos, pasta_do_jogo};
+        let save = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../save_backups/717036e3_20260913_172921/DATA");
+        let banco = pasta_do_jogo().join("data/db/fifa_ng_db.db");
+        let (jogadores, _) = ler_de_arquivos(&save, &banco).expect("save legível");
+        let ativos: Vec<&PlayerRaw> = jogadores.iter().filter(|j| j.overall >= 60).collect();
+        for alvo in PosicaoAlvo::TODAS {
+            let fits: Vec<u8> = ativos
+                .iter()
+                .filter(|j| !alvo.posicoes_nativas().contains(&j.posicao) && j.posicao != 0)
+                .filter_map(|j| quality::forca_fit(alvo, j.posicao, valores(j)))
+                .collect();
+            let passam = fits.iter().filter(|&&f| f >= quality::LIMIAR_FIT).count();
+            let em = |l: u8| fits.iter().filter(|&&f| f >= l).count();
+            eprintln!("{:<18} {passam:>5} de {:>5} passam (≥{}) · ≥95 {} · ≥98 {} · 100 {}", alvo.nome(), fits.len(), quality::LIMIAR_FIT, em(95), em(98), em(100));
+        }
+        let mut melhores: Vec<&PlayerRaw> = ativos.clone();
+        melhores.sort_by_key(|j| std::cmp::Reverse(j.overall));
+        let referencias: Vec<&PlayerRaw> = [0u8, 4, 8, 16, 24].iter().filter_map(|&p| melhores.iter().find(|j| j.posicao == p).copied()).collect();
+        for r in referencias {
+            let nome = r.nome.as_str();
+            let referencia = JogadorReferencia { player_id: r.player_id, nome: r.nome.clone(), posicao: r.posicao, atributos: r.atributos.to_vec() };
+            let mut notas: Vec<(u8, &str)> = ativos
+                .iter()
+                .filter(|j| j.player_id != r.player_id)
+                .filter_map(|j| Some((similaridade_real(j, &referencia)?, j.nome.as_str())))
+                .collect();
+            notas.sort_by(|a, b| b.cmp(a));
+            let passam = notas.iter().filter(|(s, _)| *s >= quality::LIMIAR_SIMILARIDADE).count();
+            eprintln!("{nome}: {passam} passam (≥{}); top 5 {:?}", quality::LIMIAR_SIMILARIDADE, notas.iter().take(5).collect::<Vec<_>>());
+        }
     }
 }

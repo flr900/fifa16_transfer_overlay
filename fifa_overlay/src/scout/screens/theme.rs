@@ -37,6 +37,8 @@ pub const TEXT_SECONDARY: [f32; 4] = rgba(0x869488, 1.0);
 pub const TEXT_DISABLED: [f32; 4] = rgba(0x4d564f, 1.0);
 pub const ACCENT_PRIMARY: [f32; 4] = rgba(0xb45cff, 1.0);
 pub const ACCENT_PRIMARY_DIM: [f32; 4] = rgba(0xb45cff, 0.13);
+/// Faixa revelada no Radar de Atributos (roxo mais forte que o `DIM`).
+pub const ACCENT_PRIMARY_DIM_FORTE: [f32; 4] = rgba(0xb45cff, 0.45);
 pub const FIELD_GREEN: [f32; 4] = rgba(0x3ecf6e, 1.0);
 /// Fundo tênue de badges verdes ("NOVO").
 pub const FIELD_GREEN_DIM: [f32; 4] = rgba(0x3ecf6e, 0.12);

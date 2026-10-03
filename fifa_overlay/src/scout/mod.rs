@@ -98,17 +98,30 @@ impl Aba {
 }
 
 /// Telas que abrem POR CIMA de uma aba (nomes do Structural Seed).
-#[allow(dead_code)] // FichaJogador chega no Épico 3
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Satelite {
     ConfirmacaoContratacao,
     NovaMissao,
     SelecaoGeografica,
+    /// Ficha de um jogador do Relatório aberto (Story 3.1).
     FichaJogador,
     /// Relatório aberto (Story 2.5), a partir de Missões ou Relatórios.
     Relatorio,
     /// Painel de campo "Atributo dominante" sobre o formulário (Story 2.8).
     CampoAtributo,
+    /// Painel de campo "Fit Posicional" sobre o formulário (Story 3.4).
+    CampoFit,
+    /// O seletor de elenco, um só para os dois papéis (AD-13).
+    SeletorElenco(ContextoSeletor),
+}
+
+/// Para que o seletor de elenco foi aberto (AD-13): o rótulo da tela diz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextoSeletor {
+    /// Jogador de Referência do formulário Nova Missão (Story 3.3).
+    FiltroMissao,
+    /// Jogador a sobrepor no Radar da Ficha (Story 3.2).
+    ComparacaoFicha,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,10 +131,11 @@ pub enum ScoutScreen {
 }
 
 /// Máximo de telas satélite empilhadas sobre a aba. AD-6 fala em
-/// "profundidade máxima de 2" e o EXPERIENCE.md cita um caso de dois
-/// níveis (Formulário Nova Missão → Painel de Seleção Geográfica), então
-/// a pilha tem no máximo `[aba, satélite, satélite]`.
-pub const MAX_SATELITES: usize = 2;
+/// "profundidade máxima de 2" (Formulário Nova Missão → Painel de Seleção
+/// Geográfica); o Épico 3 precisa de 3 — Relatório → Ficha → seletor de
+/// elenco (emenda do AD-6, Story 3.2). A pilha tem no máximo `[aba,
+/// satélite, satélite, satélite]`.
+pub const MAX_SATELITES: usize = 3;
 
 /// Pilha de navigação (AD-6). Nunca vazia: `stack[0]` é a aba ativa.
 #[derive(Debug, Clone, PartialEq)]
@@ -317,6 +331,7 @@ impl Scout {
                     Satelite::ConfirmacaoContratacao => self.state.cancelar_contratacao(),
                     Satelite::NovaMissao => self.state.cancelar_nova_missao(),
                     Satelite::Relatorio => self.state.fechar_relatorio(),
+                    Satelite::FichaJogador => self.state.fechar_ficha(),
                     _ => {}
                 }
                 self.nav.pop();
@@ -369,16 +384,18 @@ mod tests {
     }
 
     #[test]
-    fn push_allows_two_satellites_and_refuses_the_third() {
-        let mut nav = Navigation::new(Aba::Missoes);
-        assert!(nav.push(Satelite::NovaMissao));
-        assert!(nav.push(Satelite::SelecaoGeografica));
-        assert!(!nav.push(Satelite::FichaJogador));
-        assert_eq!(nav.profundidade(), 3);
-        assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(Satelite::SelecaoGeografica));
+    fn push_allows_three_satellites_and_refuses_the_fourth() {
+        let mut nav = Navigation::new(Aba::Relatorios);
+        assert!(nav.push(Satelite::Relatorio));
+        assert!(nav.push(Satelite::FichaJogador));
+        let seletor = Satelite::SeletorElenco(ContextoSeletor::ComparacaoFicha);
+        assert!(nav.push(seletor));
+        assert!(!nav.push(Satelite::CampoFit));
+        assert_eq!(nav.profundidade(), 4);
+        assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(seletor));
         nav.pop();
-        assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(Satelite::NovaMissao));
-        assert_eq!(nav.aba_ativa(), Aba::Missoes);
+        assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(Satelite::FichaJogador));
+        assert_eq!(nav.aba_ativa(), Aba::Relatorios);
     }
 
     #[test]
@@ -593,6 +610,23 @@ mod tests {
         assert!(scout.painel_aberto(), "B volta para a aba, não fecha o painel");
         assert_eq!(scout.nav.profundidade(), 1);
         assert!(!scout.state.tem_nova_missao());
+    }
+
+    #[test]
+    fn b_goes_back_from_the_squad_selector_to_the_ficha_and_then_to_the_report() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.nav.trocar_aba(Aba::Relatorios);
+        scout.nav.push(Satelite::Relatorio);
+        scout.nav.push(Satelite::FichaJogador);
+        scout.nav.push(Satelite::SeletorElenco(ContextoSeletor::ComparacaoFicha));
+        for esperado in [Satelite::FichaJogador, Satelite::Relatorio] {
+            scout.aplicar_controle(controle(botao::B), false);
+            scout.aplicar_controle(controle(0), false);
+            assert_eq!(scout.nav.tela_atual(), ScoutScreen::Satelite(esperado));
+        }
+        assert!(scout.painel_aberto());
     }
 
     #[test]

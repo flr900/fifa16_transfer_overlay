@@ -333,6 +333,35 @@ pub struct PlayerRaw {
     pub clube: String,
     /// O clube é da liga "Rest of World" (times genéricos, fora do mercado).
     pub resto_do_mundo: bool,
+    /// `preferredfoot` (Story 3.1).
+    pub pe: Pe,
+}
+
+/// Pé preferido (`CZUM.preferredfoot`: 1 = direito, 2 = esquerdo). No JSON
+/// do Scout: `"direito"` / `"esquerdo"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pe {
+    #[default]
+    Direito,
+    Esquerdo,
+}
+
+impl Pe {
+    fn de_raw(valor: i64) -> Pe {
+        if valor == 2 {
+            Pe::Esquerdo
+        } else {
+            Pe::Direito
+        }
+    }
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Pe::Direito => "Direito",
+            Pe::Esquerdo => "Esquerdo",
+        }
+    }
 }
 
 impl PlayerRaw {
@@ -387,6 +416,17 @@ pub struct PlayerPool {
     /// Clube do técnico (`mPrV.clubteamid`): os jogadores dele não entram
     /// num Relatório.
     pub clube_usuario: i64,
+}
+
+impl PlayerPool {
+    /// Só os jogadores do clube do técnico.
+    pub fn elenco(self) -> PlayerPool {
+        let clube = self.clube_usuario;
+        PlayerPool {
+            jogadores: self.jogadores.into_iter().filter(|j| j.clube_id.map(i64::from) == Some(clube)).collect(),
+            ..self
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -471,6 +511,14 @@ pub fn read_all_players() -> Result<PlayerPool, SaveRepoError> {
         inicio.elapsed().as_millis()
     );
     Ok(PlayerPool { jogadores, nacoes: estatico.nacoes.clone(), clube_usuario })
+}
+
+/// Elenco do técnico (`clube_id == mPrV.clubteamid`), da mesma fonte que
+/// `read_all_players` — o `DATA` do save ativo. Não é uma leitura barata:
+/// o arquivo inteiro é decodificado (~0,5 s), então também roda num
+/// `AsyncTask` (AD-4, emenda da Story 3.2).
+pub fn read_squad_players() -> Result<PlayerPool, SaveRepoError> {
+    Ok(read_all_players()?.elenco())
 }
 
 /// Tabela + buffer, com busca de campo por short name.
@@ -644,6 +692,7 @@ fn ler_jogadores(dados: &[u8], nomes_estaticos: &HashMap<u32, String>) -> Result
                 clube: clube_id.and_then(|t| nome_do_time.get(&t).cloned()).unwrap_or_default(),
                 resto_do_mundo: clube_id.and_then(|t| liga_do_time.get(&t)) == Some(&LIGA_RESTO_DO_MUNDO),
                 clube_id,
+                pe: Pe::de_raw(inteiro(r, campos.pe, 1)),
             }
         })
         .collect();
@@ -662,6 +711,7 @@ struct CamposJogador<'a> {
     nacionalidade: &'a FieldDescriptor,
     nascimento: &'a FieldDescriptor,
     genero: &'a FieldDescriptor,
+    pe: &'a FieldDescriptor,
     atributos: Vec<&'a FieldDescriptor>,
 }
 
@@ -678,6 +728,7 @@ impl<'a> CamposJogador<'a> {
             nacionalidade: czum.campo(b"enmm")?,
             nascimento: czum.campo(b"WVIU")?,
             genero: czum.campo(b"EveZ")?,
+            pe: czum.campo(b"MDvm")?,
             atributos: Atributo::TODOS.iter().map(|a| czum.campo(a.campo())).collect::<Result<_, _>>()?,
         })
     }
@@ -771,6 +822,7 @@ mod tests {
             clube_id: None,
             clube: String::new(),
             resto_do_mundo: false,
+            pe: Pe::Direito,
         };
         assert_eq!(p.idade(Date(20350720)), 34);
         assert_eq!(p.idade(Date(20350721)), 35);
@@ -800,5 +852,8 @@ mod tests {
         assert_eq!(franca.nome, "France");
         assert_eq!(franca.confederacao, Confederacao::Europa);
         assert!(jogadores.iter().all(|j| j.atributos.iter().all(|&v| (1..=99).contains(&v))));
+        // canhotos existem, mas são minoria
+        let canhotos = jogadores.iter().filter(|j| j.pe == Pe::Esquerdo).count();
+        assert!(canhotos > jogadores.len() / 10 && canhotos < jogadores.len() / 2, "{canhotos}");
     }
 }

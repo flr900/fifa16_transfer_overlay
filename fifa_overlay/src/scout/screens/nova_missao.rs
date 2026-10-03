@@ -9,8 +9,10 @@
 //! (Story 1.5) e grava a Missão como `Pendente`; nenhuma busca roda agora
 //! (AD-8). B / "Cancelar" volta para a aba sem gravar nada.
 //!
-//! Filtro geográfico, atributo dominante, Fit Posicional e Jogador de
-//! Referência viram linhas desta lista nas Stories 2.8/2.9 e no Épico 3.
+//! Filtro geográfico e atributo dominante viraram linhas desta lista nas
+//! Stories 2.8/2.9; Fit Posicional (3.4) e Jogador de Referência (3.3), no
+//! Épico 3 — cada um abre um painel em tela cheia (o de referência é o
+//! seletor de elenco, AD-13).
 
 use imgui::{StyleColor, Ui};
 
@@ -18,7 +20,7 @@ use super::componentes::{self, badge_qualidade, badge_tier, card, desenhar_badge
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar, olheiros};
 use crate::scout::quality::TipoMissao;
-use crate::scout::Satelite;
+use crate::scout::{ContextoSeletor, Satelite};
 use crate::scout::state::{
     BloqueioMissao, CampoFaixa, ErroCompra, FaixaAtributo, ModoBusca, OlheiroContratado, PreviaMissao, ScoutState,
 };
@@ -157,6 +159,15 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             divisor(ui);
             if campo_painel(ui, fonts, "Atributo dominante", &texto_atributo(previa.rascunho.filtros.atributo_dominante)) {
                 campo = Some(Satelite::CampoAtributo);
+            }
+            divisor(ui);
+            if campo_painel(ui, fonts, "Fit Posicional", &super::campo_fit::texto_fit(previa.rascunho.filtros.fit_posicional)) {
+                campo = Some(Satelite::CampoFit);
+            }
+            divisor(ui);
+            let referencia = previa.rascunho.filtros.referencia.as_ref().map_or("Nenhum", |r| r.nome.as_str());
+            if campo_painel(ui, fonts, "Jogador de Referência", referencia) {
+                campo = Some(Satelite::SeletorElenco(ContextoSeletor::FiltroMissao));
             }
             divisor(ui);
             campo_modo(ui, fonts, state, previa.rascunho.modo);

@@ -24,10 +24,31 @@
 //!
 //! Falsos positivos NÃO entram no v1 (decisão de 2026-10-01; ver
 //! `_bmad-output/planning-artifacts/melhorias-futuras-olheiros.md`).
+//!
+//! ## Perfil do jogador (Épico 3)
+//!
+//! **Fit Posicional** (Story 3.4): cada posição-alvo tem um perfil ideal —
+//! pesos inteiros (somam 100) sobre os atributos que importam nela, no
+//! espírito da nota por posição do próprio FIFA (`PERFIS`). A nota de um
+//! jogador num perfil é a média ponderada dos atributos dele. A **força do
+//! fit** é `nota no perfil-alvo ÷ nota no perfil da posição nativa`, em %
+//! (teto 100): mede o formato, não o nível — o nível já tem o filtro de
+//! Overall. Entra no Relatório quem tem força ≥ `LIMIAR_FIT` e posição
+//! nativa diferente do alvo.
+//!
+//! **Similaridade** com um Jogador de Referência (Story 3.3), 0–100:
+//! `0,75 × forma + 0,25 × nível`, sobre os atributos de linha (ou os de
+//! goleiro, se a referência é goleiro). Forma = `100 − 4 × diferença média
+//! dos atributos já descontada a média de cada um` (perfil igual em outro
+//! nível ainda é "parecido"); nível = `100 − 4 × diferença das médias`.
+//! Perfis idênticos dão 100. Entra quem tem ≥ `LIMIAR_SIMILARIDADE`.
+//!
+//! As duas contas têm uma versão "pelo que o Olheiro viu" (faixas
+//! reveladas, pelo meio): é o que o Relatório mostra, nunca o valor real.
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{Atributo, Confederacao, Especializacao, FaixaAtributo, Funcao, ModoBusca, Qualidade, Tier};
+use super::state::{Atributo, Confederacao, Especializacao, FaixaAtributo, FiltrosMissao, Funcao, ModoBusca, Qualidade, Tier};
 
 // ---------------------------------------------------------------------
 // Contratação (Story 1.4)
@@ -277,13 +298,17 @@ pub fn tipo_por_faixas(overall: FaixaAtributo, potencial: FaixaAtributo) -> Tipo
     }
 }
 
-/// Tipo da Missão a partir de todos os filtros (Story 2.8): pedir um
-/// atributo dominante ("o melhor driblador") é uma Missão **Tática** — a
-/// especialidade do Tático; sem ele, valem as faixas.
-pub fn tipo_por_filtros(overall: FaixaAtributo, potencial: FaixaAtributo, dominante: Option<Atributo>) -> TipoMissao {
-    match dominante {
-        Some(_) => TipoMissao::Tatica,
-        None => tipo_por_faixas(overall, potencial),
+/// Tipo da Missão a partir de todos os filtros: pedir um perfil — um
+/// atributo dominante ("o melhor driblador", Story 2.8), um Fit Posicional
+/// (3.4) ou um Jogador de Referência (3.3) — é uma Missão **Tática**, a
+/// especialidade do Tático; sem nenhum deles, valem as faixas.
+pub fn tipo_por_filtros(filtros: &FiltrosMissao) -> TipoMissao {
+    let pede_perfil =
+        filtros.atributo_dominante.is_some() || filtros.fit_posicional.is_some() || filtros.referencia.is_some();
+    if pede_perfil {
+        TipoMissao::Tatica
+    } else {
+        tipo_por_faixas(filtros.overall, filtros.potencial)
     }
 }
 
@@ -380,6 +405,427 @@ pub fn revelados(fracao: f32, alvo: usize, encontrados: usize) -> usize {
 }
 
 // ---------------------------------------------------------------------
+// Fit Posicional (Story 3.4)
+// ---------------------------------------------------------------------
+
+/// Posições que o filtro Fit Posicional oferece (o goleiro fica de fora:
+/// "um zagueiro que jogaria no gol" não é uma pergunta de scout). Lados
+/// espelhados usam o mesmo perfil. No JSON: `"zagueiro"`, `"volante"` etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PosicaoAlvo {
+    Zagueiro,
+    LateralDireito,
+    LateralEsquerdo,
+    AlaDireito,
+    AlaEsquerdo,
+    Volante,
+    MeioCampista,
+    MeiaAtacante,
+    MeiaDireita,
+    MeiaEsquerda,
+    PontaDireita,
+    PontaEsquerda,
+    SegundoAtacante,
+    Centroavante,
+}
+
+impl PosicaoAlvo {
+    /// Todas, da defesa para o ataque.
+    #[allow(dead_code)] // usado nos testes
+    pub const TODAS: [PosicaoAlvo; 14] = [
+        PosicaoAlvo::Zagueiro,
+        PosicaoAlvo::LateralDireito,
+        PosicaoAlvo::LateralEsquerdo,
+        PosicaoAlvo::AlaDireito,
+        PosicaoAlvo::AlaEsquerdo,
+        PosicaoAlvo::Volante,
+        PosicaoAlvo::MeioCampista,
+        PosicaoAlvo::MeiaAtacante,
+        PosicaoAlvo::MeiaDireita,
+        PosicaoAlvo::MeiaEsquerda,
+        PosicaoAlvo::PontaDireita,
+        PosicaoAlvo::PontaEsquerda,
+        PosicaoAlvo::SegundoAtacante,
+        PosicaoAlvo::Centroavante,
+    ];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            PosicaoAlvo::Zagueiro => "Zagueiro",
+            PosicaoAlvo::LateralDireito => "Lateral-direito",
+            PosicaoAlvo::LateralEsquerdo => "Lateral-esquerdo",
+            PosicaoAlvo::AlaDireito => "Ala direito",
+            PosicaoAlvo::AlaEsquerdo => "Ala esquerdo",
+            PosicaoAlvo::Volante => "Volante",
+            PosicaoAlvo::MeioCampista => "Meio-campista",
+            PosicaoAlvo::MeiaAtacante => "Meia-atacante",
+            PosicaoAlvo::MeiaDireita => "Meia direita",
+            PosicaoAlvo::MeiaEsquerda => "Meia esquerda",
+            PosicaoAlvo::PontaDireita => "Ponta direita",
+            PosicaoAlvo::PontaEsquerda => "Ponta esquerda",
+            PosicaoAlvo::SegundoAtacante => "Segundo atacante",
+            PosicaoAlvo::Centroavante => "Centroavante",
+        }
+    }
+
+    /// Sigla no mesmo vocabulário de `save_repo::nome_posicao`.
+    pub fn sigla(self) -> &'static str {
+        match self {
+            PosicaoAlvo::Zagueiro => "ZAG",
+            PosicaoAlvo::LateralDireito => "LD",
+            PosicaoAlvo::LateralEsquerdo => "LE",
+            PosicaoAlvo::AlaDireito => "ALD",
+            PosicaoAlvo::AlaEsquerdo => "ALE",
+            PosicaoAlvo::Volante => "VOL",
+            PosicaoAlvo::MeioCampista => "MC",
+            PosicaoAlvo::MeiaAtacante => "MEI",
+            PosicaoAlvo::MeiaDireita => "MD",
+            PosicaoAlvo::MeiaEsquerda => "ME",
+            PosicaoAlvo::PontaDireita => "PD",
+            PosicaoAlvo::PontaEsquerda => "PE",
+            PosicaoAlvo::SegundoAtacante => "SA",
+            PosicaoAlvo::Centroavante => "ATA",
+        }
+    }
+
+    /// Códigos de `preferredposition1` que JÁ são esta posição (quem joga
+    /// nela de origem não é um "fit", é a posição dele).
+    pub fn posicoes_nativas(self) -> &'static [u8] {
+        match self {
+            PosicaoAlvo::Zagueiro => &[3, 4, 5],
+            PosicaoAlvo::LateralDireito => &[2],
+            PosicaoAlvo::LateralEsquerdo => &[6],
+            PosicaoAlvo::AlaDireito => &[1],
+            PosicaoAlvo::AlaEsquerdo => &[7],
+            PosicaoAlvo::Volante => &[8, 9, 10],
+            PosicaoAlvo::MeioCampista => &[12, 13, 14],
+            PosicaoAlvo::MeiaAtacante => &[16, 17, 18],
+            PosicaoAlvo::MeiaDireita => &[11],
+            PosicaoAlvo::MeiaEsquerda => &[15],
+            PosicaoAlvo::PontaDireita => &[22],
+            PosicaoAlvo::PontaEsquerda => &[26],
+            PosicaoAlvo::SegundoAtacante => &[19, 20, 21],
+            PosicaoAlvo::Centroavante => &[23, 24, 25],
+        }
+    }
+
+    pub fn perfil(self) -> Perfil {
+        match self {
+            PosicaoAlvo::Zagueiro => Perfil::Zagueiro,
+            PosicaoAlvo::LateralDireito | PosicaoAlvo::LateralEsquerdo => Perfil::Lateral,
+            PosicaoAlvo::AlaDireito | PosicaoAlvo::AlaEsquerdo => Perfil::Ala,
+            PosicaoAlvo::Volante => Perfil::Volante,
+            PosicaoAlvo::MeioCampista => Perfil::MeioCampista,
+            PosicaoAlvo::MeiaAtacante => Perfil::MeiaAtacante,
+            PosicaoAlvo::MeiaDireita | PosicaoAlvo::MeiaEsquerda => Perfil::MeiaAberto,
+            PosicaoAlvo::PontaDireita | PosicaoAlvo::PontaEsquerda => Perfil::Ponta,
+            PosicaoAlvo::SegundoAtacante => Perfil::SegundoAtacante,
+            PosicaoAlvo::Centroavante => Perfil::Centroavante,
+        }
+    }
+}
+
+/// Perfil ideal de uma função em campo (o que `PERFIS` pesa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Perfil {
+    Goleiro,
+    Zagueiro,
+    Lateral,
+    Ala,
+    Volante,
+    MeioCampista,
+    MeiaAtacante,
+    MeiaAberto,
+    Ponta,
+    SegundoAtacante,
+    Centroavante,
+}
+
+/// Perfis ideais: `(atributo, peso)`, pesos inteiros que somam 100 em cada
+/// perfil (conferido em teste). Primeira versão (2026-10-03), inspirada na
+/// nota por posição do FIFA; para rebalancear, mexa só aqui.
+const PERFIS: [(Perfil, &[(Atributo, u8)]); 11] = {
+    use Atributo::*;
+    [
+        (
+            Perfil::Goleiro,
+            &[(GkMergulho, 21), (GkManejo, 21), (GkReposicao, 5), (GkColocacao, 21), (GkReflexos, 21), (Reacao, 11)],
+        ),
+        (
+            Perfil::Zagueiro,
+            &[
+                (Marcacao, 14),
+                (DesarmeEmPe, 17),
+                (Carrinho, 14),
+                (Interceptacao, 13),
+                (Cabeceio, 10),
+                (Forca, 10),
+                (Agressividade, 7),
+                (PasseCurto, 5),
+                (Reacao, 5),
+                (ControleDeBola, 4),
+                (Impulsao, 1),
+            ],
+        ),
+        (
+            Perfil::Lateral,
+            &[
+                (Carrinho, 14),
+                (Interceptacao, 12),
+                (DesarmeEmPe, 11),
+                (Cruzamento, 9),
+                (Marcacao, 8),
+                (Folego, 8),
+                (Reacao, 8),
+                (Velocidade, 7),
+                (ControleDeBola, 7),
+                (PasseCurto, 7),
+                (Aceleracao, 5),
+                (Cabeceio, 4),
+            ],
+        ),
+        (
+            Perfil::Ala,
+            &[
+                (Cruzamento, 12),
+                (Interceptacao, 12),
+                (Carrinho, 11),
+                (Folego, 10),
+                (PasseCurto, 10),
+                (Reacao, 8),
+                (ControleDeBola, 8),
+                (DesarmeEmPe, 8),
+                (Marcacao, 7),
+                (Velocidade, 6),
+                (Aceleracao, 4),
+                (Drible, 4),
+            ],
+        ),
+        (
+            Perfil::Volante,
+            &[
+                (PasseCurto, 14),
+                (Interceptacao, 14),
+                (DesarmeEmPe, 12),
+                (PasseLongo, 10),
+                (ControleDeBola, 10),
+                (Marcacao, 9),
+                (Reacao, 7),
+                (Folego, 6),
+                (Carrinho, 5),
+                (Agressividade, 5),
+                (Forca, 4),
+                (Visao, 4),
+            ],
+        ),
+        (
+            Perfil::MeioCampista,
+            &[
+                (PasseCurto, 17),
+                (ControleDeBola, 14),
+                (PasseLongo, 13),
+                (Visao, 13),
+                (Reacao, 8),
+                (Folego, 8),
+                (Drible, 7),
+                (PosicionamentoOfensivo, 6),
+                (Interceptacao, 5),
+                (DesarmeEmPe, 5),
+                (ChuteDeLonge, 4),
+            ],
+        ),
+        (
+            Perfil::MeiaAtacante,
+            &[
+                (PasseCurto, 16),
+                (ControleDeBola, 15),
+                (Visao, 14),
+                (Drible, 13),
+                (PosicionamentoOfensivo, 9),
+                (Finalizacao, 7),
+                (Reacao, 7),
+                (Agilidade, 6),
+                (ChuteDeLonge, 5),
+                (Aceleracao, 4),
+                (PasseLongo, 4),
+            ],
+        ),
+        (
+            Perfil::MeiaAberto,
+            &[
+                (Drible, 15),
+                (ControleDeBola, 13),
+                (PasseCurto, 11),
+                (Cruzamento, 10),
+                (PosicionamentoOfensivo, 8),
+                (Aceleracao, 7),
+                (Visao, 7),
+                (Reacao, 7),
+                (Velocidade, 6),
+                (Folego, 6),
+                (PasseLongo, 5),
+                (Agilidade, 5),
+            ],
+        ),
+        (
+            Perfil::Ponta,
+            &[
+                (Drible, 16),
+                (ControleDeBola, 14),
+                (Finalizacao, 10),
+                (Cruzamento, 9),
+                (PasseCurto, 9),
+                (PosicionamentoOfensivo, 9),
+                (Aceleracao, 7),
+                (Reacao, 7),
+                (Velocidade, 6),
+                (Visao, 6),
+                (ChuteDeLonge, 4),
+                (Agilidade, 3),
+            ],
+        ),
+        (
+            Perfil::SegundoAtacante,
+            &[
+                (ControleDeBola, 15),
+                (Drible, 14),
+                (PosicionamentoOfensivo, 13),
+                (Finalizacao, 11),
+                (PasseCurto, 9),
+                (Reacao, 9),
+                (Visao, 8),
+                (ForcaDoChute, 5),
+                (Aceleracao, 5),
+                (Velocidade, 5),
+                (ChuteDeLonge, 4),
+                (Cabeceio, 2),
+            ],
+        ),
+        (
+            Perfil::Centroavante,
+            &[
+                (Finalizacao, 18),
+                (PosicionamentoOfensivo, 13),
+                (Cabeceio, 10),
+                (ForcaDoChute, 10),
+                (ControleDeBola, 10),
+                (Reacao, 8),
+                (Drible, 7),
+                (Velocidade, 5),
+                (Forca, 5),
+                (PasseCurto, 5),
+                (Aceleracao, 4),
+                (ChuteDeLonge, 3),
+                (Voleio, 2),
+            ],
+        ),
+    ]
+};
+
+impl Perfil {
+    pub fn pesos(self) -> &'static [(Atributo, u8)] {
+        PERFIS.iter().find(|(p, _)| *p == self).map_or(&[], |(_, pesos)| pesos)
+    }
+}
+
+/// Perfil da posição nativa (`preferredposition1`).
+pub fn perfil_da_posicao(posicao: u8) -> Perfil {
+    match posicao {
+        0 => Perfil::Goleiro,
+        1 | 7 => Perfil::Ala,
+        2 | 6 => Perfil::Lateral,
+        3..=5 => Perfil::Zagueiro,
+        8..=10 => Perfil::Volante,
+        11 | 15 => Perfil::MeiaAberto,
+        16..=18 => Perfil::MeiaAtacante,
+        19..=21 => Perfil::SegundoAtacante,
+        22 | 26 => Perfil::Ponta,
+        23..=25 => Perfil::Centroavante,
+        _ => Perfil::MeioCampista,
+    }
+}
+
+/// Nota (0–99) num perfil: média ponderada dos atributos conhecidos
+/// (`valor` devolve `None` para atributo não observado; os pesos dos que
+/// faltam saem da conta). `None` se nenhum atributo do perfil é conhecido.
+pub fn nota_no_perfil(perfil: Perfil, valor: impl Fn(Atributo) -> Option<f32>) -> Option<f32> {
+    let (soma, pesos) = perfil.pesos().iter().fold((0.0f32, 0u32), |(soma, pesos), &(a, peso)| match valor(a) {
+        Some(v) => (soma + v * f32::from(peso), pesos + u32::from(peso)),
+        None => (soma, pesos),
+    });
+    (pesos > 0).then(|| soma / pesos as f32)
+}
+
+/// Força do fit (%) para quem nasceu em `posicao`: nota no perfil-alvo ÷
+/// nota no perfil da posição nativa, com teto 100. `None` sem dados.
+pub fn forca_fit(alvo: PosicaoAlvo, posicao: u8, valor: impl Fn(Atributo) -> Option<f32>) -> Option<u8> {
+    let no_alvo = nota_no_perfil(alvo.perfil(), &valor)?;
+    let nativa = nota_no_perfil(perfil_da_posicao(posicao), &valor)?;
+    if nativa <= 0.0 {
+        return None;
+    }
+    Some((100.0 * no_alvo / nativa).round().clamp(0.0, 100.0) as u8)
+}
+
+/// Força mínima do fit para um jogador entrar no Relatório: perde no
+/// máximo ~5% do nível dele na posição-alvo. Calibrado no save do Felipe
+/// (2026-10-03, jogadores com Overall ≥ 60 de outra posição): passam de
+/// ~15% (Centroavante, Zagueiro, Volante) a ~65% (Meia aberto, Ponta) —
+/// posições vizinhas têm perfis parecidos. A ordem do Relatório (nota no
+/// perfil-alvo) põe os melhores na frente.
+pub const LIMIAR_FIT: u8 = 95;
+
+// ---------------------------------------------------------------------
+// Similaridade com o Jogador de Referência (Story 3.3)
+// ---------------------------------------------------------------------
+
+/// Similaridade mínima para um jogador entrar no Relatório. No save do
+/// Felipe (2026-10-03, Overall ≥ 60), passam de ~30 (centroavante,
+/// goleiro, meia) a ~3.300 (zagueiros, de perfis bem homogêneos) jogadores
+/// por referência; o melhor parecido fica em 81–92%.
+pub const LIMIAR_SIMILARIDADE: u8 = 75;
+/// Pontos de similaridade perdidos por ponto de diferença média.
+const PERDA_FORMA: f32 = 4.0;
+const PERDA_NIVEL: f32 = 4.0;
+const PESO_FORMA: f32 = 0.75;
+/// Menos eixos em comum que isso não dá para comparar perfis.
+const MINIMO_EIXOS_SIMILARIDADE: usize = 3;
+
+/// Atributos comparados: os 5 de goleiro + reflexo/físico se a referência
+/// é goleiro; senão os 28 de linha.
+pub fn atributos_comparados(goleiro: bool) -> Vec<Atributo> {
+    if goleiro {
+        let extras = [Atributo::Reacao, Atributo::Agilidade, Atributo::Impulsao, Atributo::Forca];
+        Atributo::TODOS.iter().copied().filter(|a| a.goleiro() || extras.contains(a)).collect()
+    } else {
+        Atributo::TODOS.iter().copied().filter(|a| !a.goleiro()).collect()
+    }
+}
+
+/// Similaridade 0–100 entre um candidato e a referência, nos atributos
+/// comparados que os dois têm (`None` = não observado). `None` com menos
+/// de `MINIMO_EIXOS_SIMILARIDADE` eixos em comum.
+pub fn similaridade(
+    candidato: impl Fn(Atributo) -> Option<f32>,
+    referencia: impl Fn(Atributo) -> Option<f32>,
+    goleiro: bool,
+) -> Option<u8> {
+    let pares: Vec<(f32, f32)> =
+        atributos_comparados(goleiro).into_iter().filter_map(|a| Some((candidato(a)?, referencia(a)?))).collect();
+    if pares.len() < MINIMO_EIXOS_SIMILARIDADE {
+        return None;
+    }
+    let n = pares.len() as f32;
+    let media_c = pares.iter().map(|p| p.0).sum::<f32>() / n;
+    let media_r = pares.iter().map(|p| p.1).sum::<f32>() / n;
+    let diferenca_forma = pares.iter().map(|(c, r)| ((c - media_c) - (r - media_r)).abs()).sum::<f32>() / n;
+    let forma = (100.0 - PERDA_FORMA * diferenca_forma).clamp(0.0, 100.0);
+    let nivel = (100.0 - PERDA_NIVEL * (media_c - media_r).abs()).clamp(0.0, 100.0);
+    Some((PESO_FORMA * forma + (1.0 - PESO_FORMA) * nivel).round() as u8)
+}
+
+// ---------------------------------------------------------------------
 // Como o Relatório revela cada jogador (Story 2.4)
 // ---------------------------------------------------------------------
 //
@@ -392,8 +838,10 @@ pub fn revelados(fracao: f32, alvo: usize, encontrados: usize) -> usize {
 /// Ordem em que o Olheiro observa os atributos de um jogador, pela função
 /// dele em campo. O Relatório revela os N primeiros (N =
 /// `atributos_revelados`). Um atributo dominante pedido na Missão (Story
-/// 2.8) é sempre o primeiro.
-pub fn ordem_de_observacao(funcao: Funcao, dominante: Option<Atributo>) -> Vec<Atributo> {
+/// 2.8) é sempre o primeiro; com Fit Posicional (3.4), vêm logo depois os
+/// atributos que mais pesam no perfil-alvo, para a força do fit ser
+/// calculada sobre o que importa.
+pub fn ordem_de_observacao(funcao: Funcao, dominante: Option<Atributo>, alvo: Option<PosicaoAlvo>) -> Vec<Atributo> {
     use Atributo::*;
     let prioridade: &[Atributo] = match funcao {
         Funcao::Goleiro => &[GkReflexos, GkMergulho, GkColocacao, GkManejo, GkReposicao, Reacao, Impulsao, Forca],
@@ -402,8 +850,11 @@ pub fn ordem_de_observacao(funcao: Funcao, dominante: Option<Atributo>) -> Vec<A
         Funcao::Atacante => &[Finalizacao, PosicionamentoOfensivo, Velocidade, Aceleracao, Drible, ControleDeBola, ForcaDoChute, Reacao],
     };
     let goleiro = funcao == Funcao::Goleiro;
+    let mut do_alvo: Vec<(Atributo, u8)> = alvo.map(|p| p.perfil().pesos().to_vec()).unwrap_or_default();
+    do_alvo.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let do_alvo: Vec<Atributo> = do_alvo.into_iter().map(|(a, _)| a).collect();
     let mut ordem: Vec<Atributo> = Vec::with_capacity(Atributo::TODOS.len());
-    for &a in dominante.iter().chain(prioridade).chain(Atributo::TODOS.iter()) {
+    for &a in dominante.iter().chain(&do_alvo).chain(prioridade).chain(Atributo::TODOS.iter()) {
         // Atributos de goleiro só entram na observação de goleiros.
         if (a.goleiro() && !goleiro && Some(a) != dominante) || ordem.contains(&a) {
             continue;
@@ -450,13 +901,19 @@ pub fn nota_de_escolha(relevancia: u8, qualidade: Qualidade, semente: u64) -> u3
     u32::from(relevancia) * 100 + u32::try_from(semente % (u64::from(ruido) + 1)).unwrap_or(0)
 }
 
-/// Relevância de um jogador para o tipo de Missão (0–99).
-pub fn relevancia(tipo: TipoMissao, overall: u8, potencial: u8, dominante: Option<u8>) -> u8 {
-    match (tipo, dominante) {
-        (_, Some(valor)) => valor,
-        (TipoMissao::Jovens, None) => potencial,
-        (TipoMissao::Medalhoes, None) => overall,
-        (TipoMissao::Tatica | TipoMissao::Geral, None) => {
+/// Relevância de um jogador para a Missão (0–99). `perfil`: as notas dos
+/// critérios de perfil pedidos — valor do atributo dominante (2.8),
+/// similaridade com a referência (3.3), nota no perfil-alvo (3.4). Com
+/// algum, vale a média deles; sem nenhum, o tipo decide.
+pub fn relevancia(tipo: TipoMissao, overall: u8, potencial: u8, perfil: &[u8]) -> u8 {
+    if !perfil.is_empty() {
+        let soma: u32 = perfil.iter().map(|&v| u32::from(v)).sum();
+        return u8::try_from(soma / perfil.len() as u32).unwrap_or(u8::MAX);
+    }
+    match tipo {
+        TipoMissao::Jovens => potencial,
+        TipoMissao::Medalhoes => overall,
+        TipoMissao::Tatica | TipoMissao::Geral => {
             u8::try_from((u16::from(overall) + u16::from(potencial)) / 2).unwrap_or(overall)
         }
     }
@@ -699,14 +1156,14 @@ mod tests {
 
     #[test]
     fn observation_order_starts_with_the_role_and_the_dominant_attribute() {
-        let atacante = ordem_de_observacao(Funcao::Atacante, None);
+        let atacante = ordem_de_observacao(Funcao::Atacante, None, None);
         assert_eq!(atacante.first(), Some(&Atributo::Finalizacao));
         assert_eq!(atacante.len(), 28, "sem atributos de goleiro");
         assert!(atacante.iter().all(|a| !a.goleiro()));
-        let goleiro = ordem_de_observacao(Funcao::Goleiro, None);
+        let goleiro = ordem_de_observacao(Funcao::Goleiro, None, None);
         assert_eq!(goleiro.len(), 33);
         assert!(goleiro.iter().take(5).all(|a| a.goleiro()));
-        let drible = ordem_de_observacao(Funcao::Defensor, Some(Atributo::Drible));
+        let drible = ordem_de_observacao(Funcao::Defensor, Some(Atributo::Drible), None);
         assert_eq!(drible.first(), Some(&Atributo::Drible));
         let mut sem_repetir = drible.clone();
         sem_repetir.sort_unstable();
@@ -721,10 +1178,10 @@ mod tests {
         let vence = |q| (0..200u32).filter(|&c| nota_de_escolha(80, q, semente(3, c, 0)) > nota_de_escolha(70, q, semente(3, c, 1))).count();
         assert_eq!(vence(Qualidade::Alta), 200);
         assert!(vence(Qualidade::Baixa) < 200);
-        assert_eq!(relevancia(TipoMissao::Jovens, 60, 88, None), 88);
-        assert_eq!(relevancia(TipoMissao::Medalhoes, 82, 84, None), 82);
-        assert_eq!(relevancia(TipoMissao::Geral, 70, 80, None), 75);
-        assert_eq!(relevancia(TipoMissao::Tatica, 70, 80, Some(91)), 91);
+        assert_eq!(relevancia(TipoMissao::Jovens, 60, 88, &[]), 88);
+        assert_eq!(relevancia(TipoMissao::Medalhoes, 82, 84, &[]), 82);
+        assert_eq!(relevancia(TipoMissao::Geral, 70, 80, &[]), 75);
+        assert_eq!(relevancia(TipoMissao::Tatica, 70, 80, &[91]), 91);
         assert_eq!(semente(9, 9, 9), semente(9, 9, 9));
         assert_ne!(semente(9, 9, 9), semente(9, 9, 8));
     }
@@ -732,8 +1189,10 @@ mod tests {
     #[test]
     fn a_dominant_attribute_makes_a_tactical_missao_and_counts_the_top_three() {
         let faixa = |min, max| FaixaAtributo { min, max };
-        assert_eq!(tipo_por_filtros(faixa(50, 70), faixa(80, 99), Some(Atributo::Drible)), TipoMissao::Tatica);
-        assert_eq!(tipo_por_filtros(faixa(50, 70), faixa(80, 99), None), TipoMissao::Jovens);
+        let mut filtros = FiltrosMissao { overall: faixa(50, 70), potencial: faixa(80, 99), ..FiltrosMissao::default() };
+        assert_eq!(tipo_por_filtros(&filtros), TipoMissao::Jovens);
+        filtros.atributo_dominante = Some(Atributo::Drible);
+        assert_eq!(tipo_por_filtros(&filtros), TipoMissao::Tatica);
         assert!(combina(Especializacao::Tatico, TipoMissao::Tatica));
         let valores = [(Atributo::Velocidade, 90), (Atributo::Drible, 88), (Atributo::Forca, 88), (Atributo::Finalizacao, 85), (Atributo::Marcacao, 40)];
         assert!(eh_dominante(&valores, Atributo::Velocidade));
@@ -764,5 +1223,132 @@ mod tests {
         assert_eq!(revelados(1.0, 17, 5), 5, "pool pequeno");
         assert_eq!(revelados(2.0, 17, 17), 17);
         assert_eq!(revelados(-1.0, 17, 17), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Épico 3
+    // -----------------------------------------------------------------
+
+    /// Perfil sintético: tudo em `base`, com os atributos de `altos` em `alto`.
+    fn perfil(base: u8, altos: &[Atributo], alto: u8) -> [u8; 33] {
+        let mut v = [base; 33];
+        for a in altos {
+            v[a.indice()] = alto;
+        }
+        v
+    }
+
+    fn de(v: &[u8; 33]) -> impl Fn(Atributo) -> Option<f32> + '_ {
+        move |a| v.get(a.indice()).map(|&x| f32::from(x))
+    }
+
+    #[test]
+    fn every_ideal_profile_weighs_one_hundred_without_repeating_attributes() {
+        for (perfil, pesos) in PERFIS {
+            let soma: u32 = pesos.iter().map(|(_, p)| u32::from(*p)).sum();
+            assert_eq!(soma, 100, "{perfil:?}");
+            let mut atributos: Vec<Atributo> = pesos.iter().map(|(a, _)| *a).collect();
+            atributos.sort_unstable();
+            atributos.dedup();
+            assert_eq!(atributos.len(), pesos.len(), "{perfil:?} repete atributo");
+            if perfil != Perfil::Goleiro {
+                assert!(pesos.iter().all(|(a, _)| !a.goleiro()), "{perfil:?}");
+            }
+        }
+        // toda posição do jogo tem um perfil nativo, e todo alvo tem pesos
+        for posicao in 0..=27u8 {
+            assert!(!perfil_da_posicao(posicao).pesos().is_empty());
+        }
+        for alvo in PosicaoAlvo::TODAS {
+            assert!(!alvo.perfil().pesos().is_empty());
+            assert!(!alvo.posicoes_nativas().is_empty());
+            assert!(alvo.posicoes_nativas().iter().all(|&p| perfil_da_posicao(p) == alvo.perfil()), "{alvo:?}");
+        }
+    }
+
+    #[test]
+    fn an_attacking_midfielder_who_defends_well_fits_as_a_holding_midfielder() {
+        use Atributo::*;
+        let criativo = [PasseCurto, PasseLongo, Visao, ControleDeBola, Drible, PosicionamentoOfensivo, Finalizacao, Agilidade];
+        let defesa = [Interceptacao, DesarmeEmPe, Marcacao, Carrinho, Agressividade, Folego, Forca, Reacao];
+        // MEI (posição 17) com passe E defesa altos
+        let completo = {
+            let mut v = perfil(55, &criativo, 82);
+            for a in defesa {
+                v[a.indice()] = 80;
+            }
+            v
+        };
+        let fit = forca_fit(PosicaoAlvo::Volante, 17, de(&completo)).expect("fit");
+        assert!(fit >= LIMIAR_FIT, "{fit}");
+        // o mesmo MEI sem defesa não serve de volante
+        let so_ataque = perfil(45, &criativo, 82);
+        let fit_fraco = forca_fit(PosicaoAlvo::Volante, 17, de(&so_ataque)).expect("fit");
+        assert!(fit_fraco < LIMIAR_FIT, "{fit_fraco}");
+        assert!(fit > fit_fraco);
+        // e um centroavante puro não serve de zagueiro
+        let atacante = perfil(40, &[Finalizacao, PosicionamentoOfensivo, ForcaDoChute, Cabeceio, ControleDeBola], 85);
+        assert!(forca_fit(PosicaoAlvo::Zagueiro, 24, de(&atacante)).expect("fit") < 70);
+    }
+
+    #[test]
+    fn fit_is_capped_at_one_hundred_and_ignores_unobserved_attributes() {
+        // um jogador melhor no alvo que na própria posição: 100, não 130
+        let zagueiro_que_arma = perfil(50, &[Atributo::PasseCurto, Atributo::Visao, Atributo::ControleDeBola, Atributo::PasseLongo], 90);
+        assert_eq!(forca_fit(PosicaoAlvo::MeioCampista, 4, de(&zagueiro_que_arma)), Some(100));
+        // só os atributos observados contam
+        let observado = |a: Atributo| (a == Atributo::Finalizacao).then_some(80.0);
+        assert_eq!(nota_no_perfil(Perfil::Centroavante, observado), Some(80.0));
+        assert_eq!(nota_no_perfil(Perfil::Zagueiro, observado), None, "nenhum atributo do perfil observado");
+        assert_eq!(forca_fit(PosicaoAlvo::Zagueiro, 24, observado), None);
+    }
+
+    #[test]
+    fn identical_profiles_are_one_hundred_percent_similar_and_unrelated_ones_are_low() {
+        use Atributo::*;
+        let atacante = perfil(45, &[Finalizacao, PosicionamentoOfensivo, ForcaDoChute, Velocidade, Aceleracao, Drible], 85);
+        let zagueiro = perfil(45, &[Marcacao, DesarmeEmPe, Carrinho, Interceptacao, Cabeceio, Forca], 85);
+        assert_eq!(similaridade(de(&atacante), de(&atacante), false), Some(100));
+        let diferente = similaridade(de(&zagueiro), de(&atacante), false).expect("similaridade");
+        assert!(diferente < 50, "{diferente}");
+        // o mesmo formato 8 pontos abaixo ainda é parecido (e passa no limiar)
+        let mais_fraco = atacante.map(|v| v - 8);
+        let parecido = similaridade(de(&mais_fraco), de(&atacante), false).expect("similaridade");
+        assert!((LIMIAR_SIMILARIDADE..100).contains(&parecido), "{parecido}");
+        // poucos eixos em comum: não dá para dizer
+        let um_so = |a: Atributo| (a == Finalizacao).then_some(80.0);
+        assert_eq!(similaridade(um_so, de(&atacante), false), None);
+        // goleiro compara os atributos de goleiro
+        assert!(atributos_comparados(true).iter().filter(|a| a.goleiro()).count() == 5);
+        assert!(atributos_comparados(false).iter().all(|a| !a.goleiro()));
+    }
+
+    #[test]
+    fn profile_filters_make_a_tactical_missao_and_the_tatico_gets_the_better_quality() {
+        let mut filtros = FiltrosMissao::default();
+        assert_eq!(tipo_por_filtros(&filtros), TipoMissao::Geral);
+        filtros.fit_posicional = Some(PosicaoAlvo::Volante);
+        assert_eq!(tipo_por_filtros(&filtros), TipoMissao::Tatica);
+        let pedido = |especializacao| PedidoMissao {
+            tier: Tier::Experiente,
+            especializacao,
+            modo: ModoBusca::Rapida,
+            tipo: tipo_por_filtros(&filtros),
+            amplitude: AmplitudeGeografica::Pais,
+        };
+        for outra in [Especializacao::Generalista, Especializacao::CacadorDeJovens, Especializacao::CacadorDeMedalhoes] {
+            assert!(estimar_missao(&pedido(Especializacao::Tatico)).qualidade > estimar_missao(&pedido(outra)).qualidade);
+        }
+    }
+
+    #[test]
+    fn with_a_target_position_its_heaviest_attributes_are_observed_early() {
+        let ordem = ordem_de_observacao(Funcao::MeioCampo, None, Some(PosicaoAlvo::Volante));
+        let topo: Vec<Atributo> = ordem.iter().take(3).copied().collect();
+        assert_eq!(topo, [Atributo::PasseCurto, Atributo::Interceptacao, Atributo::DesarmeEmPe]);
+        assert_eq!(ordem.len(), 28, "sem atributos de goleiro, sem repetir");
+        let com_dominante = ordem_de_observacao(Funcao::MeioCampo, Some(Atributo::Drible), Some(PosicaoAlvo::Volante));
+        assert_eq!(com_dominante.first(), Some(&Atributo::Drible));
+        assert_eq!(relevancia(TipoMissao::Tatica, 70, 80, &[80, 90]), 85, "média dos critérios de perfil");
     }
 }

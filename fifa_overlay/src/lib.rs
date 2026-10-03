@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "2.10-v2 — navegação: foco = escolha, abas só LB/RB";
+const BUILD_TAG: &str = "3.5-v1 — Épico 3: Ficha, Radar, comparação, Fit Posicional, Jogador de Referência";
 
 /// Arquivo que pede para a DLL se descarregar sem fechar o jogo
 /// (script `recarregar_dev.ps1` da pasta `fifa_overlay`, só para

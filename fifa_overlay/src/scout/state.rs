@@ -42,7 +42,8 @@ use uuid::Uuid;
 
 use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
-pub use crate::save_repo::{Atributo, Confederacao, Funcao, Nacao};
+pub use crate::save_repo::{Atributo, Confederacao, Funcao, Nacao, Pe};
+pub use super::quality::PosicaoAlvo;
 
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::Densidade;
@@ -257,8 +258,8 @@ impl FaixaAtributo {
 }
 
 /// Filtros de uma Missão. A Story 2.2 traz Overall e Potencial; a 2.8, o
-/// atributo dominante; geografia (2.9), Fit Posicional e Jogador de
-/// Referência (Épico 3) entram com `#[serde(default)]`.
+/// atributo dominante; a 2.9, a geografia; o Épico 3, Fit Posicional e
+/// Jogador de Referência — cada um com `#[serde(default)]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FiltrosMissao {
     pub overall: FaixaAtributo,
@@ -271,6 +272,35 @@ pub struct FiltrosMissao {
     /// quadro "Outros"). Vazio = todos os países (Story 2.9).
     #[serde(default)]
     pub paises: Vec<u16>,
+    /// Posição-alvo: só entram jogadores de OUTRA posição nativa cujo perfil
+    /// serve nela (Story 3.4).
+    #[serde(default)]
+    pub fit_posicional: Option<PosicaoAlvo>,
+    /// "Outro como ele": só entram perfis parecidos com o deste jogador do
+    /// elenco (Story 3.3).
+    #[serde(default)]
+    pub referencia: Option<JogadorReferencia>,
+}
+
+/// O Jogador de Referência como estava quando a Missão foi encomendada: a
+/// busca compara com esta foto, mesmo se ele sair do elenco depois.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JogadorReferencia {
+    pub player_id: u32,
+    pub nome: String,
+    pub posicao: u8,
+    /// Na ordem de `Atributo::TODOS` (valores reais: é jogador do usuário).
+    pub atributos: Vec<u8>,
+}
+
+impl JogadorReferencia {
+    pub fn atributo(&self, atributo: Atributo) -> Option<u8> {
+        self.atributos.get(atributo.indice()).copied()
+    }
+
+    pub fn goleiro(&self) -> bool {
+        self.posicao == 0
+    }
 }
 
 impl Default for FiltrosMissao {
@@ -281,6 +311,8 @@ impl Default for FiltrosMissao {
             potencial: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
             atributo_dominante: None,
             paises: Vec::new(),
+            fit_posicional: None,
+            referencia: None,
         }
     }
 }
@@ -534,12 +566,75 @@ pub struct JogadorEncontrado {
     pub potencial: FaixaAtributo,
     /// Na ordem em que o Olheiro observou (a função do jogador primeiro).
     pub atributos: Vec<AtributoRevelado>,
+    /// Pé preferido (Story 3.1; `None` em Relatórios de antes dela).
+    #[serde(default)]
+    pub pe: Option<Pe>,
+    /// Similaridade (%) com o Jogador de Referência da Missão, pelo que o
+    /// Olheiro viu (Story 3.3).
+    #[serde(default)]
+    pub similaridade: Option<u8>,
+    /// Força do Fit Posicional (%) na posição-alvo da Missão, pelo que o
+    /// Olheiro viu (Story 3.4).
+    #[serde(default)]
+    pub fit: Option<u8>,
 }
 
 impl JogadorEncontrado {
     pub fn atributo(&self, atributo: Atributo) -> Option<FaixaAtributo> {
         self.atributos.iter().find(|a| a.atributo == atributo).map(|a| a.valor)
     }
+
+    /// O valor "pelo que o Olheiro viu": o meio da faixa revelada.
+    pub fn valor_visto(&self, atributo: Atributo) -> Option<f32> {
+        self.atributo(atributo).map(|f| (f32::from(f.min) + f32::from(f.max)) * 0.5)
+    }
+}
+
+/// Um jogador do elenco do técnico (seletor de elenco, Stories 3.2/3.3).
+/// Valores reais: o jogador é dele.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JogadorElenco {
+    pub player_id: u32,
+    pub nome: String,
+    pub idade: u8,
+    pub posicao: u8,
+    pub overall: u8,
+    pub potencial: u8,
+    /// Na ordem de `Atributo::TODOS`.
+    pub atributos: Vec<u8>,
+}
+
+impl JogadorElenco {
+    pub fn atributo(&self, atributo: Atributo) -> Option<u8> {
+        self.atributos.get(atributo.indice()).copied()
+    }
+
+    pub fn como_referencia(&self) -> JogadorReferencia {
+        JogadorReferencia {
+            player_id: self.player_id,
+            nome: self.nome.clone(),
+            posicao: self.posicao,
+            atributos: self.atributos.clone(),
+        }
+    }
+}
+
+/// O elenco como as telas o recebem (`listar_elenco_atual`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum EstadoElenco {
+    Carregando,
+    Pronto(Arc<Vec<JogadorElenco>>),
+    /// Não deu para ler o save: a tela mostra o erro com "Tentar novamente".
+    Erro,
+}
+
+/// A Ficha de Jogador aberta (Story 3.1): o jogador do Relatório e, se
+/// escolhido, o jogador do elenco sobreposto no Radar (Story 3.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FichaAberta {
+    pub item: RelatorioNaLista,
+    pub jogador: JogadorEncontrado,
+    pub comparacao: Option<JogadorElenco>,
 }
 
 /// Relatório de uma Missão (Story 2.4). Campos novos com `default`: um
@@ -674,6 +769,13 @@ pub struct ScoutState {
     data_avisos: Option<Date>,
     /// Falha da última renovação/encerramento, por Missão (Story 2.10).
     erros_missao: HashMap<Uuid, ErroCompra>,
+    /// Elenco do técnico, lido em background e marcado com a carreira dona
+    /// (Stories 3.2/3.3).
+    tarefa_elenco: AsyncTask<(String, Arc<Vec<JogadorElenco>>)>,
+    /// Ficha aberta: `player_id` dentro do Relatório aberto (Story 3.1).
+    ficha: Option<u32>,
+    /// Jogador do elenco sobreposto no Radar da Ficha (Story 3.2).
+    comparacao: Option<u32>,
 }
 
 impl ScoutState {
@@ -713,6 +815,9 @@ impl ScoutState {
             vendo_arquivados: false,
             data_avisos: None,
             erros_missao: HashMap::new(),
+            tarefa_elenco: AsyncTask::new(),
+            ficha: None,
+            comparacao: None,
         }
     }
 
@@ -740,6 +845,9 @@ impl ScoutState {
     /// mesma carreira (trocar de carreira pede reabrir o painel).
     pub fn ao_abrir_painel(&mut self) {
         self.painel_aberto = true;
+        // O elenco é relido na próxima vez que for pedido (pode ter mudado
+        // desde a última abertura: transferências, save novo).
+        self.tarefa_elenco.reset();
         if matches!(self.tarefa_localizar.poll(), TaskState::Running) {
             return;
         }
@@ -761,6 +869,80 @@ impl ScoutState {
         self.cancelar_nova_missao();
         self.fechar_relatorio();
         self.vendo_arquivados = false;
+    }
+
+    // -----------------------------------------------------------------
+    // Elenco do técnico (Stories 3.2/3.3, AD-13)
+    // -----------------------------------------------------------------
+
+    /// O elenco da carreira pronta. Única porta das telas para o elenco
+    /// (AD-13): a primeira chamada dispara a leitura em background — o
+    /// elenco vem do `DATA` do save, e decodificá-lo leva ~0,5 s, o que
+    /// travaria o render (emenda do AD-4 na Story 3.2).
+    pub fn listar_elenco_atual(&self) -> EstadoElenco {
+        let Some(id_save) = self.save_ativo.clone() else {
+            return EstadoElenco::Erro;
+        };
+        match self.tarefa_elenco.poll() {
+            TaskState::Done((dono, elenco)) if dono == id_save => EstadoElenco::Pronto(elenco),
+            TaskState::Running => EstadoElenco::Carregando,
+            TaskState::Failed(_) => EstadoElenco::Erro,
+            TaskState::Idle | TaskState::Done(_) => {
+                self.tarefa_elenco.reset();
+                let fonte = Arc::clone(&self.fonte);
+                let (hoje, dono) = (self.data_progresso.unwrap_or(Date(20000101)), id_save);
+                self.tarefa_elenco.start(move || {
+                    let pool = fonte.read_squad_players()?;
+                    Ok((dono, Arc::new(elenco_de(pool, hoje))))
+                });
+                EstadoElenco::Carregando
+            }
+        }
+    }
+
+    /// "Tentar novamente" do seletor: lê o elenco de novo.
+    pub fn reler_elenco(&mut self) {
+        self.tarefa_elenco.reset();
+    }
+
+    fn jogador_do_elenco(&self, player_id: u32) -> Option<JogadorElenco> {
+        match self.listar_elenco_atual() {
+            EstadoElenco::Pronto(elenco) => elenco.iter().find(|j| j.player_id == player_id).cloned(),
+            _ => None,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Ficha de Jogador (Stories 3.1/3.2)
+    // -----------------------------------------------------------------
+
+    /// Abre a Ficha de um jogador do Relatório aberto (sem comparação).
+    pub fn abrir_ficha(&mut self, player_id: u32) {
+        let existe = self.relatorio_aberto().is_some_and(|item| item.relatorio.jogadores.iter().any(|j| j.player_id == player_id));
+        if existe {
+            self.ficha = Some(player_id);
+            self.comparacao = None;
+        }
+    }
+
+    pub fn fechar_ficha(&mut self) {
+        self.ficha = None;
+        self.comparacao = None;
+    }
+
+    /// A Ficha na tela, ou `None` (a tela deve fechar: o jogador saiu do
+    /// Relatório ou o Relatório fechou).
+    pub fn ficha_aberta(&self) -> Option<FichaAberta> {
+        let player_id = self.ficha?;
+        let item = self.relatorio_aberto()?;
+        let jogador = item.relatorio.jogadores.iter().find(|j| j.player_id == player_id)?.clone();
+        let comparacao = self.comparacao.and_then(|id| self.jogador_do_elenco(id));
+        Some(FichaAberta { item, jogador, comparacao })
+    }
+
+    /// Jogador do elenco escolhido para sobrepor no Radar (`None` tira).
+    pub fn comparar_com(&mut self, player_id: Option<u32>) {
+        self.comparacao = player_id;
     }
 
     /// Botão "Tentar novamente": localiza a carreira de novo.
@@ -1162,6 +1344,28 @@ impl ScoutState {
         }
     }
 
+    /// Fit Posicional escolhido no painel de campo (Story 3.4); `None` =
+    /// sem esse filtro.
+    pub fn definir_fit_da_missao(&mut self, alvo: Option<PosicaoAlvo>) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.fit_posicional = alvo;
+            r.erro = None;
+        }
+    }
+
+    /// Jogador de Referência escolhido no seletor de elenco (Story 3.3);
+    /// `None` = sem esse filtro. Guarda a foto dos atributos dele agora.
+    pub fn definir_referencia_da_missao(&mut self, player_id: Option<u32>) {
+        let referencia = player_id.and_then(|id| self.jogador_do_elenco(id)).map(|j| j.como_referencia());
+        if player_id.is_some() && referencia.is_none() {
+            return;
+        }
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.referencia = referencia;
+            r.erro = None;
+        }
+    }
+
     /// Prazo fixo ou contínua (Story 2.10).
     pub fn definir_continua_da_missao(&mut self, continua: bool) {
         if let Some(r) = self.rascunho_missao.as_mut() {
@@ -1190,11 +1394,7 @@ impl ScoutState {
             .olheiro_id
             .and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && !c.em_missao))
             .map(|c| c.olheiro.clone());
-        let tipo = quality::tipo_por_filtros(
-            rascunho.filtros.overall,
-            rascunho.filtros.potencial,
-            rascunho.filtros.atributo_dominante,
-        );
+        let tipo = quality::tipo_por_filtros(&rascunho.filtros);
         let amplitude = self.amplitude_dos_paises(&rascunho.filtros.paises);
         let estimativa = escolhido.as_ref().map(|o| {
             quality::estimar_missao(&quality::PedidoMissao {
@@ -1642,6 +1842,7 @@ impl ScoutState {
 
     pub fn fechar_relatorio(&mut self) {
         self.relatorio_aberto = None;
+        self.fechar_ficha();
     }
 
     /// O Relatório na tela, ou `None` (a tela deve fechar).
@@ -1821,6 +2022,29 @@ impl ScoutState {
             tracing::warn!("[scout::state] Aba ativa não foi salva: {err:?}");
         }
     }
+}
+
+/// Elenco do técnico para o seletor: por função (goleiro → defesa → meio →
+/// ataque), depois Overall.
+fn elenco_de(pool: crate::save_repo::PlayerPool, hoje: Date) -> Vec<JogadorElenco> {
+    let mut elenco: Vec<JogadorElenco> = pool
+        .jogadores
+        .into_iter()
+        .map(|j| JogadorElenco {
+            player_id: j.player_id,
+            idade: j.idade(hoje),
+            posicao: j.posicao,
+            overall: j.overall,
+            potencial: j.potencial,
+            atributos: j.atributos.to_vec(),
+            nome: j.nome,
+        })
+        .collect();
+    elenco.sort_by(|a, b| {
+        let grupo = |j: &JogadorElenco| crate::save_repo::funcao_da_posicao(j.posicao) as u8;
+        grupo(a).cmp(&grupo(b)).then(b.overall.cmp(&a.overall)).then(a.nome.cmp(&b.nome))
+    });
+    elenco
 }
 
 /// Ao carregar o arquivo de uma carreira (uma vez por sessão): Missão em
@@ -3157,5 +3381,170 @@ mod tests {
         st.ultima_leitura = Some(Instant::now() - INTERVALO_RELEITURA * 2);
         st.tick();
         assert_eq!(st.aviso_visivel(Instant::now()), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Épico 3: elenco, Jogador de Referência, Fit Posicional, Ficha
+    // -----------------------------------------------------------------
+
+    /// `pool_de_teste` com os jogadores 1, 2 e 3 no clube do técnico.
+    fn pool_com_elenco() -> PlayerPool {
+        let mut p = pool_de_teste();
+        for j in p.jogadores.iter_mut().take(3) {
+            j.clube_id = Some(241);
+        }
+        p
+    }
+
+    fn trocar_jogadores(busca: &Busca, pool: Result<PlayerPool, SaveRepoError>) {
+        *busca.jogadores.lock().unwrap_or_else(|p| p.into_inner()) = pool;
+    }
+
+    /// Espera a leitura do elenco terminar.
+    fn esperar_elenco(st: &ScoutState) -> EstadoElenco {
+        let inicio = Instant::now();
+        loop {
+            match st.listar_elenco_atual() {
+                EstadoElenco::Carregando => {
+                    assert!(inicio.elapsed() < Duration::from_secs(5), "elenco falso travou");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                pronto_ou_erro => return pronto_ou_erro,
+            }
+        }
+    }
+
+    fn elenco_pronto(st: &ScoutState) -> Arc<Vec<JogadorElenco>> {
+        match esperar_elenco(st) {
+            EstadoElenco::Pronto(elenco) => elenco,
+            outro => panic!("elenco não ficou pronto: {outro:?}"),
+        }
+    }
+
+    #[test]
+    fn the_squad_is_read_in_background_once_per_panel_opening() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Tatico, Tier::Experiente);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![], &o);
+        trocar_jogadores(&busca, Ok(pool_com_elenco()));
+        st.ao_abrir_painel();
+        assert_eq!(st.listar_elenco_atual(), EstadoElenco::Carregando, "nunca lê no thread de render");
+        let elenco = elenco_pronto(&st);
+        let ids: Vec<u32> = elenco.iter().map(|j| j.player_id).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(elenco.iter().all(|j| j.atributos.len() == 33));
+        // por função (posições 1, 2, 3 são todas de defesa), depois Overall
+        assert!(elenco.windows(2).all(|par| par[0].overall >= par[1].overall));
+        let lidas = busca.buscas.load(Ordering::SeqCst);
+        elenco_pronto(&st);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), lidas, "guardado durante a abertura");
+        st.ao_fechar_painel();
+        st.ao_abrir_painel();
+        elenco_pronto(&st);
+        assert_eq!(busca.buscas.load(Ordering::SeqCst), lidas + 1, "relido na abertura seguinte");
+    }
+
+    #[test]
+    fn a_squad_read_failure_shows_an_error_and_retry_reads_again() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Tatico, Tier::Experiente);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![], &o);
+        trocar_jogadores(&busca, Err(SaveRepoError::ProcessoInacessivel));
+        st.ao_abrir_painel();
+        assert_eq!(esperar_elenco(&st), EstadoElenco::Erro);
+        trocar_jogadores(&busca, Ok(pool_com_elenco()));
+        st.reler_elenco();
+        assert_eq!(elenco_pronto(&st).len(), 3);
+    }
+
+    #[test]
+    fn reference_and_fit_make_a_tactical_missao_and_are_saved_with_it() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Tatico, Tier::Experiente);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![], &o);
+        trocar_jogadores(&busca, Ok(pool_com_elenco()));
+        st.ao_abrir_painel();
+        st.abrir_nova_missao();
+        let antes = st.previa_missao().expect("formulário");
+        assert_ne!(antes.tipo, quality::TipoMissao::Tatica);
+        elenco_pronto(&st);
+
+        st.definir_referencia_da_missao(Some(2));
+        st.definir_fit_da_missao(Some(PosicaoAlvo::Volante));
+        let previa = st.previa_missao().expect("formulário");
+        assert_eq!(previa.tipo, quality::TipoMissao::Tatica);
+        assert!(previa.combina, "Tático combina com Missão de perfil");
+        let referencia = previa.rascunho.filtros.referencia.clone().expect("referência");
+        assert_eq!((referencia.player_id, referencia.nome.as_str()), (2, "Jogador 2"));
+        assert_eq!(referencia.atributos.len(), 33, "foto dos atributos");
+        // fora do elenco: ignorado; "Nenhum" tira
+        st.definir_referencia_da_missao(Some(999));
+        assert_eq!(st.previa_missao().and_then(|p| p.rascunho.filtros.referencia).map(|r| r.player_id), Some(2));
+
+        assert!(st.confirmar_nova_missao());
+        let salva = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("Missão salva");
+        assert_eq!(salva.tipo, quality::TipoMissao::Tatica);
+        assert_eq!(salva.filtros.fit_posicional, Some(PosicaoAlvo::Volante));
+        assert_eq!(salva.filtros.referencia.map(|r| r.player_id), Some(2));
+        let relida = EstadoPersistido::carregar(Some(&pasta.0), ID_A).ler(|d| d.missoes.first().cloned());
+        assert_eq!(relida.and_then(|m| m.filtros.referencia).map(|r| r.nome), Some("Jogador 2".to_string()));
+
+        st.abrir_nova_missao();
+        st.definir_referencia_da_missao(None);
+        assert_eq!(st.previa_missao().and_then(|p| p.rascunho.filtros.referencia), None);
+    }
+
+    #[test]
+    fn the_ficha_opens_from_the_open_report_and_overlays_a_squad_player() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let vencida = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![vencida], &o);
+        trocar_jogadores(&busca, Ok(pool_com_elenco()));
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let item = st.relatorios(false).into_iter().next().expect("Relatório");
+        let primeiro = item.relatorio.jogadores.first().map(|j| j.player_id).expect("jogador");
+        assert!(item.relatorio.jogadores.iter().all(|j| j.pe.is_some()), "pé preferido no Relatório novo");
+
+        // sem Relatório aberto, não há Ficha
+        st.abrir_ficha(primeiro);
+        assert_eq!(st.ficha_aberta(), None);
+        st.abrir_relatorio(item.relatorio.id);
+        st.abrir_ficha(999_999);
+        assert_eq!(st.ficha_aberta(), None, "jogador fora do Relatório");
+        st.abrir_ficha(primeiro);
+        let ficha = st.ficha_aberta().expect("Ficha");
+        assert_eq!(ficha.jogador.player_id, primeiro);
+        assert_eq!(ficha.comparacao, None);
+
+        elenco_pronto(&st);
+        st.comparar_com(Some(1));
+        assert_eq!(st.ficha_aberta().and_then(|f| f.comparacao).map(|c| c.player_id), Some(1));
+        st.comparar_com(None);
+        assert_eq!(st.ficha_aberta().and_then(|f| f.comparacao), None);
+
+        // abrir outra Ficha começa sem comparação; fechar o Relatório fecha a Ficha
+        st.comparar_com(Some(1));
+        st.abrir_ficha(primeiro);
+        assert_eq!(st.ficha_aberta().and_then(|f| f.comparacao), None);
+        st.fechar_relatorio();
+        assert_eq!(st.ficha_aberta(), None);
+    }
+
+    #[test]
+    fn reports_and_filters_saved_before_epic_3_still_load() {
+        let jogador: JogadorEncontrado = serde_json::from_str(
+            r#"{"player_id":1,"nome":"A","idade":20,"posicao":24,"nacao_id":54,"nacao":"Brazil","clube":"C",
+                "overall":{"min":70,"max":74},"potencial":{"min":80,"max":84},"atributos":[]}"#,
+        )
+        .expect("Relatório antigo");
+        assert_eq!((jogador.pe, jogador.similaridade, jogador.fit), (None, None, None));
+        let filtros: FiltrosMissao =
+            serde_json::from_str(r#"{"overall":{"min":50,"max":99},"potencial":{"min":50,"max":99}}"#).expect("filtros antigos");
+        assert_eq!((filtros.fit_posicional, filtros.referencia), (None, None));
+        let json = serde_json::to_string(&FiltrosMissao { fit_posicional: Some(PosicaoAlvo::MeiaAtacante), ..FiltrosMissao::default() })
+            .expect("serializa");
+        assert!(json.contains("\"fit_posicional\":\"meia_atacante\""), "{json}");
     }
 }

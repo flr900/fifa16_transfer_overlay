@@ -10,19 +10,23 @@ mod componentes;
 mod confirmacao_contratacao;
 mod missoes;
 mod campo_atributo;
+mod campo_fit;
 mod cartograma;
+mod ficha_jogador;
 mod nova_missao;
 mod olheiros;
+mod radar;
 mod relatorio;
 mod relatorios;
 mod selecao_geografica;
+mod seletor_elenco;
 mod sonar;
 pub mod theme;
 
 use imgui::{Condition, FontId, StyleColor, StyleVar, Ui, WindowFlags};
 
 use super::state::{CarreiraStatus, Especializacao, ScoutState, Tier};
-use super::{Aba, Navigation, Satelite, ScoutScreen};
+use super::{Aba, ContextoSeletor, Navigation, Satelite, ScoutScreen};
 use crate::save_repo::Date;
 use theme::Fonts;
 
@@ -64,8 +68,13 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     } else if !na_nova_missao && state.tem_nova_missao() {
         state.cancelar_nova_missao();
     }
-    // A tela do Relatório fecha se ele deixou de existir.
+    // A tela do Relatório fecha se ele deixou de existir; a Ficha, se o
+    // jogador saiu do Relatório (ou o Relatório fechou).
     if nav.tela_atual() == ScoutScreen::Satelite(Satelite::Relatorio) && state.relatorio_aberto().is_none() {
+        nav.pop();
+    }
+    if nav.tela_atual() == ScoutScreen::Satelite(Satelite::FichaJogador) && state.ficha_aberta().is_none() {
+        state.fechar_ficha();
         nav.pop();
     }
     let mut pedido = None;
@@ -132,6 +141,20 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         Some(Pedido::FecharRelatorio) => {
             state.fechar_relatorio();
             nav.pop();
+        }
+        Some(Pedido::AbrirFicha(player_id)) => {
+            state.abrir_ficha(player_id);
+            if state.ficha_aberta().is_some() {
+                nav.push(Satelite::FichaJogador);
+            }
+        }
+        Some(Pedido::FecharFicha) => {
+            state.fechar_ficha();
+            nav.pop();
+        }
+        Some(Pedido::ArquivouDaFicha) => {
+            state.fechar_relatorio();
+            nav.reset_para_aba();
         }
         _ => {}
     }
@@ -268,9 +291,16 @@ enum Pedido {
     FecharNovaMissao,
     AbrirRelatorio(uuid::Uuid),
     FecharRelatorio,
-    /// Abre um painel de campo do formulário (Story 2.8/2.9).
+    /// Ficha de um jogador do Relatório aberto (Story 3.1).
+    AbrirFicha(u32),
+    FecharFicha,
+    /// Arquivou o Relatório pela Ficha: volta para a aba.
+    ArquivouDaFicha,
+    /// Abre um painel de campo do formulário (Story 2.8/2.9) ou o seletor
+    /// de elenco (Épico 3).
     AbrirCampo(Satelite),
-    /// Escolheu (ou voltou) no painel de campo: volta ao formulário.
+    /// Escolheu (ou voltou) no painel de campo ou no seletor: volta à tela
+    /// de baixo.
     FecharCampo,
 }
 
@@ -338,9 +368,31 @@ fn conteudo_da_tela(
                 *pedido = Some(Pedido::FecharCampo);
             }
         }
-        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::Relatorio) => {
-            if relatorio::render(ui, fonts, state) == relatorio::Acao::Voltar {
-                *pedido = Some(Pedido::FecharRelatorio);
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::CampoFit) => {
+            if campo_fit::render(ui, fonts, state, focar) {
+                *pedido = Some(Pedido::FecharCampo);
+            }
+        }
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::Relatorio) => match relatorio::render(ui, fonts, state) {
+            relatorio::Acao::Voltar => *pedido = Some(Pedido::FecharRelatorio),
+            relatorio::Acao::AbrirFicha(player_id) => *pedido = Some(Pedido::AbrirFicha(player_id)),
+            relatorio::Acao::Nenhuma => {}
+        },
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::FichaJogador) => match ficha_jogador::render(ui, fonts, state) {
+            ficha_jogador::Acao::Voltar => *pedido = Some(Pedido::FecharFicha),
+            ficha_jogador::Acao::Comparar => {
+                *pedido = Some(Pedido::AbrirCampo(Satelite::SeletorElenco(ContextoSeletor::ComparacaoFicha)));
+            }
+            ficha_jogador::Acao::Arquivou => *pedido = Some(Pedido::ArquivouDaFicha),
+            ficha_jogador::Acao::Nenhuma => {}
+        },
+        CarreiraStatus::Pronta(_) if matches!(tela, ScoutScreen::Satelite(Satelite::SeletorElenco(_))) => {
+            let contexto = match tela {
+                ScoutScreen::Satelite(Satelite::SeletorElenco(c)) => c,
+                _ => ContextoSeletor::ComparacaoFicha,
+            };
+            if seletor_elenco::render(ui, fonts, state, contexto, focar) {
+                *pedido = Some(Pedido::FecharCampo);
             }
         }
         CarreiraStatus::Pronta(_) => match aba {

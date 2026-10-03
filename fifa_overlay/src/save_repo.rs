@@ -43,8 +43,8 @@ use crate::fifa_db::{self, TableDescriptor};
 use crate::memscan::{self, Region};
 
 pub use jogadores::{
-    funcao_da_posicao, ler_miniface, nome_posicao, read_all_players, read_nations, Atributo, Confederacao, Funcao, Nacao,
-    PlayerPool, PlayerRaw,
+    funcao_da_posicao, ler_miniface, nome_posicao, read_all_players, read_nations, read_squad_players, Atributo, Confederacao,
+    Funcao, Nacao, Pe, PlayerPool, PlayerRaw,
 };
 
 /// Short names (4 chars) das tabelas/campos que o `save_repo` lê.
