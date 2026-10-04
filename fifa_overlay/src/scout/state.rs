@@ -44,6 +44,7 @@ use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Confederacao, Funcao, Nacao};
 
+use super::cobertura::Cobertura;
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::Densidade;
 use super::persistence::{self, EstadoPersistido};
@@ -674,6 +675,8 @@ pub struct ScoutState {
     data_avisos: Option<Date>,
     /// Falha da última renovação/encerramento, por Missão (Story 2.10).
     erros_missao: HashMap<Uuid, ErroCompra>,
+    /// País escolhido no Sonar para o resumo (Story 4.2; não persiste).
+    pais_sonar: Option<u16>,
 }
 
 impl ScoutState {
@@ -713,6 +716,7 @@ impl ScoutState {
             vendo_arquivados: false,
             data_avisos: None,
             erros_missao: HashMap::new(),
+            pais_sonar: None,
         }
     }
 
@@ -761,6 +765,7 @@ impl ScoutState {
         self.cancelar_nova_missao();
         self.fechar_relatorio();
         self.vendo_arquivados = false;
+        self.pais_sonar = None;
     }
 
     /// Botão "Tentar novamente": localiza a carreira de novo.
@@ -1600,6 +1605,22 @@ impl ScoutState {
 
     pub fn ver_arquivados(&mut self, arquivados: bool) {
         self.vendo_arquivados = arquivados;
+    }
+
+    /// Cobertura do Sonar (Story 4.1), recalculada das Missões gravadas da
+    /// carreira pronta. `None` sem carreira pronta.
+    pub fn cobertura(&self) -> Option<Cobertura> {
+        let estado = self.estado_ativo()?;
+        Some(estado.ler(|dados| Cobertura::de(&dados.missoes)))
+    }
+
+    /// País do resumo do Sonar (Story 4.2).
+    pub fn pais_sonar(&self) -> Option<u16> {
+        self.pais_sonar
+    }
+
+    pub fn escolher_pais_sonar(&mut self, pais: u16) {
+        self.pais_sonar = Some(pais);
     }
 
     /// Pode arquivar: já foi aberto ao menos uma vez e a Missão terminou
@@ -2976,6 +2997,37 @@ mod tests {
         assert!(st.relatorios(true).is_empty());
         assert_eq!(st.missoes().len(), 1);
         assert!(!st.restaurar_relatorio(id), "já está na lista principal");
+    }
+
+    #[test]
+    fn the_sonar_counts_archived_reports_as_coverage_and_forgets_the_country_on_close() {
+        use crate::scout::cobertura::{Contagem, EstadoPais};
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let mut vencida = missao_com_prazo(&o, 20260701, 20260710);
+        vencida.filtros.paises = vec![54];
+        let mut ativa = missao_com_prazo(&o, 20260705, 20260801);
+        ativa.filtros.paises = vec![52];
+        let id_vencida = vencida.id;
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![vencida, ativa], &o);
+        assert!(st.cobertura().is_none(), "sem carreira pronta");
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+
+        let lista = st.relatorios(false);
+        let id = lista.iter().find(|r| r.relatorio.missao_id == id_vencida).expect("Relatório da vencida").relatorio.id;
+        st.abrir_relatorio(id);
+        st.fechar_relatorio();
+        assert!(st.arquivar_relatorio(id));
+        let cobertura = st.cobertura().expect("carreira pronta");
+        assert_eq!(cobertura.estado(54), EstadoPais::MissaoConcluida, "arquivar não apaga cobertura");
+        assert_eq!(cobertura.estado(52), EstadoPais::MissaoAtiva);
+        assert_eq!(cobertura.contagem(54), Contagem { ativas: 0, concluidas: 1 });
+
+        st.escolher_pais_sonar(54);
+        assert_eq!(st.pais_sonar(), Some(54));
+        st.ao_fechar_painel();
+        assert_eq!(st.pais_sonar(), None);
     }
 
     #[test]

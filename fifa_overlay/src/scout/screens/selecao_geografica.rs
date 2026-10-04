@@ -26,15 +26,18 @@ pub fn nome_amplitude(amplitude: AmplitudeGeografica) -> &'static str {
     }
 }
 
+/// Nome de um quadro do mapa (também usado pelo resumo do Sonar).
+pub fn nome_pais(id: u16, nacoes: &[Nacao]) -> String {
+    if id == NACAO_OUTROS {
+        return "Outros".to_string();
+    }
+    nacoes.iter().find(|n| n.id == id).map_or_else(|| format!("País {id}"), |n| n.nome.clone())
+}
+
 /// Resumo da seleção para a linha do formulário: "Todos os países",
 /// "Brazil", "Brazil, Argentina", "Brazil, Argentina e mais 3".
 pub fn resumo_paises(paises: &[u16], nacoes: &[Nacao]) -> String {
-    let nome = |id: &u16| -> String {
-        if *id == NACAO_OUTROS {
-            return "Outros".to_string();
-        }
-        nacoes.iter().find(|n| n.id == *id).map_or_else(|| format!("País {id}"), |n| n.nome.clone())
-    };
+    let nome = |id: &u16| nome_pais(*id, nacoes);
     match paises {
         [] => "Todos os países".to_string(),
         [um] => nome(um),
@@ -88,7 +91,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
                     }
                 };
                 ui.child_window("##mapa").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
-                    alternar = cartograma::render(ui, fonts, nacoes, &estado);
+                    alternar = cartograma::render(ui, fonts, nacoes, &estado).ativado;
                 });
             }
         }

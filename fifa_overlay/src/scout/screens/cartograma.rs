@@ -9,7 +9,7 @@
 
 use imgui::Ui;
 
-use super::componentes::texto_em;
+use super::componentes::{focado_pelo_controle, texto_em};
 use super::relatorio::truncar;
 use super::theme::{self, Fonts};
 use super::{com_fonte, ESPESSURA_FOCO};
@@ -26,11 +26,33 @@ pub enum EstadoQuadro {
     /// Escolhido no filtro (roxo, contorno + preenchimento tênue).
     Selecionado,
     /// Sonar: há Missão ativa no país (roxo).
-    #[allow(dead_code)] // Épico 4
     MissaoAtiva,
     /// Sonar: Missão concluída, Relatório disponível (verde).
-    #[allow(dead_code)] // Épico 4
     MissaoConcluida,
+}
+
+/// Fundo, borda, espessura da borda e cor do texto de um estado (também
+/// usados pela legenda do Sonar, para amostra e quadro nunca divergirem).
+pub fn cores(estado: EstadoQuadro) -> ([f32; 4], [f32; 4], f32, [f32; 4]) {
+    match estado {
+        EstadoQuadro::Livre => (theme::BG_PANEL_RAISED, theme::BORDER_HAIRLINE_SUBTLE, 1.0, theme::TEXT_SECONDARY),
+        EstadoQuadro::Selecionado | EstadoQuadro::MissaoAtiva => {
+            (theme::ACCENT_PRIMARY_DIM, theme::ACCENT_PRIMARY, ESPESSURA_FOCO, theme::TEXT_PRIMARY)
+        }
+        EstadoQuadro::MissaoConcluida => (theme::FIELD_GREEN_DIM, theme::FIELD_GREEN, ESPESSURA_FOCO, theme::TEXT_PRIMARY),
+    }
+}
+
+/// Amostra de legenda: um quadrinho no estilo do estado, do tamanho da
+/// linha de texto, alinhado com o texto que vem depois (`same_line`).
+pub fn amostra(ui: &Ui, estado: EstadoQuadro, lado: f32) {
+    let min = ui.cursor_screen_pos();
+    let max = [min[0] + lado, min[1] + lado];
+    let (fundo, borda, espessura, _) = cores(estado);
+    let dl = ui.get_window_draw_list();
+    dl.add_rect(min, max, fundo).filled(true).rounding(theme::RAIO_SM).build();
+    dl.add_rect(min, max, borda).rounding(theme::RAIO_SM).thickness(espessura).build();
+    ui.dummy([lado, lado]);
 }
 
 /// Nações de um continente, por nome.
@@ -40,10 +62,20 @@ pub fn do_continente(nacoes: &[Nacao], continente: Confederacao) -> Vec<&Nacao> 
     lista
 }
 
-/// Desenha o cartograma; devolve o id do quadro ativado neste frame
-/// (`NACAO_OUTROS` para "Outros").
-pub fn render(ui: &Ui, fonts: Option<&Fonts>, nacoes: &[Nacao], estado_de: &dyn Fn(u16) -> EstadoQuadro) -> Option<u16> {
-    let mut ativado = None;
+/// O que aconteceu no cartograma neste frame (ids de quadro;
+/// `NACAO_OUTROS` para "Outros").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Resposta {
+    /// Clicado, ou A no controle.
+    pub ativado: Option<u16>,
+    /// Com o foco do controle/teclado (o Sonar trata foco = escolha; a
+    /// seleção do filtro, não, senão andar pelo mapa marcaria países).
+    pub focado: Option<u16>,
+}
+
+/// Desenha o cartograma.
+pub fn render(ui: &Ui, fonts: Option<&Fonts>, nacoes: &[Nacao], estado_de: &dyn Fn(u16) -> EstadoQuadro) -> Resposta {
+    let mut resposta = Resposta::default();
     for continente in Confederacao::TODAS {
         let lista = do_continente(nacoes, continente);
         let com_outros = continente == Confederacao::Outras;
@@ -63,11 +95,14 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, nacoes: &[Nacao], estado_de: &dyn 
                 ui.same_line_with_spacing(0.0, theme::ESPACO_1);
             }
             if quadro(ui, fonts, id, nome, estado_de(id)) {
-                ativado = Some(id);
+                resposta.ativado = Some(id);
+            }
+            if focado_pelo_controle(ui) {
+                resposta.focado = Some(id);
             }
         }
     }
-    ativado
+    resposta
 }
 
 fn quadro(ui: &Ui, fonts: Option<&Fonts>, id: u16, nome: &str, estado: EstadoQuadro) -> bool {
@@ -76,13 +111,7 @@ fn quadro(ui: &Ui, fonts: Option<&Fonts>, id: u16, nome: &str, estado: EstadoQua
     let max = [min[0] + LARGURA_QUADRO, min[1] + ALTURA_QUADRO];
     let ativou = ui.invisible_button("##pais", [LARGURA_QUADRO, ALTURA_QUADRO]);
     let foco = ui.is_item_hovered() || (ui.is_item_focused() && ui.io().nav_visible);
-    let (fundo, borda, espessura, texto) = match estado {
-        EstadoQuadro::Livre => (theme::BG_PANEL_RAISED, theme::BORDER_HAIRLINE_SUBTLE, 1.0, theme::TEXT_SECONDARY),
-        EstadoQuadro::Selecionado | EstadoQuadro::MissaoAtiva => {
-            (theme::ACCENT_PRIMARY_DIM, theme::ACCENT_PRIMARY, ESPESSURA_FOCO, theme::TEXT_PRIMARY)
-        }
-        EstadoQuadro::MissaoConcluida => (theme::FIELD_GREEN_DIM, theme::FIELD_GREEN, ESPESSURA_FOCO, theme::TEXT_PRIMARY),
-    };
+    let (fundo, borda, espessura, texto) = cores(estado);
     let dl = ui.get_window_draw_list();
     dl.add_rect(min, max, fundo).filled(true).rounding(theme::RAIO_SM).build();
     dl.add_rect(min, max, borda).rounding(theme::RAIO_SM).thickness(espessura).build();
