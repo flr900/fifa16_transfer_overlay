@@ -411,6 +411,7 @@ fn campo_ritmo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, nome: &st
 /// Pé preferido: Qualquer / Direito / Esquerdo / Ambidestro (escolha
 /// única: foco = escolha, como o Modo de Busca).
 fn campo_pe(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pe: Option<FiltroPe>) {
+    let _id = ui.push_id("pe");
     let inicio = ui.cursor_pos();
     rotulo(ui, fonts, "Pé");
     ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
@@ -440,6 +441,11 @@ fn campo_pe(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pe: Option<F
 /// Atalhos de filtro (2026-10-03): um clique monta uma busca comum
 /// (mantém a geografia e o teto). O tooltip diz o que cada um faz.
 fn campo_atalhos(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
+    // Escopo de ID próprio em cada linha: rótulos se repetem entre linhas
+    // ("Muda patamar" é atalho e nível; "Qualquer" é nível e pé) e, sem
+    // ele, o ImGui via os dois como o mesmo botão: o foco do controle
+    // pulava de linha e o atalho parava de responder (2026-10-03).
+    let _id = ui.push_id("atalhos");
     let inicio = ui.cursor_pos();
     rotulo(ui, fonts, "Atalhos");
     ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
@@ -467,6 +473,7 @@ fn campo_atalhos(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
 /// Promessa (escolha única: foco = escolha). Embaixo, a régua: os
 /// titulares do elenco por posição.
 fn campo_nivel(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, nivel: Option<NivelEquipe>) {
+    let _id = ui.push_id("nivel");
     let inicio = ui.cursor_pos();
     rotulo(ui, fonts, "Nível no elenco");
     ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
@@ -518,6 +525,7 @@ fn secao(ui: &Ui, fonts: Option<&Fonts>, titulo: &str) {
 /// Posições procuradas: um botão por grupo (multisseleção: cada um entra ou
 /// sai ao ser ativado; nenhum = todas). O nome inteiro vai no tooltip.
 fn campo_posicoes(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, escolhidas: &[Perfil]) {
+    let _id = ui.push_id("posicoes");
     let inicio = ui.cursor_pos();
     rotulo(ui, fonts, "Posições");
     ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
@@ -664,6 +672,7 @@ pub fn resumo_detalhes(f: &FiltrosMissao) -> String {
 /// Modo de Busca e Duração na mesma linha (escolha única em cada grupo:
 /// foco = escolha), com a explicação dos dois embaixo.
 fn campo_busca(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: ModoBusca, continua: bool) {
+    let _id = ui.push_id("busca");
     let inicio = ui.cursor_pos();
     rotulo(ui, fonts, "Modo e duração");
     ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
