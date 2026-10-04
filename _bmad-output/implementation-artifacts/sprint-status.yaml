@@ -1,5 +1,5 @@
 # generated: 2026-09-30
-# last_updated: 2026-10-01
+# last_updated: 2026-10-03
 # project: Central de Scout (FIFA 16 Companion)
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-09-30
-last_updated: 2026-10-01
+last_updated: 2026-10-03
 project: Central de Scout (FIFA 16 Companion)
 project_key: NOKEY
 tracking_system: file-system
@@ -71,12 +71,13 @@ development_status:
   2-10-follow-a-partial-relatorio-and-run-continuous-missoes: review
   epic-2-retrospective: optional
 
-  epic-3: backlog
-  3-1-open-a-players-ficha-with-the-radar-de-atributos: backlog
-  3-2-compare-a-found-player-with-a-squad-player: backlog
-  3-3-filter-a-missao-by-jogador-de-referencia: backlog
-  3-4-filter-a-missao-by-fit-posicional: backlog
-  3-5-see-fit-posicional-in-the-relatorio: backlog
+  epic-3: in-progress
+  3-1-open-a-players-ficha-with-the-radar-de-atributos: review
+  3-2-compare-a-found-player-with-a-squad-player: review
+  3-3-filter-a-missao-by-jogador-de-referencia: review
+  3-4-filter-a-missao-by-fit-posicional: review
+  3-5-see-fit-posicional-in-the-relatorio: review
+  3-6-post-test-adjustments-leagues-olheiro-first-and-new-filters: review
   epic-3-retrospective: optional
 
   epic-4: backlog

@@ -39,11 +39,7 @@ pub fn detalhe_card(item: &RelatorioNaLista) -> String {
 
 /// Desenha a aba; devolve o Relatório a abrir, se algum foi ativado.
 pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Option<Uuid> {
-    // Tabular / Cards sempre visível no topo (Story 2.6): vale para os
-    // Relatórios abertos a partir daqui.
-    super::relatorio::alternador_densidade(ui, fonts, state);
     // Lista principal / "Arquivados" (Story 2.7).
-    ui.same_line_with_spacing(0.0, theme::ESPACO_5);
     let arquivados = state.vendo_arquivados();
     if let Some(indice) = componentes::alternador(ui, fonts, &["Ativos", "Arquivados"], usize::from(arquivados), 130.0) {
         state.ver_arquivados(indice == 1);

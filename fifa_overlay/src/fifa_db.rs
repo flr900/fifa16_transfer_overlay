@@ -62,8 +62,8 @@ pub fn read_int_field(record: &[u8], field: &FieldDescriptor, range_low: i64) ->
     read_packed_int(record, field.bit_offset, field.depth).map(|v| i64::from(v) + range_low)
 }
 
-/// String fixa inline (storage_type 0): corta no primeiro `\0`; bytes
-/// inválidos viram `�`.
+/// String fixa inline (storage_type 0): corta no primeiro `\0`. UTF-8 ou
+/// Latin-1 (ver `texto`).
 pub fn read_fixed_string(record: &[u8], field: &FieldDescriptor) -> Option<String> {
     if field.storage_type != 0 || field.bit_offset % 8 != 0 {
         return None;
@@ -71,7 +71,18 @@ pub fn read_fixed_string(record: &[u8], field: &FieldDescriptor) -> Option<Strin
     let start = (field.bit_offset / 8) as usize;
     let bytes = record.get(start..start + (field.depth / 8) as usize)?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    Some(String::from_utf8_lossy(bytes.get(..end)?).into_owned())
+    Some(texto(bytes.get(..end)?))
+}
+
+/// Bytes de texto do banco: UTF-8 quando válido; senão Latin-1. O banco do
+/// FIFA Friends grava nomes de times e ligas em Latin-1 ("São Caetano",
+/// "Brasileirão"): lidos só como UTF-8, os acentos viravam `�`
+/// (2026-10-03).
+pub fn texto(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+    }
 }
 
 /// Bloco de strings Huffman de uma tabela (ex.: `BGwe.name` no banco
@@ -131,7 +142,7 @@ impl<'a> HuffmanStrings<'a> {
         };
         if self.nodes.is_empty() {
             let bytes = self.data.get(cur..cur.checked_add(length)?.min(self.end))?;
-            return Some(String::from_utf8_lossy(bytes).into_owned());
+            return Some(texto(bytes));
         }
         let mut out = Vec::with_capacity(length);
         let mut node = 0usize;
@@ -155,7 +166,7 @@ impl<'a> HuffmanStrings<'a> {
                 }
             }
         }
-        Some(String::from_utf8_lossy(&out).into_owned())
+        Some(texto(&out))
     }
 }
 

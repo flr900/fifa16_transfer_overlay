@@ -43,8 +43,8 @@ use crate::fifa_db::{self, TableDescriptor};
 use crate::memscan::{self, Region};
 
 pub use jogadores::{
-    funcao_da_posicao, ler_miniface, nome_posicao, read_all_players, read_nations, Atributo, Confederacao, Funcao, Nacao,
-    PlayerPool, PlayerRaw,
+    funcao_da_posicao, ler_miniface, nome_posicao, read_all_players, read_nations, read_squad_players, Atributo, Confederacao,
+    Funcao, Liga, Nacao, Pe, PlayerPool, PlayerRaw, RitmoTrabalho, read_leagues,
 };
 
 /// Short names (4 chars) das tabelas/campos que o `save_repo` lê.
@@ -1099,8 +1099,8 @@ fn write_budget_at(
     Ok(relido)
 }
 
-/// `dqXv.wagebudget` VIVO (vizinho do orçamento na mesma struct).
-#[allow(dead_code)] // API do repositório; ainda sem tela que mostre
+/// `dqXv.wagebudget` VIVO (vizinho do orçamento na mesma struct): a folha
+/// salarial semanal disponível — o limite de salário "do clube" da busca.
 pub fn read_wage_budget() -> Result<i32, SaveRepoError> {
     with_live(|live| live_finances(live, &ProcessMemory).map(|(_, wage)| wage))
 }
@@ -1201,6 +1201,15 @@ pub fn read_current_date() -> Result<Date, SaveRepoError> {
 /// ESCOLHIDO pela memória do processo, não pelo `mtime` (AD-11).
 pub fn read_career_identity() -> Result<CareerIdentity, SaveRepoError> {
     with_live(|live| Ok(live.save.identity.clone()))
+}
+
+/// Data (`GJUr.currdate`) gravada no save que o jogo carregou — o ponto
+/// para onde o Scout "volta no tempo" se o jogador sair sem salvar e
+/// carregar de novo. Não é a data viva: logo depois do load a data viva
+/// ainda mostra o dia anterior (sessão 6). Trazido da branch
+/// `claude/relatorio-ficha` (2026-10-01).
+pub fn read_saved_date() -> Result<Date, SaveRepoError> {
+    with_live(|live| Ok(live.save.saved_date))
 }
 
 /// SHA-256 (hex minúsculo) de `startdate|firstname|surname|clubteamid`

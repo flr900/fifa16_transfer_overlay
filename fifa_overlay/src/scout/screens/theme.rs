@@ -37,6 +37,8 @@ pub const TEXT_SECONDARY: [f32; 4] = rgba(0x869488, 1.0);
 pub const TEXT_DISABLED: [f32; 4] = rgba(0x4d564f, 1.0);
 pub const ACCENT_PRIMARY: [f32; 4] = rgba(0xb45cff, 1.0);
 pub const ACCENT_PRIMARY_DIM: [f32; 4] = rgba(0xb45cff, 0.13);
+/// Faixa revelada no Radar de Atributos (roxo mais forte que o `DIM`).
+pub const ACCENT_PRIMARY_DIM_FORTE: [f32; 4] = rgba(0xb45cff, 0.45);
 pub const FIELD_GREEN: [f32; 4] = rgba(0x3ecf6e, 1.0);
 /// Fundo tênue de badges verdes ("NOVO").
 pub const FIELD_GREEN_DIM: [f32; 4] = rgba(0x3ecf6e, 0.12);
@@ -93,8 +95,10 @@ static INTER: &[u8] = include_bytes!("../../../assets/fonts/Inter-Variable.ttf")
 const CONSOLAS: &str = r"C:\Windows\Fonts\consola.ttf";
 
 /// Latin-1 (acentos do português) + pontuação geral (travessões, aspas
-/// curvas, reticências `…`) + `€`. Termina em 0, como o ImGui exige.
-static FAIXAS_DE_GLIFOS: [u32; 7] = [0x0020, 0x00FF, 0x2010, 0x2027, 0x20AC, 0x20AC, 0];
+/// curvas, reticências `…`, setas simples `‹ ›`) + `€` + `≈` (valores
+/// aproximados do Relatório). Termina em 0, como o ImGui exige. Até
+/// 2026-10-03 `‹ ›` e `≈` ficavam de fora e saíam como "?".
+static FAIXAS_DE_GLIFOS: [u32; 9] = [0x0020, 0x00FF, 0x2010, 0x203A, 0x20AC, 0x20AC, 0x2248, 0x2248, 0];
 
 /// Fontes já registradas no atlas do ImGui, uma por papel tipográfico.
 #[derive(Debug, Clone, Copy)]
@@ -176,18 +180,21 @@ pub fn carregar_fontes(ctx: &mut Context) -> FontSlots {
         atlas.add_font(&[source]);
         atlas.fonts().len().saturating_sub(1)
     };
-    let body = adicionar(fonte(INTER, 17.0));
-    let meta = adicionar(fonte(INTER, 14.0));
-    let heading = adicionar(fonte(OSWALD_MEDIUM, 21.0));
-    let display = adicionar(fonte(OSWALD_SEMIBOLD, 30.0));
-    let badge = adicionar(fonte(OSWALD_SEMIBOLD, 13.0));
+    // Tamanhos aumentados em 2026-10-01 na branch `claude/relatorio-ficha`
+    // (pedido do Felipe: legibilidade a 2560×1080, sentado longe da tela):
+    // ~+12%; trazidos para cá em 2026-10-03.
+    let body = adicionar(fonte(INTER, 19.0));
+    let meta = adicionar(fonte(INTER, 16.0));
+    let heading = adicionar(fonte(OSWALD_MEDIUM, 23.0));
+    let display = adicionar(fonte(OSWALD_SEMIBOLD, 34.0));
+    let badge = adicionar(fonte(OSWALD_SEMIBOLD, 14.0));
 
     // O ImGui guarda o ponteiro dos dados da fonte enquanto o atlas
     // existir; o vazamento (uma vez, ~400 KB) dá a eles vida `'static`.
     let mono = match std::fs::read(CONSOLAS) {
         Ok(bytes) => {
             let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-            Some(adicionar(fonte(bytes, 16.0)))
+            Some(adicionar(fonte(bytes, 18.0)))
         }
         Err(err) => {
             tracing::warn!("[scout::theme] Consolas indisponível ({err}); colunas numéricas usam Inter.");

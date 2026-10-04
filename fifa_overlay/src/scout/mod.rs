@@ -9,10 +9,12 @@
 //!   dentro de `render()`, com detecção de borda. Segurar a tecla alterna o
 //!   painel UMA vez, só na transição solta→pressionada.
 //!
-//! Controle (Story 1.6, revisto em 2026-10-01): o mesmo vale para o combo
-//! `COMBO_PAINEL`. Com o painel aberto, só LB/RB trocam de aba (numa aba
-//! sem tela satélite); B volta uma tela (fecha o modal; na raiz, fecha o
-//! painel); D-pad/analógico (inclusive ←/→) e A são a navegação do
+//! Controle (Story 1.6, revisto em 2026-10-01 e 2026-10-03): o mesmo vale
+//! para o combo `COMBO_PAINEL`. Com o painel aberto, só LB/RB trocam de
+//! aba — de qualquer tela; com a Nova Missão aberta, o jogador confirma
+//! antes que o rascunho será descartado (`pedir_troca_de_aba`); o
+//! analógico direito rola a tela; B volta uma tela (fecha o modal; na
+//! raiz, fecha o painel); D-pad/analógico (inclusive ←/→) e A são a navegação do
 //! próprio ImGui (`gamepad::para_navegacao`). A barra de abas não recebe
 //! foco do controle; ao abrir o painel, trocar de aba ou de tela, o foco
 //! vai para o primeiro item da tela (`Navigation::tomar_foco_pendente`). Enquanto o painel está aberto, e depois de fechar até
@@ -98,17 +100,34 @@ impl Aba {
 }
 
 /// Telas que abrem POR CIMA de uma aba (nomes do Structural Seed).
-#[allow(dead_code)] // FichaJogador chega no Épico 3
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Satelite {
     ConfirmacaoContratacao,
+    /// As 12 ofertas de Olheiro (aba Olheiros → "Contratar Olheiro").
+    ContratarOlheiro,
+    /// Nova Missão, passo 1: escolher o Olheiro (2026-10-03).
+    EscolherOlheiro,
     NovaMissao,
     SelecaoGeografica,
+    /// Ficha de um jogador do Relatório aberto (Story 3.1).
     FichaJogador,
     /// Relatório aberto (Story 2.5), a partir de Missões ou Relatórios.
     Relatorio,
     /// Painel de campo "Atributo dominante" sobre o formulário (Story 2.8).
     CampoAtributo,
+    /// Painel de campo "Fit Posicional" sobre o formulário (Story 3.4).
+    CampoFit,
+    /// O seletor de elenco, um só para os dois papéis (AD-13).
+    SeletorElenco(ContextoSeletor),
+}
+
+/// Para que o seletor de elenco foi aberto (AD-13): o rótulo da tela diz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextoSeletor {
+    /// Jogador de Referência do formulário Nova Missão (Story 3.3).
+    FiltroMissao,
+    /// Jogador a sobrepor no Radar da Ficha (Story 3.2).
+    ComparacaoFicha,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,10 +137,11 @@ pub enum ScoutScreen {
 }
 
 /// Máximo de telas satélite empilhadas sobre a aba. AD-6 fala em
-/// "profundidade máxima de 2" e o EXPERIENCE.md cita um caso de dois
-/// níveis (Formulário Nova Missão → Painel de Seleção Geográfica), então
-/// a pilha tem no máximo `[aba, satélite, satélite]`.
-pub const MAX_SATELITES: usize = 2;
+/// "profundidade máxima de 2" (Formulário Nova Missão → Painel de Seleção
+/// Geográfica); o Épico 3 precisa de 3 — Relatório → Ficha → seletor de
+/// elenco (emenda do AD-6, Story 3.2). A pilha tem no máximo `[aba,
+/// satélite, satélite, satélite]`.
+pub const MAX_SATELITES: usize = 3;
 
 /// Pilha de navigação (AD-6). Nunca vazia: `stack[0]` é a aba ativa.
 #[derive(Debug, Clone, PartialEq)]
@@ -159,6 +179,12 @@ impl Navigation {
     /// Tela no topo da pilha (a que está visível).
     pub fn tela_atual(&self) -> ScoutScreen {
         self.stack.last().copied().unwrap_or(ScoutScreen::Aba(Aba::Olheiros))
+    }
+
+    /// Tela logo abaixo do topo (a que aparece por baixo de um modal).
+    pub fn tela_abaixo(&self) -> ScoutScreen {
+        let n = self.stack.len();
+        self.stack.get(n.saturating_sub(2)).copied().unwrap_or(ScoutScreen::Aba(self.aba_ativa()))
     }
 
     #[allow(dead_code)]
@@ -268,6 +294,9 @@ impl Scout {
     pub fn frame(&mut self, ui: &Ui, fonts: Option<&Fonts>, controle: Option<EstadoControle>) {
         let alternou = self.atualizar_atalho(tecla_pressionada(ATALHO_PAINEL));
         self.aplicar_controle(controle.unwrap_or_default(), alternou);
+        let ry = controle.map_or(0, |c| c.ry);
+        let rolagem = if self.painel_aberto { crate::gamepad::rolagem_do_analogico(ry) } else { 0.0 };
+        self.state.definir_rolagem(rolagem);
         self.state.tick();
         self.aplicar_aba_restaurada();
         if self.painel_aberto {
@@ -286,15 +315,22 @@ impl Scout {
         if comandos.alternar_painel && !ja_alternou {
             self.alternar_painel();
         } else if self.painel_aberto {
-            let na_raiz = self.nav.profundidade() == 1;
-            if na_raiz && (comandos.aba_anterior || comandos.proxima_aba) {
-                let passo = if comandos.proxima_aba { 1 } else { -1 };
-                let aba = self.nav.aba_ativa().vizinha(passo);
-                self.nav.trocar_aba(aba);
-                self.state.definir_aba_ativa(aba);
-            }
-            if comandos.voltar {
-                self.voltar();
+            if self.state.troca_de_aba_pendente().is_some() {
+                // aviso "Sair da Nova Missão?" aberto: B continua editando;
+                // A é dos botões do aviso (ImGui)
+                if comandos.voltar {
+                    self.state.definir_troca_de_aba_pendente(None);
+                    self.nav.pedir_foco();
+                }
+            } else {
+                if comandos.aba_anterior || comandos.proxima_aba {
+                    let passo = if comandos.proxima_aba { 1 } else { -1 };
+                    let aba = self.nav.aba_ativa().vizinha(passo);
+                    pedir_troca_de_aba(&mut self.nav, &mut self.state, aba);
+                }
+                if comandos.voltar {
+                    self.voltar();
+                }
             }
         }
 
@@ -317,6 +353,12 @@ impl Scout {
                     Satelite::ConfirmacaoContratacao => self.state.cancelar_contratacao(),
                     Satelite::NovaMissao => self.state.cancelar_nova_missao(),
                     Satelite::Relatorio => self.state.fechar_relatorio(),
+                    Satelite::FichaJogador => self.state.fechar_ficha(),
+                    // na árvore geográfica, B sobe um nível antes de sair
+                    Satelite::SelecaoGeografica if self.state.subir_foco_geografico() => {
+                        self.nav.pedir_foco();
+                        return;
+                    }
                     _ => {}
                 }
                 self.nav.pop();
@@ -347,6 +389,29 @@ impl Scout {
     }
 }
 
+/// Troca de aba pedida por LB/RB ou pela barra de abas, de qualquer tela.
+/// Com a Nova Missão aberta (filtros ainda não confirmados), só marca a
+/// troca como pendente: o painel pergunta se o jogador quer descartar o
+/// rascunho. Senão, troca já.
+pub fn pedir_troca_de_aba(nav: &mut Navigation, state: &mut ScoutState, aba: Aba) {
+    if nav.contem(Satelite::NovaMissao) {
+        state.definir_troca_de_aba_pendente(Some(aba));
+        return;
+    }
+    trocar_aba_agora(nav, state, aba);
+}
+
+/// Troca de aba descartando o que estava aberto (contratação, rascunho de
+/// Missão, Relatório e Ficha).
+pub fn trocar_aba_agora(nav: &mut Navigation, state: &mut ScoutState, aba: Aba) {
+    state.definir_troca_de_aba_pendente(None);
+    state.cancelar_contratacao();
+    state.cancelar_nova_missao();
+    state.fechar_relatorio();
+    nav.trocar_aba(aba);
+    state.definir_aba_ativa(aba);
+}
+
 /// Estado físico da tecla agora (bit mais alto de `GetAsyncKeyState`).
 fn tecla_pressionada(tecla: VIRTUAL_KEY) -> bool {
     let estado = unsafe { GetAsyncKeyState(i32::from(tecla.0)) };
@@ -369,16 +434,18 @@ mod tests {
     }
 
     #[test]
-    fn push_allows_two_satellites_and_refuses_the_third() {
-        let mut nav = Navigation::new(Aba::Missoes);
-        assert!(nav.push(Satelite::NovaMissao));
-        assert!(nav.push(Satelite::SelecaoGeografica));
-        assert!(!nav.push(Satelite::FichaJogador));
-        assert_eq!(nav.profundidade(), 3);
-        assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(Satelite::SelecaoGeografica));
+    fn push_allows_three_satellites_and_refuses_the_fourth() {
+        let mut nav = Navigation::new(Aba::Relatorios);
+        assert!(nav.push(Satelite::Relatorio));
+        assert!(nav.push(Satelite::FichaJogador));
+        let seletor = Satelite::SeletorElenco(ContextoSeletor::ComparacaoFicha);
+        assert!(nav.push(seletor));
+        assert!(!nav.push(Satelite::CampoFit));
+        assert_eq!(nav.profundidade(), 4);
+        assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(seletor));
         nav.pop();
-        assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(Satelite::NovaMissao));
-        assert_eq!(nav.aba_ativa(), Aba::Missoes);
+        assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(Satelite::FichaJogador));
+        assert_eq!(nav.aba_ativa(), Aba::Relatorios);
     }
 
     #[test]
@@ -453,6 +520,8 @@ mod tests {
                 data_atual: crate::save_repo::Date(20260703),
                 tecnico: "Senhor Manager".to_string(),
                 id_save: "ab".repeat(32),
+                data_do_save: crate::save_repo::Date(20260703),
+                folha_salarial: None,
             })
         }
     }
@@ -538,7 +607,40 @@ mod tests {
     }
 
     #[test]
-    fn lb_rb_switch_tabs_with_wraparound_only_at_the_root() {
+    fn lb_rb_switch_tabs_from_any_screen_but_ask_before_dropping_a_new_missao() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.nav.trocar_aba(Aba::Relatorios);
+        scout.nav.push(Satelite::Relatorio);
+        scout.nav.push(Satelite::FichaJogador);
+        scout.aplicar_controle(controle(botao::RB), false);
+        scout.aplicar_controle(controle(0), false);
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Sonar), "saiu da Ficha");
+        assert_eq!(scout.nav.profundidade(), 1);
+
+        // com a Nova Missão aberta: pergunta antes
+        scout.nav.trocar_aba(Aba::Missoes);
+        scout.nav.push(Satelite::EscolherOlheiro);
+        scout.nav.push(Satelite::NovaMissao);
+        scout.aplicar_controle(controle(botao::LB), false);
+        scout.aplicar_controle(controle(0), false);
+        assert_eq!(scout.state.troca_de_aba_pendente(), Some(Aba::Olheiros));
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Satelite(Satelite::NovaMissao), "ainda no formulário");
+        // B: continua editando
+        scout.aplicar_controle(controle(botao::B), false);
+        scout.aplicar_controle(controle(0), false);
+        assert_eq!(scout.state.troca_de_aba_pendente(), None);
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Satelite(Satelite::NovaMissao));
+        // confirmou o aviso: troca
+        scout.aplicar_controle(controle(botao::LB), false);
+        trocar_aba_agora(&mut scout.nav, &mut scout.state, Aba::Olheiros);
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Olheiros));
+        assert_eq!(scout.state.troca_de_aba_pendente(), None);
+    }
+
+    #[test]
+    fn lb_rb_switch_tabs_with_wraparound() {
         let mut scout = Scout::new();
         scout.aplicar_controle(controle(COMBO_PAINEL), false);
         scout.aplicar_controle(controle(0), false);
@@ -550,12 +652,12 @@ mod tests {
         scout.aplicar_controle(controle(botao::LB), false);
         assert_eq!(scout.nav.aba_ativa(), Aba::Sonar, "dá a volta");
 
-        // com uma tela satélite aberta, LB/RB não trocam de aba
+        // com uma tela satélite aberta, LB/RB também trocam (2026-10-03)
         scout.aplicar_controle(controle(0), false);
         scout.nav.push(Satelite::FichaJogador);
         scout.aplicar_controle(controle(botao::RB), false);
-        assert_eq!(scout.nav.aba_ativa(), Aba::Sonar);
-        assert_eq!(scout.nav.profundidade(), 2);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
+        assert_eq!(scout.nav.profundidade(), 1);
     }
 
     #[test]
@@ -580,19 +682,37 @@ mod tests {
     }
 
     #[test]
-    fn b_on_the_new_missao_form_goes_back_without_saving() {
+    fn b_on_the_new_missao_form_goes_back_to_the_olheiro_step_without_saving() {
         let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
         scout.aplicar_controle(controle(COMBO_PAINEL), false);
         scout.aplicar_controle(controle(0), false);
         scout.state.tick();
-        scout.state.abrir_nova_missao();
+        scout.nav.trocar_aba(Aba::Missoes);
+        scout.nav.push(Satelite::EscolherOlheiro);
         scout.nav.push(Satelite::NovaMissao);
-        assert!(scout.state.tem_nova_missao());
 
         scout.aplicar_controle(controle(botao::B), false);
-        assert!(scout.painel_aberto(), "B volta para a aba, não fecha o painel");
-        assert_eq!(scout.nav.profundidade(), 1);
+        assert!(scout.painel_aberto(), "B volta uma tela, não fecha o painel");
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Satelite(Satelite::EscolherOlheiro));
         assert!(!scout.state.tem_nova_missao());
+        assert_eq!(scout.nav.tela_abaixo(), ScoutScreen::Aba(Aba::Missoes));
+    }
+
+    #[test]
+    fn b_goes_back_from_the_squad_selector_to_the_ficha_and_then_to_the_report() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.nav.trocar_aba(Aba::Relatorios);
+        scout.nav.push(Satelite::Relatorio);
+        scout.nav.push(Satelite::FichaJogador);
+        scout.nav.push(Satelite::SeletorElenco(ContextoSeletor::ComparacaoFicha));
+        for esperado in [Satelite::FichaJogador, Satelite::Relatorio] {
+            scout.aplicar_controle(controle(botao::B), false);
+            scout.aplicar_controle(controle(0), false);
+            assert_eq!(scout.nav.tela_atual(), ScoutScreen::Satelite(esperado));
+        }
+        assert!(scout.painel_aberto());
     }
 
     #[test]

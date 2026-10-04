@@ -1,35 +1,44 @@
-//! Formulário Nova Missão (Story 2.2, UX-DR10): tela satélite sobre a aba
-//! Missões, em lista vertical estilo menu de console — uma linha por campo
-//! (Olheiro, Overall, Potencial, Modo de Busca) — e um rodapé FIXO com
-//! custo, prazo e Qualidade, recalculados a cada mudança pela tabela de
-//! `scout::quality` (síncrono, sem `save_repo` — AD-4).
+//! Formulário Nova Missão (Story 2.2, UX-DR10): tela satélite em lista
+//! vertical estilo menu de console — uma linha por campo — e um rodapé
+//! FIXO com custo, prazo e Qualidade, recalculados a cada mudança pela
+//! tabela de `scout::quality` (síncrono, sem `save_repo` — AD-4).
+//!
+//! Desde 2026-10-03 o Olheiro vem escolhido de antes (passo 1,
+//! `escolher_olheiro`, ou o clique nele na aba Olheiros) e o formulário
+//! abre com os filtros ideais da Especialização dele; "Restaurar sugestão"
+//! volta a eles. B volta ao passo anterior.
 //!
 //! A barra de abas e o cabeçalho continuam visíveis (é uma tela, não um
 //! modal). Confirmar debita o orçamento com as garantias da contratação
 //! (Story 1.5) e grava a Missão como `Pendente`; nenhuma busca roda agora
 //! (AD-8). B / "Cancelar" volta para a aba sem gravar nada.
 //!
-//! Filtro geográfico, atributo dominante, Fit Posicional e Jogador de
-//! Referência viram linhas desta lista nas Stories 2.8/2.9 e no Épico 3.
+//! Filtro geográfico e atributo dominante viraram linhas desta lista nas
+//! Stories 2.8/2.9; Fit Posicional (3.4) e Jogador de Referência (3.3), no
+//! Épico 3 — cada um abre um painel em tela cheia (o de referência é o
+//! seletor de elenco, AD-13).
 
 use imgui::{StyleColor, Ui};
 
-use super::componentes::{self, badge_qualidade, badge_tier, card, desenhar_badge, texto_em, EstiloBotao};
+use super::componentes::{self, badge_qualidade, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar, olheiros};
 use crate::scout::quality::TipoMissao;
-use crate::scout::Satelite;
+use crate::scout::{ContextoSeletor, Satelite};
+use crate::scout::quality;
 use crate::scout::state::{
-    BloqueioMissao, CampoFaixa, ErroCompra, FaixaAtributo, ModoBusca, OlheiroContratado, PreviaMissao, ScoutState,
+    Atalho, Atributo, BloqueioMissao, FiltrosMissao, Limite, NivelEquipe, Perfil, Carga, CampoFaixa, ErroCompra, FaixaAtributo, FiltroPe, ModoBusca, PreviaMissao, RitmoTrabalho,
+    ScoutState,
 };
 
 const ALTURA_RODAPE: f32 = 176.0;
 const LARGURA_ROTULO: f32 = 170.0;
-const ALTURA_OLHEIRO: f32 = 52.0;
 const LARGURA_VALOR: f32 = 44.0;
 const LARGURA_MODO: f32 = 150.0;
-const RAIO_RADIO: f32 = 7.0;
 const LARGURA_VALOR_CAMPO: f32 = 320.0;
+const LARGURA_RITMO: f32 = 120.0;
+const LARGURA_POSICAO: f32 = 64.0;
+const LARGURA_LIMITE: f32 = 190.0;
 
 pub const MSG_SEM_OLHEIRO: &str = "Nenhum Olheiro disponível.";
 
@@ -78,6 +87,15 @@ pub fn texto_bloqueio(bloqueio: BloqueioMissao) -> String {
         BloqueioMissao::FaixaInvalida { campo: CampoFaixa::PotencialMin | CampoFaixa::PotencialMax } => {
             "O Potencial mínimo não pode ser maior que o máximo.".to_string()
         }
+        BloqueioMissao::FaixaInvalida { campo: CampoFaixa::IdadeMin | CampoFaixa::IdadeMax } => {
+            "A idade mínima não pode ser maior que a máxima.".to_string()
+        }
+        BloqueioMissao::FaixaInvalida { campo: CampoFaixa::ContratoMin | CampoFaixa::ContratoMax } => {
+            "O contrato mínimo não pode ser maior que o máximo.".to_string()
+        }
+        BloqueioMissao::FaixaInvalida { campo: CampoFaixa::DribleMin | CampoFaixa::DribleMax } => {
+            "O mínimo de estrelas de drible não pode ser maior que o máximo.".to_string()
+        }
         BloqueioMissao::OrcamentoInsuficiente { faltam } => olheiros::texto_faltam(faltam),
     }
 }
@@ -107,8 +125,8 @@ pub fn texto_erro(erro: &ErroCompra) -> String {
 
 pub fn descricao_modo(modo: ModoBusca) -> &'static str {
     match modo {
-        ModoBusca::Rapida => "Mais nomes, Qualidade menor, termina antes.",
-        ModoBusca::Completa => "Menos nomes, Qualidade maior, leva mais tempo.",
+        ModoBusca::Rapida => "Resposta curta: poucos nomes, Qualidade menor, termina antes e custa menos.",
+        ModoBusca::Completa => "Varredura: muito mais nomes e Qualidade maior; leva mais tempo e custa mais.",
     }
 }
 
@@ -119,49 +137,93 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
 
     let mut campo = None;
     let altura_campos = (ui.content_region_avail()[1] - ALTURA_RODAPE).max(120.0);
+    let rolagem = state.rolagem();
     ui.child_window("##campos_nova_missao")
         .size([0.0, altura_campos])
         .border(false)
         .flags(super::flags_conteudo())
         .build(|| {
+            super::rolar_com_analogico(ui, rolagem);
             com_fonte(ui, fonts.map(|f| f.heading), || ui.text("Nova Missão"));
             ui.dummy([0.0, theme::ESPACO_2]);
-            campo_olheiro(ui, fonts, state, &previa);
-            divisor(ui);
-            campo_faixa(ui, fonts, state, "Overall", previa.rascunho.filtros.overall, CampoFaixa::OverallMin, CampoFaixa::OverallMax);
-            divisor(ui);
-            campo_faixa(
-                ui,
-                fonts,
-                state,
-                "Potencial",
-                previa.rascunho.filtros.potencial,
-                CampoFaixa::PotencialMin,
-                CampoFaixa::PotencialMax,
-            );
-            divisor(ui);
-            let nacoes = state.nacoes();
-            let paises = super::selecao_geografica::resumo_paises(
-                &previa.rascunho.filtros.paises,
-                nacoes.as_deref().map(Vec::as_slice).unwrap_or_default(),
-            );
-            if campo_painel(ui, fonts, "Filtro geográfico", &paises) {
+            cabecalho_olheiro(ui, fonts, state, &previa);
+            ui.dummy([0.0, theme::ESPACO_1]);
+            campo_atalhos(ui, fonts, state);
+            let f = &previa.rascunho.filtros;
+
+            secao(ui, fonts, "Onde");
+            let geografia = match state.listar_ligas() {
+                Carga::Pronto(ligas) => super::selecao_geografica::resumo_geografia(f, &ligas),
+                _ if f.tem_geografia() => "Lendo as ligas…".to_string(),
+                _ => "O mundo todo".to_string(),
+            };
+            if campo_painel(ui, fonts, "Filtro geográfico", &geografia) {
                 campo = Some(Satelite::SelecaoGeografica);
             }
-            if previa.rascunho.filtros.paises.is_empty() {
+
+            secao(ui, fonts, "Posição");
+            campo_posicoes(ui, fonts, state, &f.posicoes);
+
+            secao(ui, fonts, "Nível");
+            campo_nivel(ui, fonts, state, f.nivel_elenco);
+
+            secao(ui, fonts, "Orçamento");
+            campo_limite(ui, fonts, state, false, f.limite_valor, previa.teto, previa.orcamento_apos_missao);
+            ui.dummy([0.0, theme::ESPACO_1]);
+            campo_limite(ui, fonts, state, true, f.limite_salario, previa.teto_salario, previa.folha_disponivel);
+            ui.dummy([0.0, theme::ESPACO_1]);
+            campo_faixa(ui, fonts, state, "Contrato", f.contrato, CampoFaixa::ContratoMin, CampoFaixa::ContratoMax, "anos restantes");
+            com_fonte(ui, fonts.map(|f| f.meta), || {
                 ui.set_cursor_pos([ui.cursor_pos()[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-                com_fonte(ui, fonts.map(|f| f.meta), || {
-                    ui.text_colored(theme::TEXT_SECONDARY, super::selecao_geografica::MSG_TODOS)
-                });
+                ui.text_colored(theme::TEXT_SECONDARY, texto_contrato(f.contrato));
+            });
+
+            secao(ui, fonts, "Busca");
+            campo_busca(ui, fonts, state, previa.rascunho.modo, previa.rascunho.continua);
+
+            // Detalhes: fechados por padrão, com o resumo do que está ativo.
+            ui.dummy([0.0, theme::ESPACO_3]);
+            let abertos = state.detalhes_da_missao_abertos();
+            let rotulo_detalhes = if abertos { "Esconder detalhes" } else { "Mostrar detalhes" };
+            if componentes::botao(ui, fonts, rotulo_detalhes, EstiloBotao::Secundario, true) {
+                state.definir_detalhes_da_missao_abertos(!abertos);
             }
-            divisor(ui);
-            if campo_painel(ui, fonts, "Atributo dominante", &texto_atributo(previa.rascunho.filtros.atributo_dominante)) {
-                campo = Some(Satelite::CampoAtributo);
+            ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+            let y = ui.cursor_pos()[1];
+            com_fonte(ui, fonts.map(|f| f.meta), || {
+                ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
+                ui.text_colored(theme::TEXT_SECONDARY, resumo_detalhes(f));
+            });
+            if abertos {
+                secao(ui, fonts, "Detalhes");
+                campo_faixa(ui, fonts, state, "Idade", f.idade, CampoFaixa::IdadeMin, CampoFaixa::IdadeMax, "anos");
+                divisor(ui);
+                campo_faixa(ui, fonts, state, "Overall", f.overall, CampoFaixa::OverallMin, CampoFaixa::OverallMax, "");
+                divisor(ui);
+                campo_faixa(ui, fonts, state, "Potencial", f.potencial, CampoFaixa::PotencialMin, CampoFaixa::PotencialMax, "");
+                divisor(ui);
+                if campo_painel(ui, fonts, "Atributos dominantes", &texto_atributos(&f.atributos_dominantes)) {
+                    campo = Some(Satelite::CampoAtributo);
+                }
+                divisor(ui);
+                campo_ritmo(ui, fonts, state, "Ritmo no ataque", true, &f.ritmo_ataque);
+                divisor(ui);
+                campo_ritmo(ui, fonts, state, "Ritmo na defesa", false, &f.ritmo_defesa);
+                divisor(ui);
+                campo_faixa(ui, fonts, state, "Dribles", f.estrelas_drible, CampoFaixa::DribleMin, CampoFaixa::DribleMax, "estrelas");
+                divisor(ui);
+                campo_pe(ui, fonts, state, f.pe);
+                divisor(ui);
+                if campo_painel(ui, fonts, "Fit Posicional", &super::campo_fit::texto_fit(f.fit_posicional)) {
+                    campo = Some(Satelite::CampoFit);
+                }
+                divisor(ui);
+                let referencia = f.referencia.as_ref().map_or("Nenhum", |r| r.nome.as_str());
+                if campo_painel(ui, fonts, "Jogador de Referência", referencia) {
+                    campo = Some(Satelite::SeletorElenco(ContextoSeletor::FiltroMissao));
+                }
             }
-            divisor(ui);
-            campo_modo(ui, fonts, state, previa.rascunho.modo);
-            divisor(ui);
-            campo_duracao(ui, fonts, state, previa.rascunho.continua);
+            ui.dummy([0.0, theme::ESPACO_3]);
         });
 
     match (rodape(ui, fonts, state, &previa), campo) {
@@ -170,11 +232,38 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     }
 }
 
-/// Valor da linha "Atributo dominante".
-pub fn texto_atributo(atributo: Option<crate::scout::state::Atributo>) -> String {
-    match atributo {
-        Some(a) => a.nome().to_string(),
-        None => "Qualquer um".to_string(),
+/// Valor da linha "Atributos dominantes".
+pub fn texto_atributos(atributos: &[Atributo]) -> String {
+    if atributos.is_empty() {
+        return "Qualquer um".to_string();
+    }
+    atributos.iter().map(|a| a.nome()).collect::<Vec<_>>().join(" + ")
+}
+
+/// Explicação da faixa de contrato: "Termina nesta temporada", "De 1 a 3
+/// anos", "Qualquer contrato".
+pub fn texto_contrato(faixa: FaixaAtributo) -> String {
+    let anos = |n: u8| match n {
+        n if n >= quality::CONTRATO_MAIOR => format!("{n} anos ou mais"),
+        1 => "1 ano".to_string(),
+        n => format!("{n} anos"),
+    };
+    match (faixa.min, faixa.max) {
+        (0, m) if m >= quality::CONTRATO_MAIOR => "Qualquer contrato.".to_string(),
+        (0, 0) => "Contrato termina nesta temporada (sai mais barato ou de graça).".to_string(),
+        (0, m) => format!("Termina nesta temporada ou em até {}.", anos(m)),
+        (a, b) if a == b => format!("Faltam {}.", anos(a)),
+        (a, b) => format!("Faltam de {} a {}.", a, anos(b)),
+    }
+}
+
+/// Valor mostrado num stepper: o máximo do contrato é "5+".
+fn texto_valor(campo: CampoFaixa, valor: u8) -> String {
+    let (_, maior) = campo.limites();
+    if matches!(campo, CampoFaixa::ContratoMin | CampoFaixa::ContratoMax) && valor >= maior {
+        format!("{valor}+")
+    } else {
+        valor.to_string()
     }
 }
 
@@ -200,58 +289,44 @@ fn divisor(ui: &Ui) {
     ui.dummy([0.0, theme::ESPACO_2]);
 }
 
-/// Linha "Olheiro": um card por contratado; os "Em Missão" aparecem
-/// apagados e não são escolhíveis.
-fn campo_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
+/// O Olheiro escolhido no passo 1 (não muda aqui; B volta para trocar) e
+/// "Restaurar sugestão", que devolve os filtros ideais dele.
+fn cabecalho_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
+    let inicio = ui.cursor_pos();
     rotulo(ui, fonts, "Olheiro");
-    if !previa.olheiros.iter().any(|c| !c.em_missao) {
-        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_OLHEIRO));
-    }
-    for contratado in &previa.olheiros {
-        let escolhido = previa.rascunho.olheiro_id == Some(contratado.olheiro.id);
-        // clicar ou focar com o controle escolhe (foco = escolha)
-        let ativou = linha_olheiro(ui, fonts, contratado, escolhido);
-        if (ativou || componentes::focado_pelo_controle(ui)) && !escolhido && !contratado.em_missao {
-            state.escolher_olheiro_da_missao(contratado.olheiro.id);
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let escolhido = previa
+        .rascunho
+        .olheiro_id
+        .and_then(|id| previa.olheiros.iter().find(|c| c.olheiro.id == id))
+        .map(|c| c.olheiro.clone());
+    match escolhido {
+        Some(o) => {
+            olheiros::nome_com_badge(ui, fonts, o.especializacao, o.tier);
+            ui.same_line_with_spacing(0.0, theme::ESPACO_4);
+            if componentes::botao(ui, fonts, "Restaurar sugestão", EstiloBotao::Secundario, true) {
+                state.restaurar_filtros_ideais();
+            }
+            // Primeiro item da tela: com o foco do controle nele, rola até o
+            // topo (o título não é item; sem isso ele ficava escondido).
+            if componentes::focado_pelo_controle(ui) && ui.scroll_y() > 0.0 {
+                ui.set_scroll_y(0.0);
+            }
+            ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+            com_fonte(ui, fonts.map(|f| f.meta), || {
+                ui.text_colored(
+                    theme::TEXT_SECONDARY,
+                    format!("{} Os filtros abaixo já vêm com o que combina com ele.", olheiros::descricao(o.especializacao)),
+                )
+            });
         }
+        None => com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_OLHEIRO)),
     }
 }
 
-fn linha_olheiro(ui: &Ui, fonts: Option<&Fonts>, contratado: &OlheiroContratado, escolhido: bool) -> bool {
-    let borda = if escolhido { theme::BORDER_HAIRLINE } else { theme::BORDER_HAIRLINE_SUBTLE };
-    let c = card(ui, &contratado.olheiro.id.to_string(), ALTURA_OLHEIRO, borda);
-    let dl = ui.get_window_draw_list();
-    let ocupado = contratado.em_missao;
-    let cor_texto = if ocupado { theme::TEXT_DISABLED } else { theme::TEXT_PRIMARY };
-
-    // "Rádio": contorno sempre, miolo roxo quando escolhido.
-    let centro = [c.min[0] + theme::ESPACO_4 + RAIO_RADIO, (c.min[1] + c.max[1]) * 0.5];
-    dl.add_circle(centro, RAIO_RADIO, if ocupado { theme::TEXT_DISABLED } else { theme::ACCENT_PRIMARY })
-        .thickness(1.5)
-        .build();
-    if escolhido {
-        dl.add_circle(centro, RAIO_RADIO - 3.0, theme::ACCENT_PRIMARY).filled(true).build();
-    }
-
-    let x = centro[0] + RAIO_RADIO + theme::ESPACO_3;
-    let nome = contratado.olheiro.especializacao.nome();
-    let altura = com_fonte(ui, fonts.map(|f| f.heading), || ui.calc_text_size(nome)[1]);
-    let y = (c.min[1] + c.max[1] - altura) * 0.5;
-    let [largura_nome, _] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], cor_texto, nome);
-    desenhar_badge(ui, fonts, &dl, &badge_tier(contratado.olheiro.tier), [x + largura_nome + theme::ESPACO_2, y], altura);
-
-    let (status, cor) = match (ocupado, escolhido) {
-        (true, _) => ("Em Missão", theme::WARNING),
-        (false, true) => ("Escolhido", theme::ACCENT_PRIMARY),
-        (false, false) => ("Disponível", theme::FIELD_GREEN),
-    };
-    let largura_status = com_fonte(ui, fonts.map(|f| f.body), || ui.calc_text_size(status)[0]);
-    texto_em(ui, fonts.map(|f| f.body), &dl, [c.max[0] - theme::ESPACO_4 - largura_status, y], cor, status);
-    c.ativou
-}
-
-/// Linha de faixa: `[-] min [+]  até  [-] max [+]`. Segurar o botão (mouse
-/// ou A) repete o passo.
+/// Linha de faixa: `[-] min [+]  até  [-] max [+]  unidade`. Segurar o
+/// botão (mouse ou A) repete o passo.
+#[allow(clippy::too_many_arguments)]
 fn campo_faixa(
     ui: &Ui,
     fonts: Option<&Fonts>,
@@ -260,36 +335,43 @@ fn campo_faixa(
     faixa: FaixaAtributo,
     campo_min: CampoFaixa,
     campo_max: CampoFaixa,
+    unidade: &str,
 ) {
     let _id = ui.push_id(nome);
     let inicio = ui.cursor_pos();
     rotulo(ui, fonts, nome);
     ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
-    if let Some(delta) = stepper(ui, fonts, "min", faixa.min) {
+    if let Some(delta) = stepper(ui, fonts, "min", campo_min, faixa.min) {
         state.ajustar_faixa_da_missao(campo_min, delta);
     }
     ui.same_line_with_spacing(0.0, theme::ESPACO_4);
     rotulo(ui, fonts, "até");
     ui.same_line_with_spacing(0.0, theme::ESPACO_4);
-    if let Some(delta) = stepper(ui, fonts, "max", faixa.max) {
+    if let Some(delta) = stepper(ui, fonts, "max", campo_max, faixa.max) {
         state.ajustar_faixa_da_missao(campo_max, delta);
+    }
+    if !unidade.is_empty() {
+        ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+        rotulo(ui, fonts, unidade);
     }
     if !faixa.valida() {
         com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::DANGER, "Mínimo maior que o máximo."));
     }
 }
 
-/// `[-] valor [+]`; devolve o passo pedido neste frame.
-fn stepper(ui: &Ui, fonts: Option<&Fonts>, id: &str, valor: u8) -> Option<i32> {
+/// `[-] valor [+]`, dentro dos limites do campo; devolve o passo pedido
+/// neste frame.
+fn stepper(ui: &Ui, fonts: Option<&Fonts>, id: &str, campo: CampoFaixa, valor: u8) -> Option<i32> {
     let _id = ui.push_id(id);
     let _repetir = ui.push_button_repeat(true);
+    let (menor, maior) = campo.limites();
     let mut delta = None;
     let lado = Some(theme::ALVO_MINIMO);
-    if componentes::botao_com_largura(ui, fonts, "-##menos", EstiloBotao::Secundario, valor > FaixaAtributo::MENOR, lado) {
+    if componentes::botao_com_largura(ui, fonts, "-##menos", EstiloBotao::Secundario, valor > menor, lado) {
         delta = Some(-1);
     }
     ui.same_line_with_spacing(0.0, theme::ESPACO_2);
-    let texto = valor.to_string();
+    let texto = texto_valor(campo, valor);
     let mono = fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body));
     let inicio = ui.cursor_pos();
     com_fonte(ui, mono, || {
@@ -298,15 +380,301 @@ fn stepper(ui: &Ui, fonts: Option<&Fonts>, id: &str, valor: u8) -> Option<i32> {
         ui.text(&texto);
     });
     ui.same_line_with_spacing(inicio[0] + LARGURA_VALOR + theme::ESPACO_2, 0.0);
-    if componentes::botao_com_largura(ui, fonts, "+##mais", EstiloBotao::Secundario, valor < FaixaAtributo::MAIOR, lado) {
+    if componentes::botao_com_largura(ui, fonts, "+##mais", EstiloBotao::Secundario, valor < maior, lado) {
         delta = Some(1);
     }
     delta
 }
 
-fn campo_modo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: ModoBusca) {
+/// Ritmo de trabalho aceito (2026-10-03): Baixo / Médio / Alto, cada um
+/// entra ou sai ao ser ativado (aqui foco não é escolha: é multisseleção);
+/// nenhum marcado = qualquer.
+fn campo_ritmo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, nome: &str, ataque: bool, escolhidos: &[RitmoTrabalho]) {
+    let _id = ui.push_id(nome);
     let inicio = ui.cursor_pos();
-    rotulo(ui, fonts, "Modo de Busca");
+    rotulo(ui, fonts, nome);
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    for (indice, ritmo) in RitmoTrabalho::TODOS.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        let estilo = if escolhidos.contains(&ritmo) { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        if componentes::botao_com_largura(ui, fonts, ritmo.nome(), estilo, true, Some(LARGURA_RITMO)) {
+            state.alternar_ritmo_da_missao(ataque, ritmo);
+        }
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+    let texto = if escolhidos.is_empty() { "qualquer um" } else { "os marcados" };
+    rotulo(ui, fonts, texto);
+}
+
+/// Pé preferido: Qualquer / Direito / Esquerdo / Ambidestro (escolha
+/// única: foco = escolha, como o Modo de Busca).
+fn campo_pe(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pe: Option<FiltroPe>) {
+    let _id = ui.push_id("pe");
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Pé");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let opcoes: Vec<(Option<FiltroPe>, &str)> =
+        std::iter::once((None, "Qualquer")).chain(FiltroPe::TODOS.into_iter().map(|p| (Some(p), p.nome()))).collect();
+    for (indice, (opcao, nome)) in opcoes.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        let estilo = if opcao == pe { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        let clicou = componentes::botao_com_largura(ui, fonts, nome, estilo, true, Some(LARGURA_RITMO));
+        if (clicou || componentes::focado_pelo_controle(ui)) && opcao != pe {
+            state.definir_pe_da_missao(opcao);
+        }
+    }
+    if pe == Some(FiltroPe::Ambidestro) {
+        ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+        com_fonte(ui, fonts.map(|f| f.meta), || {
+            ui.text_colored(
+                theme::TEXT_SECONDARY,
+                format!("Pé fraco com {} estrelas ou mais, qualquer que seja o preferido.", quality::PE_FRACO_AMBIDESTRO),
+            )
+        });
+    }
+}
+
+/// Atalhos de filtro (2026-10-03): um clique monta uma busca comum
+/// (mantém a geografia e o teto). O tooltip diz o que cada um faz.
+fn campo_atalhos(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
+    // Escopo de ID próprio em cada linha: rótulos se repetem entre linhas
+    // ("Muda patamar" é atalho e nível; "Qualquer" é nível e pé) e, sem
+    // ele, o ImGui via os dois como o mesmo botão: o foco do controle
+    // pulava de linha e o atalho parava de responder (2026-10-03).
+    let _id = ui.push_id("atalhos");
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Atalhos");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let mut em_destaque = None;
+    for (indice, atalho) in Atalho::TODOS.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        if componentes::botao(ui, fonts, atalho.nome(), EstiloBotao::Secundario, true) {
+            state.aplicar_atalho_da_missao(atalho);
+        }
+        if ui.is_item_hovered() || componentes::focado_pelo_controle(ui) {
+            em_destaque = Some(atalho);
+        }
+    }
+    // A explicação fica na linha de baixo (um tooltip no foco atrapalhava
+    // voltar com o controle para o topo).
+    let texto = em_destaque
+        .map_or("Um clique monta a busca; a geografia, as posições e o orçamento ficam como estão.", Atalho::descricao);
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto));
+}
+
+/// Nível em relação ao elenco: Qualquer / Muda patamar / Titular / Banco /
+/// Promessa (escolha única: foco = escolha). Embaixo, a régua: os
+/// titulares do elenco por posição.
+fn campo_nivel(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, nivel: Option<NivelEquipe>) {
+    let _id = ui.push_id("nivel");
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Nível no elenco");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let opcoes: Vec<(Option<NivelEquipe>, &str)> =
+        std::iter::once((None, "Qualquer")).chain(NivelEquipe::TODOS.into_iter().map(|n| (Some(n), n.nome()))).collect();
+    for (indice, (opcao, nome)) in opcoes.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        let estilo = if opcao == nivel { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        let clicou = componentes::botao(ui, fonts, nome, estilo, true);
+        if (clicou || componentes::focado_pelo_controle(ui)) && opcao != nivel {
+            state.definir_nivel_da_missao(opcao);
+        }
+    }
+    let regua = match (nivel, state.nivel_do_elenco()) {
+        (None, _) => "Sem comparação com o seu elenco.".to_string(),
+        (Some(_), None) => "Lendo o seu elenco…".to_string(),
+        (Some(n), Some(elenco)) => texto_regua(n, &elenco),
+    };
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_wrapped(regua));
+}
+
+/// "Comparado ao seu titular na posição de cada jogador. Muda patamar:
+/// ATA 74+ · ZAG 78+ …".
+pub fn texto_regua(nivel: NivelEquipe, elenco: &quality::NivelElenco) -> String {
+    let mut por_perfil = elenco.por_perfil.clone();
+    por_perfil.sort_by_key(|(p, _)| *p as u8);
+    let partes: Vec<String> = por_perfil
+        .iter()
+        .map(|&(perfil, titular)| format!("{} {}", perfil.sigla(), nivel.regra(titular).to_lowercase()))
+        .collect();
+    format!("Comparado ao seu titular na posição de cada jogador. {}: {}", nivel.nome(), partes.join(" · "))
+}
+
+/// Título de uma seção do formulário (roxo, pequeno), com espaço acima.
+fn secao(ui: &Ui, fonts: Option<&Fonts>, titulo: &str) {
+    ui.dummy([0.0, theme::ESPACO_3]);
+    {
+        let _c = ui.push_style_color(StyleColor::Separator, theme::BORDER_HAIRLINE_SUBTLE);
+        ui.separator();
+    }
+    ui.dummy([0.0, theme::ESPACO_1]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::ACCENT_PRIMARY, titulo));
+    ui.dummy([0.0, theme::ESPACO_1]);
+}
+
+/// Posições procuradas: um botão por grupo (multisseleção: cada um entra ou
+/// sai ao ser ativado; nenhum = todas). O nome inteiro vai no tooltip.
+fn campo_posicoes(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, escolhidas: &[Perfil]) {
+    let _id = ui.push_id("posicoes");
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Posições");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    for (indice, perfil) in Perfil::TODOS.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_1);
+        }
+        let estilo = if escolhidas.contains(&perfil) { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        if componentes::botao_com_largura(ui, fonts, perfil.sigla(), estilo, true, Some(LARGURA_POSICAO)) {
+            state.alternar_posicao_da_missao(perfil);
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text(perfil.nome());
+        }
+    }
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto_posicoes(escolhidas)));
+}
+
+/// "Todas as posições" ou "Centroavante, Ponta (direita ou esquerda)".
+pub fn texto_posicoes(escolhidas: &[Perfil]) -> String {
+    if escolhidas.is_empty() {
+        "Todas as posições.".to_string()
+    } else {
+        escolhidas.iter().map(|p| p.nome()).collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// Limite de orçamento (valor de transferência ou salário semanal):
+/// `[-] até 15,0 M [+]  [Do clube] [Sem limite]`. − / + andam na escala
+/// 1-2-5; "Do clube" volta ao orçamento (ou à folha) disponível.
+#[allow(clippy::too_many_arguments)]
+fn campo_limite(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    state: &mut ScoutState,
+    salario: bool,
+    limite: Limite,
+    teto: Option<i64>,
+    do_clube: Option<i64>,
+) {
+    let nome = if salario { "Salário máximo" } else { "Valor máximo" };
+    let _id = ui.push_id(nome);
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, nome);
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let lado = Some(theme::ALVO_MINIMO);
+    {
+        let _repetir = ui.push_button_repeat(true);
+        if componentes::botao_com_largura(ui, fonts, "-##menos", EstiloBotao::Secundario, true, lado) {
+            state.ajustar_limite_da_missao(salario, -1);
+        }
+        ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        let texto = texto_limite(teto, salario);
+        let mono = fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body));
+        let pos = ui.cursor_pos();
+        com_fonte(ui, mono, || {
+            let [w, h] = ui.calc_text_size(&texto);
+            ui.set_cursor_pos([pos[0] + (LARGURA_LIMITE - w) * 0.5, pos[1] + (theme::ALVO_MINIMO - h) * 0.5]);
+            ui.text(&texto);
+        });
+        ui.same_line_with_spacing(pos[0] + LARGURA_LIMITE + theme::ESPACO_2, 0.0);
+        if componentes::botao_com_largura(ui, fonts, "+##mais", EstiloBotao::Secundario, true, lado) {
+            state.ajustar_limite_da_missao(salario, 1);
+        }
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_4);
+    let rotulo_clube = if salario { "Folha do clube" } else { "Orçamento do clube" };
+    for (opcao, rotulo_opcao) in [(Limite::DoClube, rotulo_clube), (Limite::SemLimite, "Sem limite")] {
+        let estilo = if limite == opcao { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        if componentes::botao(ui, fonts, rotulo_opcao, estilo, true) && limite != opcao {
+            state.definir_limite_da_missao(salario, opcao);
+        }
+        ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+    }
+    ui.new_line();
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        ui.text_colored(theme::TEXT_SECONDARY, explicacao_limite(limite, salario, do_clube))
+    });
+}
+
+/// "até 15,0 M", "até 120 mil/sem", "sem limite".
+pub fn texto_limite(teto: Option<i64>, salario: bool) -> String {
+    match teto {
+        Some(v) if salario => format!("até {}/sem", super::relatorio::formatar_dinheiro(v.max(0))),
+        Some(v) => format!("até {}", super::relatorio::formatar_dinheiro(v.max(0))),
+        None => "sem limite".to_string(),
+    }
+}
+
+/// O que o limite quer dizer.
+pub fn explicacao_limite(limite: Limite, salario: bool, do_clube: Option<i64>) -> String {
+    match (limite, salario, do_clube) {
+        (Limite::DoClube, false, _) => "Valor estimado de transferência até o orçamento depois de pagar a Missão.".to_string(),
+        (Limite::DoClube, true, Some(_)) => "Salário estimado até a folha salarial disponível do clube.".to_string(),
+        (Limite::DoClube, true, None) => "A folha salarial do clube não pôde ser lida: sem limite de salário.".to_string(),
+        (Limite::Ate(_), false, _) => "Valor estimado de transferência até o limite escolhido.".to_string(),
+        (Limite::Ate(_), true, _) => "Salário semanal estimado até o limite escolhido.".to_string(),
+        (Limite::SemLimite, false, _) => "Sem limite: o Olheiro pode trazer jogadores de qualquer valor.".to_string(),
+        (Limite::SemLimite, true, _) => "Sem limite de salário.".to_string(),
+    }
+}
+
+/// O que está ligado em "Detalhes", numa linha: "Idade 18–31 · Atributos:
+/// Visão + Passe curto" ou "Nenhum filtro extra.".
+pub fn resumo_detalhes(f: &FiltrosMissao) -> String {
+    let faixa = |nome: &str, x: FaixaAtributo, neutra: (u8, u8)| {
+        (x.min > neutra.0 || x.max < neutra.1).then(|| format!("{nome} {}–{}", x.min, x.max))
+    };
+    let mut partes: Vec<String> = [
+        faixa("Idade", f.idade, (quality::IDADE_MENOR, quality::IDADE_MAIOR)),
+        faixa("Overall", f.overall, (50, FaixaAtributo::MAIOR)),
+        faixa("Potencial", f.potencial, (50, FaixaAtributo::MAIOR)),
+        faixa("Dribles", f.estrelas_drible, (quality::ESTRELAS_MENOR, quality::ESTRELAS_MAIOR)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !f.atributos_dominantes.is_empty() {
+        partes.push(format!("Atributos: {}", texto_atributos(&f.atributos_dominantes)));
+    }
+    let ritmos = |nome: &str, lista: &[RitmoTrabalho]| {
+        (!lista.is_empty()).then(|| format!("{nome} {}", lista.iter().map(|r| r.nome().to_lowercase()).collect::<Vec<_>>().join("/")))
+    };
+    partes.extend(ritmos("Ataque", &f.ritmo_ataque));
+    partes.extend(ritmos("Defesa", &f.ritmo_defesa));
+    if let Some(pe) = f.pe {
+        partes.push(format!("Pé {}", pe.nome().to_lowercase()));
+    }
+    if let Some(alvo) = f.fit_posicional {
+        partes.push(format!("Fit: {}", alvo.nome()));
+    }
+    if let Some(r) = &f.referencia {
+        partes.push(format!("Como {}", r.nome));
+    }
+    if partes.is_empty() {
+        "Nenhum filtro extra.".to_string()
+    } else {
+        partes.join(" · ")
+    }
+}
+
+/// Modo de Busca e Duração na mesma linha (escolha única em cada grupo:
+/// foco = escolha), com a explicação dos dois embaixo.
+fn campo_busca(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: ModoBusca, continua: bool) {
+    let _id = ui.push_id("busca");
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Modo e duração");
     ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
     for (indice, opcao) in ModoBusca::TODOS.into_iter().enumerate() {
         if indice > 0 {
@@ -318,15 +686,7 @@ fn campo_modo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: Modo
             state.definir_modo_da_missao(opcao);
         }
     }
-    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, descricao_modo(modo)));
-}
-
-/// Prazo fixo ou contínua (Story 2.10).
-fn campo_duracao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, continua: bool) {
-    let inicio = ui.cursor_pos();
-    rotulo(ui, fonts, "Duração");
-    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    ui.same_line_with_spacing(0.0, theme::ESPACO_5);
     for (indice, (nome, valor)) in [("Prazo fixo", false), ("Contínua", true)].into_iter().enumerate() {
         if indice > 0 {
             ui.same_line_with_spacing(0.0, theme::ESPACO_2);
@@ -338,7 +698,9 @@ fn campo_duracao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, continu
         }
     }
     ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, descricao_duracao(continua)));
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        ui.text_wrapped(format!("{} {}", descricao_modo(modo), descricao_duracao(continua)));
+    });
 }
 
 pub fn descricao_duracao(continua: bool) -> String {
@@ -466,6 +828,10 @@ mod tests {
             orcamento_atual: 0,
             data_atual: Date(20280924),
             bloqueio: None,
+            teto: None,
+            teto_salario: None,
+            orcamento_apos_missao: None,
+            folha_disponivel: None,
         }
     }
 
@@ -480,6 +846,44 @@ mod tests {
             texto_tipo(&previa(TipoMissao::Medalhoes, false)),
             "Tipo de Missão: Medalhões. Um Caçador de Medalhões teria Qualidade maior."
         );
+    }
+
+    #[test]
+    fn the_level_row_explains_the_ruler_with_the_squad_starters() {
+        let elenco = quality::NivelElenco::de(&[(25, 71), (5, 75)]);
+        let texto = texto_regua(NivelEquipe::MudaPatamar, &elenco);
+        assert!(texto.contains("ZAG overall 78 ou mais"), "{texto}");
+        assert!(texto.contains("ATA overall 74 ou mais"), "{texto}");
+    }
+
+    #[test]
+    fn budget_rows_and_details_summary_read_naturally() {
+        assert_eq!(texto_limite(Some(15_000_000), false), "até 15,0 M");
+        assert_eq!(texto_limite(Some(120_000), true), "até 120 mil/sem");
+        assert_eq!(texto_limite(None, true), "sem limite");
+        assert!(explicacao_limite(Limite::DoClube, true, None).contains("não pôde ser lida"));
+        let mut f = FiltrosMissao::default();
+        assert_eq!(resumo_detalhes(&f), "Nenhum filtro extra.");
+        f.idade = FaixaAtributo { min: 18, max: 31 };
+        f.atributos_dominantes = vec![Atributo::Visao];
+        f.pe = Some(crate::scout::state::FiltroPe::Esquerdo);
+        assert_eq!(resumo_detalhes(&f), "Idade 18–31 · Atributos: Visão · Pé esquerdo");
+        assert_eq!(texto_posicoes(&[]), "Todas as posições.");
+        assert_eq!(texto_posicoes(&[Perfil::Centroavante]), "Centroavante");
+    }
+
+    #[test]
+    fn contract_and_attribute_rows_read_naturally() {
+        let faixa = |min, max| FaixaAtributo { min, max };
+        assert_eq!(texto_contrato(faixa(0, 5)), "Qualquer contrato.");
+        assert!(texto_contrato(faixa(0, 0)).starts_with("Contrato termina nesta temporada"));
+        assert_eq!(texto_contrato(faixa(0, 1)), "Termina nesta temporada ou em até 1 ano.");
+        assert_eq!(texto_contrato(faixa(2, 2)), "Faltam 2 anos.");
+        assert_eq!(texto_contrato(faixa(1, 5)), "Faltam de 1 a 5 anos ou mais.");
+        assert_eq!(texto_valor(CampoFaixa::ContratoMax, 5), "5+");
+        assert_eq!(texto_valor(CampoFaixa::IdadeMax, 45), "45");
+        assert_eq!(texto_atributos(&[]), "Qualquer um");
+        assert_eq!(texto_atributos(&[Atributo::Velocidade, Atributo::Drible]), "Velocidade + Drible");
     }
 
     #[test]
