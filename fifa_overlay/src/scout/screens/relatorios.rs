@@ -101,7 +101,7 @@ pub fn card_relatorio(ui: &Ui, fonts: Option<&Fonts>, item: &RelatorioNaLista) -
     desenhar_badge(ui, fonts, &dl, &qualidade, [c.max[0] - theme::ESPACO_4 - largura_badge, y], altura);
     y += altura + theme::ESPACO_1;
 
-    let olheiro = item.olheiro.as_ref().map_or("Olheiro removido", |o| o.especializacao.nome());
+    let olheiro = item.olheiro.as_ref().map_or_else(|| "Olheiro removido".to_string(), |o| o.nome_exibicao());
     let linha2 = format!("{olheiro} · {}", detalhe_card(item));
     texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::TEXT_SECONDARY, &linha2);
     c.ativou

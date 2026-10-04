@@ -116,6 +116,14 @@ The user adds Fit Posicional and Jogador de Referência filters to a Missão, se
 The user opens the Sonar tab and sees which countries have an active Missão, a completed one, or have never been scanned, and can click a country for its counts.
 **FRs covered:** FR11
 
+### Epic 5: Olheiros 2.0 — identity, stars, markets and a monthly market (post-v1)
+Each Olheiro has a name, a nationality, 0–5 star attributes and markets he knows; the hiring market changes every month with the club's attractiveness; Missões outside his market or focus are penalised until he adapts; the user picks a travel budget per Missão; low-quality reports contain false positives.
+**Source:** `melhorias-futuras-olheiros.md` (all seven items).
+
+### Epic 6: Lista de Escolhidos (post-v1)
+The user keeps a shortlist of players whose observation ages over time; designated Generalists keep them updated until their values are exact.
+**Source:** Felipe, 2026-10-04.
+
 ## Epic 1: Open the Central de Scout and hire Olheiros
 
 Press a shortcut over the running game, open the themed Scout panel, and hire an Olheiro that debits the real `transferbudget` and persists between sessions.
@@ -846,6 +854,14 @@ So that I can decide whether to scout it again.
 **When** I move between tiles and press confirm
 **Then** the same summary appears, and the focused tile shows the purple focus border (UX-DR19).
 
+## Epic 5: Olheiros 2.0 — identity, stars, markets and a monthly market
+
+Implemented 2026-10-04 as one story: [`5-1-olheiros-with-identity-stars-markets-and-a-monthly-market.md`](../implementation-artifacts/5-1-olheiros-with-identity-stars-markets-and-a-monthly-market.md). Decisions for the open questions are recorded there and in `melhorias-futuras-olheiros.md`.
+
+## Epic 6: Lista de Escolhidos
+
+Implemented 2026-10-04 as one story: [`6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists.md`](../implementation-artifacts/6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists.md).
+
 ## Future improvements (post-v1)
 
-Ideas raised by Felipe after Story 1.4 (2026-10-01), **out of v1 scope** and not designed yet: custom names and nationality for each Olheiro; 0–5 star attributes (Caçador de Jovens / Medalhões / Tático / Generalista as attributes, plus Rede de contatos); market specialities with temporary penalties outside them (speed down to −2 stars, quality down to −1, in 0.5 steps; about 6 months to adapt to a new market and 6–12 months to a new scope); offered Olheiros driven by club popularity, titles and rarity; a user-chosen budget range per Missão; Qualidade including false positives. Details and open questions: [`melhorias-futuras-olheiros.md`](melhorias-futuras-olheiros.md).
+Became Epic 5 on 2026-10-04. Original note — ideas raised by Felipe after Story 1.4 (2026-10-01): custom names and nationality for each Olheiro; 0–5 star attributes (Caçador de Jovens / Medalhões / Tático / Generalista as attributes, plus Rede de contatos); market specialities with temporary penalties outside them (speed down to −2 stars, quality down to −1, in 0.5 steps; about 6 months to adapt to a new market and 6–12 months to a new scope); offered Olheiros driven by club popularity, titles and rarity; a user-chosen budget range per Missão; Qualidade including false positives. Details and open questions: [`melhorias-futuras-olheiros.md`](melhorias-futuras-olheiros.md).

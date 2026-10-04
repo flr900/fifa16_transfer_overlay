@@ -37,7 +37,12 @@ pub enum Acao {
     Comparar,
     /// Arquivou o Relatório daqui (Story 2.7): volta à lista.
     Arquivou,
+    /// Tirou o jogador da Lista de Escolhidos (Épico 6): volta à aba.
+    RemoveuEscolhido,
 }
+
+pub const ROTULO_ADICIONAR: &str = "Adicionar aos Escolhidos";
+const ROTULO_JA_ESCOLHIDO: &str = "Já está nos Escolhidos";
 
 /// "22 anos · MEI · Pé esquerdo" (o pé some em Relatórios antigos).
 pub fn linha_bio(j: &JogadorEncontrado) -> String {
@@ -99,11 +104,44 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             state.comparar_com(None);
         }
     }
+    // Lista de Escolhidos (Épico 6): da Ficha de um Relatório, adicionar;
+    // da Ficha de um Escolhido, priorizar ou remover.
+    ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+    match (&ficha.escolhido, ficha.da_lista) {
+        (None, _) => {
+            if componentes::botao(ui, fonts, &format!("{ROTULO_ADICIONAR}##escolher"), EstiloBotao::Primario, true) {
+                state.adicionar_escolhido_da_ficha();
+            }
+        }
+        (Some(_), false) => {
+            componentes::botao(ui, fonts, &format!("{ROTULO_JA_ESCOLHIDO}##escolher"), EstiloBotao::Secundario, false);
+        }
+        (Some(e), true) => {
+            let pid = e.escolhido.jogador.player_id;
+            let rotulo = if e.escolhido.prioridade { "Tirar prioridade##prioridade" } else { "Priorizar##prioridade" };
+            if componentes::botao(ui, fonts, rotulo, EstiloBotao::Secundario, true) {
+                state.alternar_prioridade_escolhido(pid);
+            }
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+            if componentes::botao(ui, fonts, "Remover dos Escolhidos", EstiloBotao::Secundario, true) && state.remover_escolhido(pid) {
+                acao = Acao::RemoveuEscolhido;
+            }
+        }
+    }
     if ScoutState::pode_arquivar(&ficha.item) {
         ui.same_line_with_spacing(0.0, theme::ESPACO_2);
         if componentes::botao(ui, fonts, "Arquivar", EstiloBotao::Secundario, true) && state.arquivar_relatorio(ficha.item.relatorio.id) {
             acao = Acao::Arquivou;
         }
+    }
+    if let Some(e) = &ficha.escolhido {
+        let texto = if e.fora_do_filtro {
+            super::escolhidos::MSG_FORA_DO_FILTRO.to_string()
+        } else {
+            format!("Lista de Escolhidos: {}", super::escolhidos::texto_situacao(e, state.data_da_carreira()))
+        };
+        let cor = if e.fora_do_filtro { theme::DANGER } else if e.acompanhado { theme::ACCENT_PRIMARY } else { theme::TEXT_SECONDARY };
+        com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(cor, texto));
     }
     ui.dummy([0.0, theme::ESPACO_2]);
 
@@ -320,6 +358,7 @@ mod tests {
             estrelas_drible: None,
             pe_fraco: None,
             titular_elenco: None,
+            falso_positivo: false,
         };
         assert_eq!(linha_bio(&j), "22 anos · MEI · Pé esquerdo");
         j.pe = None;

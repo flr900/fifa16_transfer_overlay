@@ -606,6 +606,60 @@ pub fn read_leagues() -> Result<Vec<Liga>, SaveRepoError> {
     ler_ligas(&dados, &estatico.nacoes)
 }
 
+/// O que a oferta de Olheiros precisa do clube do técnico (Épico 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DadosDoClube {
+    /// `teams.domesticprestige` / `internationalprestige` (`ppLE` / `edvw`), 0–20.
+    pub prestigio_nacional: u8,
+    pub prestigio_internacional: u8,
+    /// Liga do clube (`qdZF`), se estiver entre as ligas com clubes.
+    pub liga: Option<Liga>,
+    /// Troféus da carreira: um bit por troféu em `career_trophies.flags`
+    /// (`KNNX.glmx`), uma linha por temporada. Conferido no save do Felipe
+    /// (Barcelona, 13 temporadas): o bit 1 aparece em quase todas (a liga).
+    pub titulos: u16,
+}
+
+/// Prestígio, liga e títulos do clube do técnico. Lê o `DATA` do disco:
+/// chamar fora do thread de render.
+pub fn read_club_profile() -> Result<DadosDoClube, SaveRepoError> {
+    let (caminho, clube) = caminho_save_ativo()?;
+    let estatico = estatico()?;
+    let dados = std::fs::read(&caminho).map_err(|err| {
+        tracing::warn!("[save_repo] Save ativo ilegível ({}): {err}", caminho.display());
+        SaveRepoError::ProcessoInacessivel
+    })?;
+    ler_dados_do_clube(&dados, clube, &estatico.nacoes)
+}
+
+fn ler_dados_do_clube(dados: &[u8], clube: i64, nacoes: &[Nacao]) -> Result<DadosDoClube, SaveRepoError> {
+    let todas = tabelas(dados);
+    let times = achar(dados, &todas, b"lyxL")?;
+    let (id, nacional, internacional) = (times.campo(b"mCXg")?, times.campo(b"ppLE")?, times.campo(b"edvw")?);
+    let registro = times.registros().find(|r| inteiro(r, id, 1) == clube).ok_or_else(|| {
+        tracing::warn!("[save_repo] Clube {clube} do técnico não está em teams.");
+        SaveRepoError::TabelaNaoEncontrada
+    })?;
+    let prestigio_nacional = como(inteiro(registro, nacional, 0));
+    let prestigio_internacional = como(inteiro(registro, internacional, 0));
+    let ligas_dos_times = achar(dados, &todas, b"qdZF")?;
+    let (liga_time, liga_id) = (ligas_dos_times.campo(b"mCXg")?, ligas_dos_times.campo(b"aQrQ")?);
+    let id_da_liga = ligas_dos_times.registros().find(|r| inteiro(r, liga_time, 1) == clube).map(|r| inteiro(r, liga_id, 1));
+    let liga = match id_da_liga {
+        Some(l) => ler_ligas(dados, nacoes)?.into_iter().find(|x| i64::from(x.id) == l),
+        None => None,
+    };
+    // Sem a tabela de troféus (carreira nova) = nenhum título.
+    let titulos = match achar(dados, &todas, b"KNNX") {
+        Ok(t) => {
+            let flags = t.campo(b"glmx")?;
+            t.registros().map(|r| inteiro(r, flags, 0).count_ones()).sum::<u32>()
+        }
+        Err(_) => 0,
+    };
+    Ok(DadosDoClube { prestigio_nacional, prestigio_internacional, liga, titulos: u16::try_from(titulos).unwrap_or(u16::MAX) })
+}
+
 /// Elenco do técnico (`clube_id == mPrV.clubteamid`), da mesma fonte que
 /// `read_all_players` — o `DATA` do save ativo. Não é uma leitura barata:
 /// o arquivo inteiro é decodificado (~0,5 s), então também roda num
@@ -1014,6 +1068,21 @@ mod tests {
         assert!(!ligas.iter().any(|l| l.id == 78 || l.id == 76));
         let uefa = ligas.iter().find(|l| l.id == 77).expect("Clubes da UEFA");
         assert_eq!((uefa.pais, uefa.continente), (None, Confederacao::Europa));
+    }
+
+    /// Clube do save versionado (Barcelona, carreira de 13 temporadas).
+    #[test]
+    fn real_save_reads_the_club_prestige_league_and_titles() {
+        let Some(estatico) = banco_estatico() else {
+            eprintln!("banco estático do FIFA 16 não instalado; teste pulado");
+            return;
+        };
+        let nacoes = ler_estatico(&std::fs::read(estatico).expect("banco")).expect("estático").nacoes;
+        let clube = ler_dados_do_clube(&std::fs::read(backup()).expect("save"), 241, &nacoes).expect("clube");
+        assert_eq!((clube.prestigio_nacional, clube.prestigio_internacional), (20, 20));
+        let liga = clube.liga.expect("La Liga");
+        assert_eq!((liga.id, liga.nivel, liga.pais, liga.continente), (53, 1, Some(45), Confederacao::Europa));
+        assert!((15..=30).contains(&clube.titulos), "{}", clube.titulos);
     }
 
     #[test]

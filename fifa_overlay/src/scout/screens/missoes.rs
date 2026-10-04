@@ -168,8 +168,8 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) -> bool {
     let mut y = c.min[1] + theme::ESPACO_3;
 
     // Linha 1: Olheiro + Tier; Qualidade estimada à direita.
-    let nome = linha.olheiro.as_ref().map_or("Olheiro removido", |o| o.especializacao.nome());
-    let [largura_nome, altura_nome] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, nome);
+    let nome = linha.olheiro.as_ref().map_or_else(|| "Olheiro removido".to_string(), |o| o.nome_exibicao());
+    let [largura_nome, altura_nome] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, &nome);
     let mut xb = x + largura_nome + theme::ESPACO_2;
     if let Some(o) = &linha.olheiro {
         xb += desenhar_badge(ui, fonts, &dl, &badge_tier(o.tier), [xb, y], altura_nome)[0] + theme::ESPACO_2;

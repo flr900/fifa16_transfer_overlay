@@ -2,7 +2,7 @@
 //!
 //! Duas regras da arquitetura moram aqui:
 //! - **AD-6**: a tela ativa é uma pilha que nunca fica vazia; `stack[0]` é
-//!   sempre uma das 4 abas fixas. Abrir/fechar o painel é um `bool`
+//!   sempre uma das abas fixas (5 desde o Épico 6, com Escolhidos). Abrir/fechar o painel é um `bool`
 //!   separado da pilha; ao fechar, a pilha volta para `[aba ativa]`, então
 //!   reabrir sempre cai na aba de topo e nunca dentro de uma tela satélite.
 //! - **AD-14**: o atalho (F10) é lido por polling de `GetAsyncKeyState`
@@ -23,6 +23,7 @@
 //! START que fechou o painel chegaria ao FIFA ao ser solto.
 
 pub mod minifaces;
+pub mod nomes;
 pub mod persistence;
 pub mod quality;
 pub mod screens;
@@ -67,19 +68,21 @@ pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> Com
 /// Ctrl+Shift+P.
 const ATALHO_PAINEL: VIRTUAL_KEY = VK_F10;
 
-/// As 4 abas fixas, na ordem da barra de abas. Persistida em `ui_prefs`
-/// como `"olheiros"`, `"missoes"`, `"relatorios"`, `"sonar"`.
+/// As abas fixas, na ordem da barra de abas. Persistida em `ui_prefs`
+/// como `"olheiros"`, `"missoes"`, `"relatorios"`, `"escolhidos"`,
+/// `"sonar"` (Escolhidos chegou no Épico 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Aba {
     Olheiros,
     Missoes,
     Relatorios,
+    Escolhidos,
     Sonar,
 }
 
 impl Aba {
-    pub const TODAS: [Aba; 4] = [Aba::Olheiros, Aba::Missoes, Aba::Relatorios, Aba::Sonar];
+    pub const TODAS: [Aba; 5] = [Aba::Olheiros, Aba::Missoes, Aba::Relatorios, Aba::Escolhidos, Aba::Sonar];
 
     /// Aba vizinha na barra (LB/RB), dando a volta nas pontas.
     pub fn vizinha(self, passo: isize) -> Aba {
@@ -94,6 +97,7 @@ impl Aba {
             Aba::Olheiros => "Olheiros",
             Aba::Missoes => "Missões",
             Aba::Relatorios => "Relatórios",
+            Aba::Escolhidos => "Escolhidos",
             Aba::Sonar => "Sonar",
         }
     }
@@ -119,6 +123,8 @@ pub enum Satelite {
     CampoFit,
     /// O seletor de elenco, um só para os dois papéis (AD-13).
     SeletorElenco(ContextoSeletor),
+    /// Designar Generalistas para a Lista de Escolhidos (Épico 6).
+    AcompanhamentoOlheiros,
 }
 
 /// Para que o seletor de elenco foi aberto (AD-13): o rótulo da tela diz.
@@ -559,7 +565,7 @@ mod tests {
         let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
         scout.atualizar_atalho(true);
         scout.atualizar_atalho(false);
-        scout.state.preparar_contratacao(state::Especializacao::Generalista, state::Tier::Junior);
+        scout.state.preparar_contratacao(oferta());
         scout.nav.push(Satelite::ConfirmacaoContratacao);
         assert!(scout.state.previa_contratacao().is_some());
 
@@ -567,6 +573,12 @@ mod tests {
         assert!(!scout.painel_aberto());
         assert_eq!(scout.state.previa_contratacao(), None);
         assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Olheiros));
+    }
+
+    fn oferta() -> state::OfertaOlheiro {
+        let id = uuid::Uuid::new_v4();
+        let olheiro = state::Olheiro { id, nome: "Teste".to_string(), ..Default::default() };
+        state::OfertaOlheiro { id, olheiro, custo: 300_000, faltam: None }
     }
 
     fn controle(botoes: u16) -> EstadoControle {
@@ -616,7 +628,7 @@ mod tests {
         scout.nav.push(Satelite::FichaJogador);
         scout.aplicar_controle(controle(botao::RB), false);
         scout.aplicar_controle(controle(0), false);
-        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Sonar), "saiu da Ficha");
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Escolhidos), "saiu da Ficha");
         assert_eq!(scout.nav.profundidade(), 1);
 
         // com a Nova Missão aberta: pergunta antes
@@ -665,7 +677,7 @@ mod tests {
         let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
         scout.aplicar_controle(controle(COMBO_PAINEL), false);
         scout.aplicar_controle(controle(0), false);
-        scout.state.preparar_contratacao(state::Especializacao::Generalista, state::Tier::Junior);
+        scout.state.preparar_contratacao(oferta());
         scout.nav.push(Satelite::ConfirmacaoContratacao);
 
         scout.aplicar_controle(controle(botao::B), false);
@@ -751,6 +763,6 @@ mod tests {
     #[test]
     fn tab_labels_follow_the_bar_order() {
         let rotulos: Vec<&str> = Aba::TODAS.iter().map(|a| a.rotulo()).collect();
-        assert_eq!(rotulos, ["Olheiros", "Missões", "Relatórios", "Sonar"]);
+        assert_eq!(rotulos, ["Olheiros", "Missões", "Relatórios", "Escolhidos", "Sonar"]);
     }
 }

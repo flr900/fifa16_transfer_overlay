@@ -96,12 +96,13 @@ pub struct Aviso {
 // entrar, para os arquivos já gravados continuarem válidos.
 
 /// Foco do Olheiro (PRD, Glossário). No JSON: `"cacador_de_jovens"` etc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Especializacao {
     CacadorDeJovens,
     CacadorDeMedalhoes,
     Tatico,
+    #[default]
     Generalista,
 }
 
@@ -125,15 +126,17 @@ impl Especializacao {
 }
 
 /// Nível do Olheiro (PRD, Glossário). No JSON: `"junior"` etc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
+    #[default]
     Junior,
     Experiente,
     Elite,
 }
 
 impl Tier {
+    #[allow(dead_code)] // usado nos testes
     pub const TODOS: [Tier; 3] = [Tier::Junior, Tier::Experiente, Tier::Elite];
 
     pub fn nome(self) -> &'static str {
@@ -171,8 +174,11 @@ pub enum Qualidade {
     Alta,
 }
 
-/// Olheiro contratado.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Olheiro contratado. Os campos do Épico 5 (nome, nação, estrelas,
+/// mercados) têm `default`: um Olheiro de antes deles continua válido e
+/// ganha o perfil equivalente ao v1 (`Olheiro::perfil`), sem nome nem
+/// mercado (que vale como "sem penalidade de mercado").
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Olheiro {
     pub id: Uuid,
     pub especializacao: Especializacao,
@@ -181,17 +187,91 @@ pub struct Olheiro {
     /// for recarregado sem salvar). `None` em arquivos antigos.
     #[serde(default)]
     pub contratado_em: Option<Date>,
+    /// Nome dado na contratação (vazio nos Olheiros de antes do Épico 5).
+    #[serde(default)]
+    pub nome: String,
+    #[serde(default)]
+    pub nacao: Option<NacaoOlheiro>,
+    /// Estrelas (`None` = Olheiro de antes do Épico 5: `PerfilOlheiro::v1`).
+    #[serde(default)]
+    pub perfil: Option<quality::PerfilOlheiro>,
+    #[serde(default)]
+    pub mercados: Vec<quality::Mercado>,
+    /// A oferta do mercado de onde ele veio (some da lista do mês).
+    #[serde(default)]
+    pub oferta_id: Option<Uuid>,
+    /// Designado para manter a Lista de Escolhidos desde esta data (Épico
+    /// 6). Enquanto isso não aceita Missão.
+    #[serde(default)]
+    pub acompanhando_desde: Option<Date>,
 }
 
-/// Uma das 12 combinações Especialização × Tier à venda (FR-2). Sem
-/// limite de vagas no v1: as 12 ficam sempre disponíveis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A nação de um Olheiro como gravada (nome para a tela, continente para
+/// os mercados).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NacaoOlheiro {
+    pub id: u16,
+    pub nome: String,
+    pub continente: Confederacao,
+}
+
+impl Olheiro {
+    /// As estrelas dele (gravadas, ou as equivalentes ao v1).
+    pub fn perfil(&self) -> quality::PerfilOlheiro {
+        self.perfil.unwrap_or_else(|| quality::PerfilOlheiro::v1(self.especializacao, self.tier))
+    }
+
+    /// Nome para a tela: o dado na contratação ou, num Olheiro de antes do
+    /// Épico 5, a Especialização (como era).
+    pub fn nome_exibicao(&self) -> String {
+        if self.nome.trim().is_empty() {
+            self.especializacao.nome().to_string()
+        } else {
+            self.nome.clone()
+        }
+    }
+
+    pub fn acompanhando(&self) -> bool {
+        self.acompanhando_desde.is_some()
+    }
+
+    /// Só Generalistas mantêm a Lista de Escolhidos (pedido do Felipe).
+    pub fn pode_acompanhar(&self) -> bool {
+        self.perfil().foco() == Especializacao::Generalista
+    }
+
+    /// Quantos jogadores da lista ele mantém atualizados.
+    pub fn capacidade_acompanhamento(&self) -> usize {
+        if self.pode_acompanhar() {
+            quality::capacidade_acompanhamento(self.perfil().generalista)
+        } else {
+            0
+        }
+    }
+}
+
+/// Um Olheiro à venda no mercado do mês (Épico 5, item 3). `olheiro` já
+/// vem montado (sem id de verdade: o id é dado na contratação).
+#[derive(Debug, Clone, PartialEq)]
 pub struct OfertaOlheiro {
-    pub especializacao: Especializacao,
-    pub tier: Tier,
+    /// Identidade da oferta no período (determinística).
+    pub id: Uuid,
+    pub olheiro: Olheiro,
     pub custo: i32,
     /// Quanto falta no orçamento para contratar (`None` = dá para pagar).
     pub faltam: Option<i32>,
+}
+
+/// O mercado de Olheiros como a tela o recebe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MercadoOlheiros {
+    pub ofertas: Vec<OfertaOlheiro>,
+    /// Atratividade do clube (0–100) e de onde ela veio (`None` = o save
+    /// não deu o clube: atratividade média).
+    pub atratividade: u8,
+    pub clube: Option<quality::PerfilClube>,
+    /// Primeiro dia do próximo mês da carreira (quando a oferta muda).
+    pub renova_em: Date,
 }
 
 /// Olheiro contratado como a aba Olheiros o mostra.
@@ -200,12 +280,21 @@ pub struct OlheiroContratado {
     pub olheiro: Olheiro,
     /// Tem Missão ainda não concluída (AD-8): "Em Missão" em vez de "Disponível".
     pub em_missao: bool,
+    /// Designado para a Lista de Escolhidos (Épico 6).
+    pub acompanhando: bool,
     /// A Missão em andamento, se houver.
     pub missao: Option<Missao>,
     /// Relatório da Missão em andamento (existe depois da primeira busca).
     pub relatorio_atual: Option<Uuid>,
     /// Relatórios que este Olheiro já entregou (inclui o atual).
     pub relatorios: usize,
+}
+
+impl OlheiroContratado {
+    /// Não aceita Missão nova (em Missão ou acompanhando os Escolhidos).
+    pub fn ocupado(&self) -> bool {
+        self.em_missao || self.acompanhando
+    }
 }
 
 /// Para onde vai o clique num Olheiro contratado (aba Olheiros).
@@ -217,18 +306,26 @@ pub enum DestinoOlheiro {
     Relatorio(Uuid),
     /// Em Missão sem Relatório ainda: a aba Missões mostra o andamento.
     Missoes,
+    /// Acompanhando a Lista de Escolhidos: a aba dela.
+    Escolhidos,
 }
 
 /// Contratação em andamento: o usuário clicou "Contratar" e o modal de
 /// confirmação está aberto (Story 1.5).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Contratacao {
-    pub especializacao: Especializacao,
-    pub tier: Tier,
-    pub custo: i32,
+    pub oferta: OfertaOlheiro,
+    /// Nome que o jogador quer dar (começa com o gerado).
+    pub nome: String,
     /// Falha da última tentativa de confirmar (o modal mostra e oferece
     /// tentar de novo). `None` = ainda não tentou.
     pub erro: Option<ErroCompra>,
+}
+
+impl Contratacao {
+    pub fn custo(&self) -> i32 {
+        self.oferta.custo
+    }
 }
 
 /// O que o modal mostra, recalculado do orçamento vivo a cada frame.
@@ -529,6 +626,8 @@ pub struct RascunhoMissao {
     pub modo: ModoBusca,
     /// "Sem prazo": blocos de `quality::DIAS_BLOCO_CONTINUO` dias (2.10).
     pub continua: bool,
+    /// Verba da viagem (Épico 5, item 6).
+    pub investimento: quality::Investimento,
     pub erro: Option<ErroCompra>,
 }
 
@@ -563,6 +662,15 @@ pub struct PreviaMissao {
     /// Tetos que a Missão vai usar (`None` = sem limite).
     pub teto: Option<i64>,
     pub teto_salario: Option<i64>,
+    /// Penalidade de mercado e de fora do foco para o Olheiro escolhido,
+    /// já com a adaptação (Épico 5).
+    pub penalidade: quality::Penalidade,
+    /// Pior distância entre o filtro geográfico e os mercados dele (0–2).
+    pub distancia_mercado: u8,
+    /// A Missão está fora do foco dele (e ele ainda não se habituou).
+    pub fora_do_foco: bool,
+    /// Custo da Missão em cada verba, para a linha "Verba da viagem".
+    pub custos_por_verba: Vec<(quality::Investimento, i32)>,
 }
 
 impl PreviaMissao {
@@ -641,18 +749,48 @@ pub struct RelatorioNaLista {
     pub olheiro: Option<Olheiro>,
 }
 
-/// As 12 ofertas na ordem da tela (Tier crescente, depois a ordem do PRD),
-/// com o que falta para cada uma diante de `orcamento`.
-pub fn ofertas_de_olheiros(orcamento: Option<i32>) -> Vec<OfertaOlheiro> {
-    Tier::TODOS
+/// O mercado de Olheiros de um mês (Épico 5): os candidatos de
+/// `quality::gerar_ofertas`, com nome (`scout::nomes`), nação e custo, sem
+/// os já contratados (`contratadas`), em ordem de custo, com o que falta
+/// para cada um diante de `orcamento`.
+pub fn montar_ofertas(
+    candidatos: &[quality::CandidatoOlheiro],
+    periodo: u32,
+    carreira: u64,
+    nacoes: &[Nacao],
+    contratadas: &[Uuid],
+    orcamento: Option<i32>,
+) -> Vec<OfertaOlheiro> {
+    let mut ofertas: Vec<OfertaOlheiro> = candidatos
         .iter()
-        .flat_map(|&tier| Especializacao::TODAS.iter().map(move |&especializacao| (especializacao, tier)))
-        .map(|(especializacao, tier)| {
-            let custo = quality::custo_contratacao(especializacao, tier);
+        .map(|c| {
+            let id = Uuid::from_u64_pair(carreira, (u64::from(periodo) << 32) | u64::from(c.indice));
+            let nacao = c.pais.and_then(|p| nacoes.iter().find(|n| n.id == p));
+            let olheiro = Olheiro {
+                id,
+                especializacao: c.perfil.foco(),
+                tier: c.perfil.tier(),
+                contratado_em: None,
+                nome: crate::scout::nomes::gerar(nacao.map_or("", |n| n.iso.as_str()), c.semente),
+                nacao: nacao.map(|n| NacaoOlheiro { id: n.id, nome: n.nome.clone(), continente: n.confederacao }),
+                perfil: Some(c.perfil),
+                mercados: c.mercados.clone(),
+                oferta_id: Some(id),
+                acompanhando_desde: None,
+            };
+            let custo = quality::custo_contratacao(&c.perfil, nacao.map(|n| n.confederacao), c.mercados.len());
             let faltam = orcamento.and_then(|saldo| (saldo < custo).then(|| custo.saturating_sub(saldo)));
-            OfertaOlheiro { especializacao, tier, custo, faltam }
+            OfertaOlheiro { id, olheiro, custo, faltam }
         })
-        .collect()
+        .filter(|o| !contratadas.contains(&o.id))
+        .collect();
+    ofertas.sort_by_key(|o| (o.custo, o.id));
+    ofertas
+}
+
+/// Semente da carreira (para o mercado de Olheiros) a partir do id do save.
+pub fn semente_da_carreira(id_save: &str) -> u64 {
+    u64::from_str_radix(id_save.get(..16).unwrap_or("0"), 16).unwrap_or(0)
 }
 
 /// Ciclo de vida de uma Missão (AD-8).
@@ -692,6 +830,9 @@ pub struct Missao {
     /// uma renovação se o jogo for recarregado sem salvar.
     #[serde(default)]
     pub renovacoes: Vec<(Date, Date)>,
+    /// Verba da viagem escolhida (Épico 5; Padrão nas Missões de antes).
+    #[serde(default)]
+    pub investimento: quality::Investimento,
 }
 
 fn um_bloco() -> u16 {
@@ -723,13 +864,13 @@ impl Missao {
     /// Missão mínima para testes.
     pub fn de_teste(olheiro_id: Uuid, status: StatusMissao) -> Missao {
         let filtros = FiltrosMissao::default();
-        let pedido = quality::PedidoMissao {
-            tier: Tier::Junior,
-            especializacao: Especializacao::Generalista,
-            modo: ModoBusca::Rapida,
-            tipo: quality::TipoMissao::Geral,
-            amplitude: quality::AmplitudeGeografica::Mundo,
-        };
+        let pedido = quality::PedidoMissao::v1(
+            Tier::Junior,
+            Especializacao::Tatico,
+            ModoBusca::Rapida,
+            quality::TipoMissao::Geral,
+            quality::AmplitudeGeografica::Mundo,
+        );
         Missao {
             id: Uuid::new_v4(),
             olheiro_id,
@@ -745,6 +886,7 @@ impl Missao {
             blocos: 1,
             blocos_buscados: 0,
             renovacoes: Vec::new(),
+            investimento: quality::Investimento::Padrao,
         }
     }
 }
@@ -809,6 +951,11 @@ pub struct JogadorEncontrado {
     /// (2026-10-03).
     #[serde(default)]
     pub titular_elenco: Option<u8>,
+    /// Falso positivo (Épico 5, item 7): o Olheiro achou que ele passava no
+    /// filtro, mas não passa. Nunca aparece no Relatório; a Lista de
+    /// Escolhidos avisa quando o acompanhamento chega ao valor exato.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub falso_positivo: bool,
 }
 
 impl JogadorEncontrado {
@@ -894,12 +1041,226 @@ pub enum Carga<T> {
 pub type EstadoElenco = Carga<Arc<Vec<JogadorElenco>>>;
 
 /// A Ficha de Jogador aberta (Story 3.1): o jogador do Relatório e, se
-/// escolhido, o jogador do elenco sobreposto no Radar (Story 3.2).
+/// escolhido, o jogador do elenco sobreposto no Radar (Story 3.2). Aberta
+/// da Lista de Escolhidos (Épico 6), `item` é um Relatório de uma linha só
+/// (o da Missão de origem, se ainda existe) e `escolhido` traz o estado
+/// do acompanhamento.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FichaAberta {
     pub item: RelatorioNaLista,
     pub jogador: JogadorEncontrado,
     pub comparacao: Option<JogadorElenco>,
+    /// O jogador está na Lista de Escolhidos (com o estado de agora).
+    pub escolhido: Option<EscolhidoNaLista>,
+    /// A Ficha foi aberta da aba Escolhidos (não de um Relatório).
+    pub da_lista: bool,
+}
+
+// ---------------------------------------------------------------------
+// Lista de Escolhidos (Épico 6)
+// ---------------------------------------------------------------------
+
+/// Um jogador na Lista de Escolhidos. Guarda a ÚLTIMA observação (só o
+/// revelado, como um jogador de Relatório) e quando ela foi feita: dali
+/// em diante ela envelhece (`quality::frescor`), a não ser que um
+/// Generalista designado o acompanhe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Escolhido {
+    pub jogador: JogadorEncontrado,
+    pub adicionado_em: Date,
+    /// Data da última observação (a do Relatório, ou a da última
+    /// atualização do acompanhamento).
+    pub observado_em: Date,
+    /// Precisão (±) da última observação.
+    pub precisao: u8,
+    /// Acompanhado antes dos outros quando falta vaga.
+    #[serde(default)]
+    pub prioridade: bool,
+    /// Acompanhamento em andamento (`None` = sem Generalista nele).
+    #[serde(default)]
+    pub acompanhamento: Option<Acompanhamento>,
+    /// Posição-alvo da Missão de origem (Fit Posicional), para recalcular o fit.
+    #[serde(default)]
+    pub alvo: Option<PosicaoAlvo>,
+    /// Jogador de Referência da Missão de origem, para recalcular a similaridade.
+    #[serde(default)]
+    pub referencia: Option<JogadorReferencia>,
+    /// Relatório de onde ele veio.
+    #[serde(default)]
+    pub relatorio_id: Option<Uuid>,
+}
+
+/// O acompanhamento de um Escolhido por um Generalista: de onde partiu e
+/// quantos dias de carreira já foram acompanhados.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acompanhamento {
+    pub inicio: Date,
+    pub precisao_inicial: u8,
+    pub atributos_iniciais: u8,
+    /// Dias até o valor exato (`quality::dias_para_exato` na partida).
+    pub dias_para_exato: u32,
+    /// Dias de carreira acompanhados até a última atualização.
+    pub dias: u32,
+}
+
+/// Um Escolhido como a aba e a Ficha o mostram (calculado para a data do
+/// painel; nada disto vai para o arquivo).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EscolhidoNaLista {
+    pub escolhido: Escolhido,
+    /// A observação como vale agora: faixas alargadas pelo tempo, ou sem
+    /// atributos se venceu.
+    pub jogador: JogadorEncontrado,
+    pub frescor: quality::Frescor,
+    /// Tem vaga com um Generalista designado agora.
+    pub acompanhado: bool,
+    /// Precisão (±) que vale agora.
+    pub precisao: u8,
+    /// Dias de carreira até ficar exato (só acompanhado).
+    pub dias_para_exato: Option<u32>,
+    /// Exato e fora do filtro da Missão de origem (falso positivo revelado).
+    pub fora_do_filtro: bool,
+}
+
+/// O resumo do acompanhamento (cabeçalho da aba Escolhidos).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumoAcompanhamento {
+    pub generalistas: usize,
+    pub vagas: usize,
+    pub jogadores: usize,
+    pub acompanhados: usize,
+}
+
+/// Total de atributos da função do jogador (linha: 28; goleiro: 33).
+fn total_de_atributos(goleiro: bool) -> usize {
+    Atributo::TODOS.iter().filter(|a| goleiro || !a.goleiro()).count()
+}
+
+/// O Escolhido como vale em `hoje`: frescor, faixas alargadas, progresso do
+/// acompanhamento (contando os dias desde a última atualização).
+pub fn escolhido_em(escolhido: &Escolhido, hoje: Date, acompanhado: bool) -> EscolhidoNaLista {
+    let idade = u32::try_from((hoje.day_number() - escolhido.observado_em.day_number()).max(0)).unwrap_or(u32::MAX);
+    // acompanhado: a observação é refeita a cada abertura do painel e não envelhece
+    let frescor = if acompanhado && escolhido.acompanhamento.is_some() { quality::Frescor::Atualizado } else { quality::frescor(idade) };
+    let mut jogador = escolhido.jogador.clone();
+    let extra = frescor.extra();
+    if frescor == quality::Frescor::Vencido {
+        jogador.atributos.clear();
+        jogador.similaridade = None;
+        jogador.fit = None;
+        jogador.variacao_overall = None;
+    } else if extra > 0 {
+        let alargar = |f: FaixaAtributo| FaixaAtributo {
+            min: f.min.saturating_sub(extra).max(FaixaAtributo::MENOR),
+            max: f.max.saturating_add(extra).min(FaixaAtributo::MAIOR),
+        };
+        jogador.overall = alargar(jogador.overall);
+        jogador.potencial = alargar(jogador.potencial);
+        for a in jogador.atributos.iter_mut() {
+            a.valor = alargar(a.valor);
+        }
+    }
+    let precisao = escolhido.precisao.saturating_add(extra);
+    let dias_para_exato = escolhido.acompanhamento.filter(|_| acompanhado).map(|a| {
+        let feitos = a.dias.saturating_add(idade);
+        a.dias_para_exato.saturating_sub(feitos)
+    });
+    let exato = escolhido.precisao == 0 && frescor == quality::Frescor::Atualizado;
+    EscolhidoNaLista {
+        fora_do_filtro: exato && escolhido.jogador.falso_positivo,
+        escolhido: escolhido.clone(),
+        jogador,
+        frescor,
+        acompanhado,
+        precisao,
+        dias_para_exato,
+    }
+}
+
+/// Um passo do acompanhamento em `hoje`, com os valores atuais do save:
+/// - começando agora: parte do que a observação vale hoje (envelhecida),
+///   ou de uma análise nova se ela venceu;
+/// - já em andamento: soma os dias desde a última observação.
+///
+/// A precisão fecha e os atributos não observados aparecem em linha reta
+/// até `dias_para_exato`. Jogador que sumiu do save (aposentado) mantém a
+/// última observação, mas conta como visto hoje — senão cada atualização
+/// pediria outra leitura do save, sem fim.
+pub fn avancar_escolhido(e: &Escolhido, pool: &crate::save_repo::PlayerPool, hoje: Date) -> Escolhido {
+    let desde = u32::try_from((hoje.day_number() - e.observado_em.day_number()).max(0)).unwrap_or(0);
+    let Some(raw) = pool.jogadores.iter().find(|j| j.player_id == e.jogador.player_id) else {
+        let total = total_de_atributos(e.jogador.goleiro());
+        let acompanhamento = e.acompanhamento.map_or(
+            Acompanhamento {
+                inicio: hoje,
+                precisao_inicial: e.precisao,
+                atributos_iniciais: u8::try_from(e.jogador.atributos.len()).unwrap_or(u8::MAX),
+                dias_para_exato: quality::dias_para_exato(e.precisao, e.jogador.atributos.len(), total),
+                dias: 0,
+            },
+            |a| Acompanhamento { dias: a.dias.saturating_add(desde), ..a },
+        );
+        return Escolhido { observado_em: hoje.max(e.observado_em), acompanhamento: Some(acompanhamento), ..e.clone() };
+    };
+    let goleiro = crate::save_repo::funcao_da_posicao(raw.posicao) == Funcao::Goleiro;
+    let total = total_de_atributos(goleiro);
+    let acompanhamento = match e.acompanhamento {
+        Some(a) => Acompanhamento { dias: a.dias.saturating_add(desde), ..a },
+        None => {
+            let atual = escolhido_em(e, hoje, false);
+            let (precisao, atributos) = if atual.frescor == quality::Frescor::Vencido {
+                (quality::PRECISAO_ANALISE_NOVA, quality::ATRIBUTOS_ANALISE_NOVA)
+            } else {
+                (atual.precisao, atual.jogador.atributos.len())
+            };
+            Acompanhamento {
+                inicio: hoje,
+                precisao_inicial: precisao,
+                atributos_iniciais: u8::try_from(atributos).unwrap_or(u8::MAX),
+                dias_para_exato: quality::dias_para_exato(precisao, atributos, total),
+                dias: 0,
+            }
+        }
+    };
+    let precisao = quality::precisao_acompanhada(acompanhamento.precisao_inicial, acompanhamento.dias, acompanhamento.dias_para_exato);
+    let atributos = quality::atributos_acompanhados(
+        usize::from(acompanhamento.atributos_iniciais),
+        total,
+        acompanhamento.dias,
+        acompanhamento.dias_para_exato,
+    );
+    Escolhido {
+        jogador: super::search::reobservar(&e.jogador, raw, pool, hoje, precisao, atributos, e.alvo, e.referencia.as_ref()),
+        observado_em: hoje,
+        precisao,
+        acompanhamento: Some(acompanhamento),
+        ..e.clone()
+    }
+}
+
+/// Quando o Olheiro observou o `indice`-ésimo jogador de um Relatório: numa
+/// Missão contínua, no fim do bloco em que ele apareceu (cada bloco traz o
+/// mesmo número de jogadores); numa de prazo fixo, no prazo (ou hoje, se
+/// ainda não chegou); sem a Missão, na data do Relatório.
+pub fn data_da_observacao(missao: Option<&Missao>, gerado_em: Option<Date>, indice: usize, hoje: Date) -> Date {
+    let data = match missao {
+        Some(m) if m.continua => {
+            let por_bloco = usize::from(m.estimativa.alvo_jogadores).max(1);
+            let bloco = u32::try_from(indice / por_bloco).unwrap_or(0);
+            m.criada_em.mais_dias(quality::DIAS_BLOCO_CONTINUO * (bloco + 1))
+        }
+        Some(m) => m.prazo_estimado,
+        None => gerado_em.unwrap_or(hoje),
+    };
+    data.min(hoje)
+}
+
+/// Ordem de vaga no acompanhamento: prioritários primeiro, depois os mais
+/// antigos na lista.
+pub fn ordem_de_acompanhamento(escolhidos: &[Escolhido]) -> Vec<u32> {
+    let mut ordem: Vec<&Escolhido> = escolhidos.iter().collect();
+    ordem.sort_by_key(|e| (!e.prioridade, e.adicionado_em, e.jogador.player_id));
+    ordem.into_iter().map(|e| e.jogador.player_id).collect()
 }
 
 /// Relatório de uma Missão (Story 2.4). Campos novos com `default`: um
@@ -1054,6 +1415,19 @@ pub struct ScoutState {
     rolagem: f32,
     /// "Mostrar detalhes" do formulário Nova Missão (fechado ao abrir).
     detalhes_da_missao: bool,
+    /// Prestígio, liga e títulos do clube (mercado de Olheiros, Épico 5),
+    /// lidos em background e marcados com a carreira dona; `None` = o save
+    /// não deu o clube (atratividade média).
+    tarefa_clube: AsyncTask<(String, Option<quality::PerfilClube>)>,
+    /// Atualização dos Escolhidos acompanhados (Épico 6), com a carreira dona.
+    tarefa_escolhidos: AsyncTask<(String, Vec<Escolhido>)>,
+    /// Há uma atualização disparada e ainda não tratada.
+    atualizacao_escolhidos_pendente: bool,
+    /// Pediram outra atualização enquanto uma rodava: roda de novo no fim.
+    reatualizar_escolhidos: bool,
+    /// A Ficha aberta é de um jogador da Lista de Escolhidos (não do
+    /// Relatório aberto).
+    ficha_de_escolhido: bool,
 }
 
 /// Nível aberto no filtro geográfico: a lista de continentes (o filtro
@@ -1111,6 +1485,11 @@ impl ScoutState {
             troca_de_aba_pendente: None,
             rolagem: 0.0,
             detalhes_da_missao: false,
+            tarefa_clube: AsyncTask::new(),
+            tarefa_escolhidos: AsyncTask::new(),
+            atualizacao_escolhidos_pendente: false,
+            reatualizar_escolhidos: false,
+            ficha_de_escolhido: false,
         }
     }
 
@@ -1139,8 +1518,13 @@ impl ScoutState {
     pub fn ao_abrir_painel(&mut self) {
         self.painel_aberto = true;
         // O elenco é relido na próxima vez que for pedido (pode ter mudado
-        // desde a última abertura: transferências, save novo).
+        // desde a última abertura: transferências, save novo); o clube
+        // também (títulos novos mudam o mercado de Olheiros).
         self.tarefa_elenco.reset();
+        self.tarefa_clube.reset();
+        if matches!(self.tarefa_nacoes.poll(), TaskState::Failed(_)) {
+            self.tarefa_nacoes.reset();
+        }
         if matches!(self.tarefa_localizar.poll(), TaskState::Running) {
             return;
         }
@@ -1151,6 +1535,7 @@ impl ScoutState {
             let hoje = carreira.data_atual;
             self.data_progresso = Some(hoje);
             self.despachar_missoes(hoje);
+            self.atualizar_escolhidos(hoje);
         }
     }
 
@@ -1216,22 +1601,347 @@ impl ScoutState {
         if existe {
             self.ficha = Some(player_id);
             self.comparacao = None;
+            self.ficha_de_escolhido = false;
+        }
+    }
+
+    /// Abre a Ficha de um jogador da Lista de Escolhidos (Épico 6).
+    pub fn abrir_ficha_de_escolhido(&mut self, player_id: u32) {
+        let existe = self.estado_ativo().is_some_and(|e| e.ler(|d| d.escolhidos.iter().any(|x| x.jogador.player_id == player_id)));
+        if existe {
+            self.ficha = Some(player_id);
+            self.comparacao = None;
+            self.ficha_de_escolhido = true;
         }
     }
 
     pub fn fechar_ficha(&mut self) {
         self.ficha = None;
         self.comparacao = None;
+        self.ficha_de_escolhido = false;
     }
 
     /// A Ficha na tela, ou `None` (a tela deve fechar: o jogador saiu do
     /// Relatório ou o Relatório fechou).
     pub fn ficha_aberta(&self) -> Option<FichaAberta> {
         let player_id = self.ficha?;
+        let comparacao = self.comparacao.and_then(|id| self.jogador_do_elenco(id));
+        let escolhido = self.escolhidos().into_iter().find(|e| e.escolhido.jogador.player_id == player_id);
+        if self.ficha_de_escolhido {
+            let escolhido = escolhido?;
+            let item = self.relatorio_do_escolhido(&escolhido);
+            return Some(FichaAberta { item, jogador: escolhido.jogador.clone(), comparacao, escolhido: Some(escolhido), da_lista: true });
+        }
         let item = self.relatorio_aberto()?;
         let jogador = item.relatorio.jogadores.iter().find(|j| j.player_id == player_id)?.clone();
-        let comparacao = self.comparacao.and_then(|id| self.jogador_do_elenco(id));
-        Some(FichaAberta { item, jogador, comparacao })
+        Some(FichaAberta { item, jogador, comparacao, escolhido, da_lista: false })
+    }
+
+    /// Um Relatório de uma linha para a Ficha de um Escolhido: a Missão de
+    /// origem (se ainda existe) dá o perfil pedido (Fit, referência); a
+    /// Qualidade sai da precisão de agora.
+    fn relatorio_do_escolhido(&self, e: &EscolhidoNaLista) -> RelatorioNaLista {
+        let origem = e.escolhido.relatorio_id.and_then(|id| {
+            self.estado_ativo()?.ler(|d| {
+                let r = d.relatorios.iter().find(|r| r.id == id)?;
+                let missao = d.missoes.iter().find(|m| m.id == r.missao_id).cloned();
+                let olheiro = missao.as_ref().and_then(|m| d.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned());
+                Some((r.missao_id, missao, olheiro))
+            })
+        });
+        let (missao_id, missao, olheiro) = origem.unwrap_or((Uuid::nil(), None, None));
+        let qualidade = match e.precisao {
+            0..=2 => Qualidade::Alta,
+            3..=6 => Qualidade::Media,
+            _ => Qualidade::Baixa,
+        };
+        RelatorioNaLista {
+            relatorio: Relatorio {
+                id: e.escolhido.relatorio_id.unwrap_or_else(Uuid::nil),
+                missao_id,
+                gerado_em: Some(e.escolhido.observado_em),
+                qualidade,
+                precisao_mais_menos: e.precisao,
+                jogadores: vec![e.jogador.clone()],
+                aberto: false,
+                arquivado: false,
+                vistos: 1,
+                notificados: 1,
+            },
+            previstos: 1,
+            parcial: false,
+            novo: false,
+            missao,
+            olheiro,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Lista de Escolhidos (Épico 6)
+    // -----------------------------------------------------------------
+
+    /// Vagas de acompanhamento: a soma das capacidades dos designados.
+    fn vagas(dados: &persistence::ScoutStateFile) -> usize {
+        dados.olheiros.iter().filter(|o| o.acompanhando()).map(Olheiro::capacidade_acompanhamento).sum()
+    }
+
+    /// Os jogadores com vaga agora (prioritários, depois os mais antigos).
+    fn acompanhados(dados: &persistence::ScoutStateFile) -> std::collections::HashSet<u32> {
+        ordem_de_acompanhamento(&dados.escolhidos).into_iter().take(Self::vagas(dados)).collect()
+    }
+
+    /// A Lista de Escolhidos como vale na data do painel, na ordem de vaga.
+    pub fn escolhidos(&self) -> Vec<EscolhidoNaLista> {
+        let (Some(estado), Some(hoje)) = (self.estado_ativo(), self.data_progresso) else {
+            return Vec::new();
+        };
+        estado.ler(|dados| {
+            let cobertos = Self::acompanhados(dados);
+            ordem_de_acompanhamento(&dados.escolhidos)
+                .into_iter()
+                .filter_map(|pid| dados.escolhidos.iter().find(|e| e.jogador.player_id == pid))
+                .map(|e| escolhido_em(e, hoje, cobertos.contains(&e.jogador.player_id)))
+                .collect()
+        })
+    }
+
+    pub fn resumo_acompanhamento(&self) -> ResumoAcompanhamento {
+        let Some(estado) = self.estado_ativo() else {
+            return ResumoAcompanhamento { generalistas: 0, vagas: 0, jogadores: 0, acompanhados: 0 };
+        };
+        estado.ler(|dados| {
+            let vagas = Self::vagas(dados);
+            ResumoAcompanhamento {
+                generalistas: dados.olheiros.iter().filter(|o| o.acompanhando()).count(),
+                vagas,
+                jogadores: dados.escolhidos.len(),
+                acompanhados: dados.escolhidos.len().min(vagas),
+            }
+        })
+    }
+
+    pub fn esta_nos_escolhidos(&self, player_id: u32) -> bool {
+        self.estado_ativo().is_some_and(|e| e.ler(|d| d.escolhidos.iter().any(|x| x.jogador.player_id == player_id)))
+    }
+
+    /// "Adicionar aos Escolhidos" na Ficha de um jogador do Relatório: guarda
+    /// o que o Olheiro revelou até agora (como a Ficha mostra), com a data e
+    /// a precisão do Relatório. `false` = já estava, ou não salvou.
+    pub fn adicionar_escolhido_da_ficha(&mut self) -> bool {
+        let (Some(ficha), Some(hoje), Some(estado)) = (self.ficha_aberta(), self.data_progresso, self.estado_ativo().cloned()) else {
+            return false;
+        };
+        if ficha.escolhido.is_some() {
+            return false;
+        }
+        let r = &ficha.item.relatorio;
+        let missao = ficha.item.missao.as_ref();
+        let indice = r.jogadores.iter().position(|j| j.player_id == ficha.jogador.player_id).unwrap_or(0);
+        let escolhido = Escolhido {
+            observado_em: data_da_observacao(missao, r.gerado_em, indice, hoje),
+            precisao: r.precisao_mais_menos,
+            jogador: ficha.jogador.clone(),
+            adicionado_em: hoje,
+            prioridade: false,
+            acompanhamento: None,
+            alvo: missao.and_then(|m| m.filtros.fit_posicional),
+            referencia: missao.and_then(|m| m.filtros.referencia.clone()),
+            relatorio_id: Some(r.id),
+        };
+        match estado.mutar(move |d| d.escolhidos.push(escolhido)) {
+            Ok(()) => {
+                tracing::info!("[scout::state] {} entrou na Lista de Escolhidos.", ficha.jogador.nome);
+                self.atualizar_escolhidos(hoje);
+                true
+            }
+            Err(err) => {
+                tracing::warn!("[scout::state] Escolhido não foi salvo: {err:?}");
+                false
+            }
+        }
+    }
+
+    /// Tira um jogador da lista (nada mais muda).
+    pub fn remover_escolhido(&mut self, player_id: u32) -> bool {
+        let Some(estado) = self.estado_ativo().cloned() else {
+            return false;
+        };
+        let resultado = estado.mutar(|d| {
+            let antes = d.escolhidos.len();
+            d.escolhidos.retain(|e| e.jogador.player_id != player_id);
+            antes != d.escolhidos.len()
+        });
+        match resultado {
+            Ok(saiu) => {
+                if let (true, Some(hoje)) = (saiu, self.data_progresso) {
+                    // a vaga dele pode ir para outro
+                    self.atualizar_escolhidos(hoje);
+                }
+                saiu
+            }
+            Err(err) => {
+                tracing::warn!("[scout::state] Escolhido não foi removido: {err:?}");
+                false
+            }
+        }
+    }
+
+    /// Prioridade de vaga no acompanhamento (liga/desliga).
+    pub fn alternar_prioridade_escolhido(&mut self, player_id: u32) {
+        let Some(estado) = self.estado_ativo().cloned() else {
+            return;
+        };
+        if let Err(err) = estado.mutar(|d| {
+            for e in d.escolhidos.iter_mut().filter(|e| e.jogador.player_id == player_id) {
+                e.prioridade = !e.prioridade;
+            }
+        }) {
+            tracing::warn!("[scout::state] Prioridade não foi salva: {err:?}");
+            return;
+        }
+        if let Some(hoje) = self.data_progresso {
+            self.atualizar_escolhidos(hoje);
+        }
+    }
+
+    /// Designa (ou libera) um Generalista para o acompanhamento. Só um
+    /// Generalista livre (sem Missão) pode ser designado. `false` = não
+    /// permitido ou não salvo.
+    pub fn designar_acompanhamento(&mut self, olheiro_id: Uuid, designar: bool) -> bool {
+        let (Some(estado), Some(hoje)) = (self.estado_ativo().cloned(), self.data_progresso) else {
+            return false;
+        };
+        let Some(c) = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == olheiro_id) else {
+            return false;
+        };
+        if designar && (c.em_missao || c.acompanhando || !c.olheiro.pode_acompanhar()) {
+            return false;
+        }
+        if !designar && !c.acompanhando {
+            return false;
+        }
+        match estado.mutar(|d| {
+            for o in d.olheiros.iter_mut().filter(|o| o.id == olheiro_id) {
+                o.acompanhando_desde = designar.then_some(hoje);
+            }
+        }) {
+            Ok(()) => {
+                tracing::info!(
+                    "[scout::state] {} {} da Lista de Escolhidos.",
+                    c.olheiro.nome_exibicao(),
+                    if designar { "designado para o acompanhamento" } else { "liberado do acompanhamento" }
+                );
+                self.atualizar_escolhidos(hoje);
+                true
+            }
+            Err(err) => {
+                tracing::warn!("[scout::state] Designação não foi salva: {err:?}");
+                false
+            }
+        }
+    }
+
+    /// Atualiza o acompanhamento em `hoje` (abertura do painel, mudança de
+    /// designação ou de lista): quem perdeu a vaga deixa de ser acompanhado
+    /// (a observação volta a envelhecer); quem tem vaga e não foi observado
+    /// hoje entra numa leitura em background do save (`AsyncTask`, AD-4),
+    /// que refaz a observação com a precisão do acompanhamento.
+    fn atualizar_escolhidos(&mut self, hoje: Date) {
+        let (Some(id_save), Some(estado)) = (self.save_ativo.clone(), self.estado_ativo().cloned()) else {
+            return;
+        };
+        // sem arquivo gravável, a observação nova não teria onde ficar e a
+        // mesma leitura do save se repetiria sem fim
+        if !estado.gravavel() {
+            return;
+        }
+        if self.atualizacao_escolhidos_pendente {
+            self.reatualizar_escolhidos = true;
+            return;
+        }
+        let (cobertos, perderam, a_observar) = estado.ler(|dados| {
+            let cobertos = Self::acompanhados(dados);
+            let perderam = dados
+                .escolhidos
+                .iter()
+                .any(|e| e.acompanhamento.is_some() && !cobertos.contains(&e.jogador.player_id));
+            let a_observar: Vec<Escolhido> = dados
+                .escolhidos
+                .iter()
+                .filter(|e| cobertos.contains(&e.jogador.player_id) && (e.acompanhamento.is_none() || e.observado_em < hoje))
+                .cloned()
+                .collect();
+            (cobertos, perderam, a_observar)
+        });
+        if perderam {
+            if let Err(err) = estado.mutar(|d| {
+                for e in d.escolhidos.iter_mut().filter(|e| !cobertos.contains(&e.jogador.player_id)) {
+                    e.acompanhamento = None;
+                }
+            }) {
+                tracing::warn!("[scout::state] Fim de acompanhamento não foi salvo: {err:?}");
+            }
+        }
+        if a_observar.is_empty() {
+            return;
+        }
+        let fonte = Arc::clone(&self.fonte);
+        let iniciou = self.tarefa_escolhidos.start(move || {
+            let pool = fonte.read_all_players()?;
+            let novos = a_observar.iter().map(|e| avancar_escolhido(e, &pool, hoje)).collect();
+            Ok((id_save, novos))
+        });
+        self.atualizacao_escolhidos_pendente = iniciou;
+    }
+
+    /// Trata a atualização dos Escolhidos que terminou (roda a cada frame).
+    fn processar_escolhidos(&mut self) {
+        if !self.atualizacao_escolhidos_pendente {
+            return;
+        }
+        match self.tarefa_escolhidos.poll() {
+            TaskState::Running | TaskState::Idle => {}
+            TaskState::Done((dono, novos)) => {
+                self.atualizacao_escolhidos_pendente = false;
+                self.tarefa_escolhidos.reset();
+                self.reatualizar_escolhidos = false;
+                let Some(estado) = self.estados.get(&dono).cloned() else {
+                    return;
+                };
+                let n = novos.len();
+                let gravou = estado.mutar(|d| {
+                    for novo in novos {
+                        if let Some(e) = d.escolhidos.iter_mut().find(|e| e.jogador.player_id == novo.jogador.player_id) {
+                            // prioridade pode ter mudado enquanto a leitura rodava
+                            *e = Escolhido { prioridade: e.prioridade, ..novo };
+                        }
+                    }
+                });
+                match gravou {
+                    Ok(()) => tracing::info!("[scout::state] Acompanhamento: {n} Escolhido(s) observado(s) de novo."),
+                    Err(err) => {
+                        // não tenta de novo agora: a mesma leitura viria em
+                        // seguida, para sempre; a próxima abertura do painel tenta
+                        tracing::warn!("[scout::state] Acompanhamento não foi salvo: {err:?}");
+                        return;
+                    }
+                }
+                // a lista ou as vagas podem ter mudado enquanto a leitura rodava
+                // (os observados agora não entram de novo: estão com a data de hoje)
+                if let Some(hoje) = self.data_progresso {
+                    self.atualizar_escolhidos(hoje);
+                }
+            }
+            TaskState::Failed(err) => {
+                self.atualizacao_escolhidos_pendente = false;
+                self.tarefa_escolhidos.reset();
+                tracing::warn!("[scout::state] Acompanhamento dos Escolhidos falhou: {err:?}");
+                // só repete se alguém pediu outra atualização enquanto esta rodava
+                if let (true, Some(hoje)) = (std::mem::take(&mut self.reatualizar_escolhidos), self.data_progresso) {
+                    self.atualizar_escolhidos(hoje);
+                }
+            }
+        }
     }
 
     /// Jogador do elenco escolhido para sobrepor no Radar (`None` tira).
@@ -1253,6 +1963,7 @@ impl ScoutState {
             self.avisar(TipoAviso::Injetado);
         }
         self.processar_buscas();
+        self.processar_escolhidos();
         self.minifaces.tick();
 
         match self.tarefa_localizar.poll() {
@@ -1366,6 +2077,7 @@ impl ScoutState {
             // abrir de novo.
             if self.painel_aberto {
                 self.despachar_missoes(snapshot.data_atual);
+                self.atualizar_escolhidos(snapshot.data_atual);
             }
         }
     }
@@ -1401,9 +2113,104 @@ impl ScoutState {
         }
     }
 
-    /// Lista de contratação (FR-2) contra o orçamento atual.
-    pub fn olheiros_disponiveis(&self) -> Vec<OfertaOlheiro> {
-        ofertas_de_olheiros(self.orcamento())
+    /// Prestígio, liga e títulos do clube (a primeira chamada dispara a
+    /// leitura em background). Falha de leitura não trava o mercado: vale
+    /// `None` (atratividade média), com aviso no log.
+    fn clube(&self) -> Carga<Option<quality::PerfilClube>> {
+        let Some(id_save) = self.save_ativo.clone() else {
+            return Carga::Erro;
+        };
+        match self.tarefa_clube.poll() {
+            TaskState::Done((dono, clube)) if dono == id_save => Carga::Pronto(clube),
+            TaskState::Running => Carga::Carregando,
+            TaskState::Idle | TaskState::Done(_) | TaskState::Failed(_) => {
+                self.tarefa_clube.reset();
+                let fonte = Arc::clone(&self.fonte);
+                self.tarefa_clube.start(move || {
+                    let clube = match fonte.read_club_profile() {
+                        Ok(d) => Some(quality::PerfilClube {
+                            prestigio_nacional: d.prestigio_nacional,
+                            prestigio_internacional: d.prestigio_internacional,
+                            nivel_liga: d.liga.as_ref().map_or(1, |l| l.nivel),
+                            titulos: d.titulos,
+                            pais: d.liga.as_ref().and_then(|l| l.pais),
+                            continente: d.liga.as_ref().map_or(Confederacao::Outras, |l| l.continente),
+                        }),
+                        Err(err) => {
+                            tracing::warn!("[scout::state] Clube do técnico não lido ({err:?}); mercado de Olheiros com atratividade média.");
+                            None
+                        }
+                    };
+                    Ok((id_save, clube))
+                });
+                Carga::Carregando
+            }
+        }
+    }
+
+    /// O mercado de Olheiros do mês (Épico 5, item 3), contra o orçamento
+    /// atual. Espera o clube, as ligas e as nações (lidos em background).
+    pub fn mercado_de_olheiros(&self) -> Carga<MercadoOlheiros> {
+        let (Some(id_save), Some(hoje)) = (self.save_ativo.clone(), self.data_progresso) else {
+            return Carga::Erro;
+        };
+        let clube = match self.clube() {
+            Carga::Pronto(c) => c,
+            Carga::Carregando => return Carga::Carregando,
+            Carga::Erro => None,
+        };
+        let ligas = match self.listar_ligas() {
+            Carga::Pronto(l) => l,
+            Carga::Carregando => return Carga::Carregando,
+            Carga::Erro => Arc::new(Vec::new()),
+        };
+        let nacoes = match self.carga_nacoes() {
+            Carga::Pronto(n) => n,
+            Carga::Carregando => return Carga::Carregando,
+            Carga::Erro => Arc::new(Vec::new()),
+        };
+        // países com clubes no save (sem ligas lidas: todas as nações)
+        let mut paises: Vec<quality::PaisCandidato> = ligas
+            .iter()
+            .filter_map(|l| Some(quality::PaisCandidato { id: l.pais?, continente: l.continente }))
+            .collect();
+        if paises.is_empty() {
+            paises = nacoes.iter().map(|n| quality::PaisCandidato { id: n.id, continente: n.confederacao }).collect();
+        }
+        paises.sort_by_key(|p| p.id);
+        paises.dedup();
+        let referencia = clube.unwrap_or(quality::PerfilClube {
+            prestigio_nacional: 10,
+            prestigio_internacional: 7,
+            nivel_liga: 1,
+            titulos: 0,
+            pais: None,
+            continente: Confederacao::Outras,
+        });
+        let periodo = quality::periodo_do_mercado(hoje.year(), hoje.month());
+        // A atratividade fica fixa no mês (um título novo ou uma leitura que
+        // falhou não sorteiam outro mercado no meio do mês, e o id de uma
+        // oferta contratada continua sendo o mesmo Olheiro).
+        let congelada = self.estado_ativo().and_then(|e| e.ler(|d| d.mercado_do_mes)).filter(|(p, _)| *p == periodo).map(|(_, a)| a);
+        let atratividade = match (congelada, clube) {
+            (Some(a), _) => a,
+            (None, Some(_)) => {
+                let a = quality::atratividade(&referencia);
+                if let Some(estado) = self.estado_ativo() {
+                    if let Err(err) = estado.mutar(|d| d.mercado_do_mes = Some((periodo, a))) {
+                        tracing::warn!("[scout::state] Mercado do mês não foi fixado: {err:?}");
+                    }
+                }
+                a
+            }
+            (None, None) => quality::atratividade(&referencia),
+        };
+        let carreira = semente_da_carreira(&id_save);
+        let candidatos = quality::gerar_ofertas(atratividade, periodo, carreira, &referencia, &paises);
+        let contratadas = self.estado_ativo().map(|e| e.ler(|d| d.ofertas_contratadas.clone())).unwrap_or_default();
+        let ofertas = montar_ofertas(&candidatos, periodo, carreira, &nacoes, &contratadas, self.orcamento());
+        let (ano, mes) = if hoje.month() == 12 { (hoje.year() + 1, 1) } else { (hoje.year(), hoje.month() + 1) };
+        Carga::Pronto(MercadoOlheiros { ofertas, atratividade, clube, renova_em: Date(ano * 10_000 + mes * 100 + 1) })
     }
 
     /// Olheiros já contratados nesta carreira, na ordem de contratação.
@@ -1429,7 +2236,14 @@ impl ScoutState {
                         .iter()
                         .filter(|r| dados.missoes.iter().any(|m| m.id == r.missao_id && m.olheiro_id == olheiro.id))
                         .count();
-                    OlheiroContratado { olheiro: olheiro.clone(), em_missao: missao.is_some(), missao, relatorio_atual, relatorios }
+                    OlheiroContratado {
+                        olheiro: olheiro.clone(),
+                        em_missao: missao.is_some(),
+                        acompanhando: olheiro.acompanhando(),
+                        missao,
+                        relatorio_atual,
+                        relatorios,
+                    }
                 })
                 .collect()
         })
@@ -1439,6 +2253,9 @@ impl ScoutState {
     /// Missão → o Relatório dela (ou a aba Missões, se ainda não há).
     pub fn destino_do_olheiro(&self, id: Uuid) -> Option<DestinoOlheiro> {
         let contratado = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == id)?;
+        if contratado.acompanhando {
+            return Some(DestinoOlheiro::Escolhidos);
+        }
         Some(match (contratado.em_missao, contratado.relatorio_atual) {
             (false, _) => DestinoOlheiro::NovaMissao(id),
             (true, Some(relatorio)) => DestinoOlheiro::Relatorio(relatorio),
@@ -1463,10 +2280,18 @@ impl ScoutState {
         }
     }
 
-    /// "Contratar" clicado: abre a confirmação para essa combinação.
-    pub fn preparar_contratacao(&mut self, especializacao: Especializacao, tier: Tier) {
-        let custo = quality::custo_contratacao(especializacao, tier);
-        self.contratacao = Some(Contratacao { especializacao, tier, custo, erro: None });
+    /// "Contratar" clicado: abre a confirmação para essa oferta, com o nome
+    /// gerado (que o jogador pode trocar).
+    pub fn preparar_contratacao(&mut self, oferta: OfertaOlheiro) {
+        let nome = oferta.olheiro.nome.clone();
+        self.contratacao = Some(Contratacao { oferta, nome, erro: None });
+    }
+
+    /// O nome digitado no modal (aplicado na confirmação).
+    pub fn definir_nome_da_contratacao(&mut self, nome: &str) {
+        if let Some(c) = self.contratacao.as_mut() {
+            c.nome = nome.chars().take(40).collect();
+        }
     }
 
     pub fn cancelar_contratacao(&mut self) {
@@ -1478,9 +2303,10 @@ impl ScoutState {
     pub fn previa_contratacao(&self) -> Option<PreviaContratacao> {
         let contratacao = self.contratacao.clone()?;
         let orcamento_atual = self.orcamento()?;
-        let faltam = (orcamento_atual < contratacao.custo).then(|| contratacao.custo.saturating_sub(orcamento_atual));
+        let custo = contratacao.custo();
+        let faltam = (orcamento_atual < custo).then(|| custo.saturating_sub(orcamento_atual));
         Some(PreviaContratacao {
-            orcamento_apos: orcamento_atual.saturating_sub(contratacao.custo),
+            orcamento_apos: orcamento_atual.saturating_sub(custo),
             orcamento_atual,
             faltam,
             contratacao,
@@ -1493,23 +2319,34 @@ impl ScoutState {
         let Some(contratacao) = self.contratacao.clone() else {
             return false;
         };
+        let oferta = contratacao.oferta.clone();
         let olheiro = Olheiro {
             id: Uuid::new_v4(),
-            especializacao: contratacao.especializacao,
-            tier: contratacao.tier,
             contratado_em: match &self.status {
                 CarreiraStatus::Pronta(c) => Some(c.data_atual),
                 _ => None,
             },
+            nome: crate::scout::nomes::limpar(&contratacao.nome, &oferta.olheiro.nome),
+            oferta_id: Some(oferta.id),
+            acompanhando_desde: None,
+            ..oferta.olheiro.clone()
         };
         let novo = olheiro.clone();
-        match self.comprar(contratacao.custo, move |dados| dados.olheiros.push(novo)) {
+        let custo = contratacao.custo();
+        match self.comprar(custo, move |dados| {
+            dados.olheiros.push(novo);
+            if !dados.ofertas_contratadas.contains(&oferta.id) {
+                dados.ofertas_contratadas.push(oferta.id);
+            }
+        }) {
             Ok(()) => {
                 tracing::info!(
-                    "[scout::state] Olheiro contratado: {} {:?} ({}), id {}.",
+                    "[scout::state] Olheiro contratado: {} ({}, foco {} {}★) por {}, id {}.",
+                    olheiro.nome_exibicao(),
+                    olheiro.tier.nome(),
                     olheiro.especializacao.nome(),
-                    olheiro.tier,
-                    contratacao.custo,
+                    olheiro.perfil().principal().texto(),
+                    custo,
                     olheiro.id
                 );
                 self.contratacao = None;
@@ -1575,16 +2412,17 @@ impl ScoutState {
     /// Especialização dele (`quality::filtros_ideais`). Olheiro em Missão
     /// ou inexistente: nada abre.
     pub fn abrir_nova_missao(&mut self, olheiro_id: Uuid) {
-        let Some(contratado) = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == olheiro_id && !c.em_missao)
+        let Some(contratado) = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == olheiro_id && !c.ocupado())
         else {
             return;
         };
         self.detalhes_da_missao = false;
         self.rascunho_missao = Some(RascunhoMissao {
             olheiro_id: Some(olheiro_id),
-            filtros: quality::filtros_ideais(contratado.olheiro.especializacao),
+            filtros: quality::filtros_ideais(contratado.olheiro.perfil().foco()),
             modo: ModoBusca::Rapida,
             continua: false,
+            investimento: quality::Investimento::Padrao,
             erro: None,
         });
     }
@@ -1593,7 +2431,7 @@ impl ScoutState {
     pub fn restaurar_filtros_ideais(&mut self) {
         let especializacao = self.previa_missao().and_then(|p| {
             let id = p.rascunho.olheiro_id?;
-            p.olheiros.into_iter().find(|c| c.olheiro.id == id).map(|c| c.olheiro.especializacao)
+            p.olheiros.into_iter().find(|c| c.olheiro.id == id).map(|c| c.olheiro.perfil().foco())
         });
         if let (Some(e), Some(r)) = (especializacao, self.rascunho_missao.as_mut()) {
             r.filtros = quality::filtros_ideais(e);
@@ -1636,17 +2474,31 @@ impl ScoutState {
     /// dispara a leitura em background; uma falha é tentada de novo). O
     /// filtro geográfico passou a usar as ligas (`listar_ligas`); o
     /// cartograma de nações fica para o Sonar (Épico 4).
-    #[allow(dead_code)] // Sonar (Épico 4)
     pub fn nacoes(&self) -> Option<Arc<Vec<Nacao>>> {
+        match self.carga_nacoes() {
+            Carga::Pronto(nacoes) => Some(nacoes),
+            _ => None,
+        }
+    }
+
+    /// As nações como `Carga`: uma falha fica como erro (a próxima abertura
+    /// do painel tenta de novo), sem disparar uma leitura por frame.
+    fn carga_nacoes(&self) -> Carga<Arc<Vec<Nacao>>> {
         match self.tarefa_nacoes.poll() {
-            TaskState::Done(nacoes) => Some(nacoes),
-            TaskState::Running => None,
-            TaskState::Idle | TaskState::Failed(_) => {
+            TaskState::Done(nacoes) => Carga::Pronto(nacoes),
+            TaskState::Running => Carga::Carregando,
+            TaskState::Failed(_) => Carga::Erro,
+            TaskState::Idle => {
                 let fonte = Arc::clone(&self.fonte);
                 self.tarefa_nacoes.start(move || fonte.read_nations().map(Arc::new));
-                None
+                Carga::Carregando
             }
         }
+    }
+
+    /// Nome de uma nação (mercados dos Olheiros), se as nações já foram lidas.
+    pub fn nome_da_nacao(&self, id: u16) -> Option<String> {
+        self.nacoes()?.iter().find(|n| n.id == id).map(|n| n.nome.clone())
     }
 
     /// Ligas com clubes da carreira pronta (filtro geográfico). A primeira
@@ -1982,6 +2834,69 @@ impl ScoutState {
         }
     }
 
+    /// Verba da viagem (Épico 5, item 6).
+    pub fn definir_investimento_da_missao(&mut self, investimento: quality::Investimento) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.investimento = investimento;
+            r.erro = None;
+        }
+    }
+
+    /// Os lugares do filtro geográfico, para os mercados dos Olheiros: uma
+    /// liga vale pelo país dela (ou pelo continente, se não tem país).
+    fn regioes_dos_filtros(filtros: &FiltrosMissao, ligas: &[Liga]) -> Vec<quality::Regiao> {
+        let continente_do_pais = |id: u16| ligas.iter().find(|l| l.pais == Some(id)).map_or(Confederacao::Outras, |l| l.continente);
+        let mut regioes: Vec<quality::Regiao> = filtros.continentes.iter().map(|&c| quality::Regiao::Continente(c)).collect();
+        regioes.extend(filtros.paises_dos_clubes.iter().map(|&p| quality::Regiao::Pais { id: p, continente: continente_do_pais(p) }));
+        for id in &filtros.ligas {
+            match ligas.iter().find(|l| l.id == *id) {
+                Some(Liga { pais: Some(p), continente, .. }) => regioes.push(quality::Regiao::Pais { id: *p, continente: *continente }),
+                Some(l) => regioes.push(quality::Regiao::Continente(l.continente)),
+                None => {}
+            }
+        }
+        regioes.dedup();
+        regioes
+    }
+
+    /// O que o Olheiro já trabalhou até `hoje` (as Missões dele): a
+    /// experiência que adapta a mercados e tipos novos (Épico 5).
+    fn trabalhos_do_olheiro(dados: &persistence::ScoutStateFile, olheiro: Uuid, hoje: Date, ligas: &[Liga]) -> Vec<quality::TrabalhoPassado> {
+        dados
+            .missoes
+            .iter()
+            .filter(|m| m.olheiro_id == olheiro && m.criada_em <= hoje)
+            .map(|m| {
+                let fim = hoje.min(m.prazo_estimado);
+                let regioes = Self::regioes_dos_filtros(&m.filtros, ligas);
+                quality::TrabalhoPassado {
+                    tipo: m.tipo,
+                    regioes: if regioes.is_empty() { vec![quality::Regiao::Mundo] } else { regioes },
+                    dias: u32::try_from((fim.day_number() - m.criada_em.day_number()).max(0)).unwrap_or(0),
+                }
+            })
+            .collect()
+    }
+
+    /// Penalidade de mercado e de fora do foco de um Olheiro numa Missão com
+    /// estes filtros, hoje (e a pior distância de mercado, para a tela).
+    fn penalidade_para(&self, olheiro: &Olheiro, filtros: &FiltrosMissao, tipo: quality::TipoMissao, hoje: Date) -> (quality::Penalidade, u8) {
+        // Olheiro de antes das estrelas: segue a tabela do v1, sem mercado nem foco
+        if olheiro.perfil.is_none() {
+            return (quality::Penalidade::default(), 0);
+        }
+        let ligas = self.ligas_carregadas();
+        let regioes = Self::regioes_dos_filtros(filtros, &ligas);
+        let trabalhos = self
+            .estado_ativo()
+            .map(|e| e.ler(|d| Self::trabalhos_do_olheiro(d, olheiro.id, hoje, &ligas)))
+            .unwrap_or_default();
+        let penalidade = quality::penalidade_missao(&olheiro.perfil(), &olheiro.mercados, &regioes, tipo, &trabalhos);
+        let alvo: &[quality::Regiao] = if regioes.is_empty() { &[quality::Regiao::Mundo] } else { &regioes };
+        let distancia = alvo.iter().map(|&r| quality::distancia_mercado(&olheiro.mercados, r)).max().unwrap_or(0);
+        (penalidade, distancia)
+    }
+
     /// O formulário inteiro, ou `None` se ele não está aberto (ou a
     /// carreira deixou de estar pronta — o formulário deve fechar).
     pub fn previa_missao(&self) -> Option<PreviaMissao> {
@@ -1993,18 +2908,28 @@ impl ScoutState {
         let olheiros = self.olheiros_contratados();
         let escolhido = rascunho
             .olheiro_id
-            .and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && !c.em_missao))
+            .and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && !c.ocupado()))
             .map(|c| c.olheiro.clone());
         let tipo = quality::tipo_por_filtros(&rascunho.filtros);
         let amplitude = self.amplitude_da_geografia(&rascunho.filtros);
-        let estimativa = escolhido.as_ref().map(|o| {
-            quality::estimar_missao(&quality::PedidoMissao {
-                tier: o.tier,
-                especializacao: o.especializacao,
-                modo: rascunho.modo,
-                tipo,
-                amplitude,
-            })
+        let (penalidade, distancia_mercado) =
+            escolhido.as_ref().map_or_else(Default::default, |o| self.penalidade_para(o, &rascunho.filtros, tipo, data_atual));
+        let pedido = |o: &Olheiro, investimento| quality::PedidoMissao {
+            perfil: o.perfil(),
+            modo: rascunho.modo,
+            tipo,
+            amplitude,
+            penalidade,
+            investimento,
+        };
+        let estimativa = escolhido.as_ref().map(|o| quality::estimar_missao(&pedido(o, rascunho.investimento)));
+        let custos_por_verba = escolhido
+            .as_ref()
+            .map(|o| quality::Investimento::TODOS.iter().map(|&i| (i, quality::estimar_missao(&pedido(o, i)).custo)).collect())
+            .unwrap_or_default();
+        let fora_do_foco = escolhido.as_ref().is_some_and(|o| {
+            let foco = o.perfil().foco();
+            tipo != quality::TipoMissao::Geral && foco != Especializacao::Generalista && !quality::combina(foco, tipo)
         });
         let bloqueio = if escolhido.is_none() {
             Some(BloqueioMissao::SemOlheiroDisponivel)
@@ -2031,7 +2956,11 @@ impl ScoutState {
             teto_salario: rascunho.filtros.limite_salario.teto(folha_disponivel),
             orcamento_apos_missao,
             folha_disponivel,
-            combina: escolhido.as_ref().is_some_and(|o| quality::combina(o.especializacao, tipo)),
+            combina: escolhido.as_ref().is_some_and(|o| quality::combina(o.perfil().foco(), tipo)),
+            penalidade,
+            distancia_mercado,
+            fora_do_foco,
+            custos_por_verba,
             rascunho,
             olheiros,
             tipo,
@@ -2072,6 +3001,7 @@ impl ScoutState {
             blocos: 1,
             blocos_buscados: 0,
             renovacoes: Vec::new(),
+            investimento: previa.rascunho.investimento,
         };
         let nova = missao.clone();
         match self.comprar(estimativa.custo, move |dados| dados.missoes.push(nova)) {
@@ -2162,7 +3092,8 @@ impl ScoutState {
         };
         let depois = |d: Date| d > data_do_save;
         let desfeitos = estado.ler(|dados| {
-            dados.olheiros.iter().filter(|o| o.contratado_em.is_some_and(depois)).count()
+            dados.olheiros.iter().filter(|o| o.contratado_em.is_some_and(depois) || o.acompanhando_desde.is_some_and(depois)).count()
+                + dados.escolhidos.iter().filter(|e| depois(e.adicionado_em) || depois(e.observado_em)).count()
                 + dados
                     .missoes
                     .iter()
@@ -2177,7 +3108,26 @@ impl ScoutState {
             return 0;
         }
         let resultado = estado.mutar(|dados| {
+            // Olheiros contratados depois saem, e a oferta deles volta ao mercado.
+            let saem: Vec<Uuid> =
+                dados.olheiros.iter().filter(|o| o.contratado_em.is_some_and(depois)).filter_map(|o| o.oferta_id).collect();
+            dados.ofertas_contratadas.retain(|id| !saem.contains(id));
             dados.olheiros.retain(|o| !o.contratado_em.is_some_and(depois));
+            for o in dados.olheiros.iter_mut().filter(|o| o.acompanhando_desde.is_some_and(depois)) {
+                o.acompanhando_desde = None;
+            }
+            // Escolhidos: os adicionados depois saem; uma observação feita
+            // depois (atualização do acompanhamento) passa a valer da data
+            // do save, com os dias a mais descontados — não há como refazer
+            // a observação daquele dia, só não deixar o tempo andar sozinho.
+            dados.escolhidos.retain(|e| !depois(e.adicionado_em));
+            for e in dados.escolhidos.iter_mut().filter(|e| depois(e.observado_em)) {
+                let excesso = u32::try_from(e.observado_em.day_number() - data_do_save.day_number()).unwrap_or(0);
+                e.observado_em = data_do_save;
+                if let Some(a) = e.acompanhamento.as_mut() {
+                    a.dias = a.dias.saturating_sub(excesso);
+                }
+            }
             let removidas: Vec<Uuid> = dados.missoes.iter().filter(|m| depois(m.criada_em)).map(|m| m.id).collect();
             dados.missoes.retain(|m| !removidas.contains(&m.id));
             dados.relatorios.retain(|r| !removidas.contains(&r.missao_id));
@@ -3248,22 +4198,95 @@ mod tests {
         assert_eq!(localizacoes.load(Ordering::SeqCst), 0);
     }
 
+    /// Uma oferta de Olheiro do v1 (Especialização × Tier) com o custo da
+    /// tabela antiga (os testes de compra conferem valores exatos).
+    fn oferta_v1(especializacao: Especializacao, tier: Tier) -> OfertaOlheiro {
+        let custo = match (especializacao, tier) {
+            (Especializacao::Generalista, Tier::Junior) => 300_000,
+            (Especializacao::Tatico, Tier::Elite) => 5_200_000,
+            _ => 1_500_000,
+        };
+        let id = Uuid::new_v4();
+        let olheiro = Olheiro {
+            id,
+            especializacao,
+            tier,
+            nome: "Carlos Teste".to_string(),
+            perfil: Some(quality::PerfilOlheiro::v1(especializacao, tier)),
+            oferta_id: Some(id),
+            ..Default::default()
+        };
+        OfertaOlheiro { id, olheiro, custo, faltam: None }
+    }
+
+    fn candidato(indice: u32, foco: u8, pais: u16) -> quality::CandidatoOlheiro {
+        let e = quality::Estrelas(foco);
+        quality::CandidatoOlheiro {
+            indice,
+            semente: u64::from(indice) * 7919,
+            perfil: quality::PerfilOlheiro { jovens: e, medalhoes: e.menos(2), tatico: e.menos(2), generalista: e.menos(2), rede: quality::Estrelas(5) },
+            pais: Some(pais),
+            mercados: vec![quality::Mercado::Pais { id: pais, continente: Confederacao::AmericaDoSul }],
+        }
+    }
+
     #[test]
-    fn offers_list_the_twelve_combinations_in_tier_order_with_the_shortfall() {
-        let ofertas = ofertas_de_olheiros(Some(1_000_000));
-        assert_eq!(ofertas.len(), 12);
-        let primeiras: Vec<_> = ofertas.iter().take(4).map(|o| (o.especializacao, o.tier)).collect();
-        assert_eq!(primeiras, Especializacao::TODAS.map(|e| (e, Tier::Junior)).to_vec());
-        assert!(ofertas.iter().take(4).all(|o| o.faltam.is_none()), "Júnior cabe em 1 M");
-        let exp_generalista = ofertas
-            .iter()
-            .find(|o| (o.especializacao, o.tier) == (Especializacao::Generalista, Tier::Experiente))
-            .map(|o| o.faltam);
-        assert_eq!(exp_generalista, Some(Some(200_000)));
-        // custo exatamente igual ao saldo: dá para pagar
-        let custo = quality::custo_contratacao(Especializacao::Tatico, Tier::Elite);
-        let exata = ofertas_de_olheiros(Some(custo));
-        assert!(exata.iter().any(|o| o.custo == custo && o.faltam.is_none()));
+    fn offers_get_a_name_a_nation_a_cost_and_leave_the_list_once_hired() {
+        let nacoes = vec![
+            Nacao { id: 54, nome: "Brazil".to_string(), iso: "BR".to_string(), confederacao: Confederacao::AmericaDoSul },
+            Nacao { id: 52, nome: "Argentina".to_string(), iso: "AR".to_string(), confederacao: Confederacao::AmericaDoSul },
+        ];
+        let candidatos = [candidato(0, 9, 54), candidato(1, 5, 52), candidato(2, 7, 54)];
+        let ofertas = montar_ofertas(&candidatos, 24_400, 42, &nacoes, &[], Some(1_000_000));
+        assert_eq!(ofertas.len(), 3);
+        assert!(ofertas.windows(2).all(|w| w[0].custo <= w[1].custo), "do mais barato ao mais caro");
+        let barato = &ofertas[0];
+        assert_eq!(barato.olheiro.tier, Tier::Junior);
+        assert_eq!(barato.olheiro.nacao.as_ref().map(|n| n.nome.as_str()), Some("Argentina"));
+        assert!(!barato.olheiro.nome.is_empty());
+        assert_eq!(barato.faltam, None, "Júnior cabe em 1 M");
+        let elite = ofertas.iter().find(|o| o.olheiro.tier == Tier::Elite).expect("elite");
+        assert_eq!(elite.faltam, Some(elite.custo - 1_000_000));
+        assert_eq!(elite.olheiro.perfil().foco(), Especializacao::CacadorDeJovens);
+        // mesma carreira e mês: mesmos ids; contratada sai da lista
+        let de_novo = montar_ofertas(&candidatos, 24_400, 42, &nacoes, &[elite.id], Some(1_000_000));
+        assert_eq!(de_novo.len(), 2);
+        assert!(de_novo.iter().all(|o| o.id != elite.id));
+        assert_eq!(semente_da_carreira(ID_A), 0xaaaa_aaaa_aaaa_aaaa);
+    }
+
+    #[test]
+    fn the_market_loads_in_background_and_hiring_from_it_saves_the_name_and_removes_the_offer() {
+        let pasta = PastaTemporaria::nova();
+        let (mut st, escritas) = estado_contratacao(63_999_988, 63_000_000, Some(pasta.0.clone()), vec![]);
+        let inicio = Instant::now();
+        let mercado = loop {
+            match st.mercado_de_olheiros() {
+                Carga::Pronto(m) => break m,
+                _ => {
+                    assert!(inicio.elapsed() < Duration::from_secs(5), "mercado não carregou");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        };
+        // a fonte falsa não dá o clube: atratividade média
+        assert_eq!(mercado.clube, None);
+        assert!(mercado.ofertas.len() >= 4);
+        assert_eq!(mercado.renova_em, Date(20260801));
+        let oferta = mercado.ofertas[0].clone();
+        st.preparar_contratacao(oferta.clone());
+        st.definir_nome_da_contratacao("  Zé Olheiro  ");
+        assert!(st.confirmar_contratacao());
+        assert_eq!(escritas_de(&escritas), [(63_999_988, 63_999_988 - oferta.custo)]);
+        let contratado = st.olheiros_contratados().remove(0).olheiro;
+        assert_eq!(contratado.nome, "Zé Olheiro");
+        assert_ne!(contratado.id, oferta.id, "o id de verdade é novo");
+        assert_eq!((contratado.oferta_id, contratado.perfil, contratado.mercados.clone()), (Some(oferta.id), oferta.olheiro.perfil, oferta.olheiro.mercados.clone()));
+        let depois = match st.mercado_de_olheiros() {
+            Carga::Pronto(m) => m,
+            outro => panic!("{outro:?}"),
+        };
+        assert!(depois.ofertas.iter().all(|o| o.id != oferta.id), "a oferta contratada saiu do mês");
     }
 
     #[test]
@@ -3275,8 +4298,8 @@ mod tests {
         assert!(st.olheiros_contratados().is_empty());
         assert_eq!(st.orcamento(), Some(63_999_988));
 
-        let ocupado = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente, contratado_em: None };
-        let livre = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Generalista, tier: Tier::Junior, contratado_em: None };
+        let ocupado = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente, ..Default::default() };
+        let livre = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Generalista, tier: Tier::Junior, ..Default::default() };
         let missao = |olheiro: &Olheiro, status| Missao::de_teste(olheiro.id, status);
         let missoes = vec![missao(&ocupado, StatusMissao::Pendente), missao(&livre, StatusMissao::Concluida)];
         let (o1, o2) = (ocupado.clone(), livre.clone());
@@ -3307,10 +4330,10 @@ mod tests {
     fn hiring_debits_the_budget_then_saves_the_olheiro_and_shows_the_reread_balance() {
         let pasta = PastaTemporaria::nova();
         let (mut st, escritas) = estado_contratacao(63_999_988, 63_699_988, Some(pasta.0.clone()), vec![]);
-        st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+        st.preparar_contratacao(oferta_v1(Especializacao::Generalista, Tier::Junior));
         let previa = st.previa_contratacao().expect("modal aberto");
         assert_eq!(
-            (previa.contratacao.custo, previa.orcamento_atual, previa.orcamento_apos),
+            (previa.contratacao.custo(), previa.orcamento_atual, previa.orcamento_apos),
             (300_000, 63_999_988, 63_699_988)
         );
         assert_eq!(previa.faltam, None);
@@ -3336,7 +4359,7 @@ mod tests {
     fn insufficient_budget_never_writes() {
         let pasta = PastaTemporaria::nova();
         let (mut st, escritas) = estado_contratacao(100_000, 100_000, Some(pasta.0.clone()), vec![]);
-        st.preparar_contratacao(Especializacao::Tatico, Tier::Elite);
+        st.preparar_contratacao(oferta_v1(Especializacao::Tatico, Tier::Elite));
         assert_eq!(st.previa_contratacao().and_then(|p| p.faltam), Some(5_100_000));
         assert!(!st.confirmar_contratacao());
         assert_eq!(erro_da_contratacao(&st), Some(ErroCompra::OrcamentoInsuficiente { faltam: 5_100_000 }));
@@ -3354,7 +4377,7 @@ mod tests {
             let pasta = PastaTemporaria::nova();
             let (mut st, escritas) =
                 estado_contratacao(63_999_988, 63_999_988, Some(pasta.0.clone()), vec![resultado]);
-            st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+            st.preparar_contratacao(oferta_v1(Especializacao::Generalista, Tier::Junior));
             assert!(!st.confirmar_contratacao());
             assert_eq!(erro_da_contratacao(&st), Some(esperado));
             assert_eq!(escritas_de(&escritas).len(), 1);
@@ -3366,7 +4389,7 @@ mod tests {
     #[test]
     fn without_a_writable_state_file_the_budget_is_not_touched() {
         let (mut st, escritas) = estado_contratacao(63_999_988, 63_999_988, None, vec![]);
-        st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+        st.preparar_contratacao(oferta_v1(Especializacao::Generalista, Tier::Junior));
         assert!(!st.confirmar_contratacao());
         assert_eq!(erro_da_contratacao(&st), Some(ErroCompra::EstadoNaoSalvavel));
         assert!(escritas_de(&escritas).is_empty());
@@ -3389,7 +4412,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             let _ = std::fs::write(&dir, b"x");
 
-            st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+            st.preparar_contratacao(oferta_v1(Especializacao::Generalista, Tier::Junior));
             assert!(!st.confirmar_contratacao());
             assert_eq!(erro_da_contratacao(&st), Some(esperado));
             assert_eq!(escritas_de(&escritas), [(63_999_988, 63_699_988), (63_699_988, 63_999_988)]);
@@ -3400,7 +4423,7 @@ mod tests {
     #[test]
     fn cancelling_closes_the_preview_without_writing() {
         let (mut st, escritas) = estado_contratacao(63_999_988, 63_999_988, None, vec![]);
-        st.preparar_contratacao(Especializacao::Generalista, Tier::Junior);
+        st.preparar_contratacao(oferta_v1(Especializacao::Generalista, Tier::Junior));
         st.cancelar_contratacao();
         assert_eq!(st.previa_contratacao(), None);
         assert!(escritas_de(&escritas).is_empty());
@@ -3430,7 +4453,7 @@ mod tests {
     }
 
     fn olheiro(especializacao: Especializacao, tier: Tier) -> Olheiro {
-        Olheiro { id: Uuid::new_v4(), especializacao, tier, contratado_em: None }
+        Olheiro { id: Uuid::new_v4(), especializacao, tier, ..Default::default() }
     }
 
     #[test]
@@ -4360,5 +5383,381 @@ mod tests {
 
         // nada mais a desfazer: reativar nÃ£o mexe
         assert_eq!(st.voltar_no_tempo(Date(20260703)), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Épico 5: Olheiros com mercado e foco; Épico 6: Lista de Escolhidos
+    // -----------------------------------------------------------------
+
+    /// Um Olheiro novo (Épico 5): perfil em estrelas e mercado no Brasil.
+    fn olheiro_brasileiro(foco: Especializacao, meias: u8) -> Olheiro {
+        let e = quality::Estrelas(meias);
+        let mut perfil = quality::PerfilOlheiro { jovens: e.menos(3), medalhoes: e.menos(3), tatico: e.menos(3), generalista: e.menos(3), rede: quality::Estrelas(6) };
+        match foco {
+            Especializacao::CacadorDeJovens => perfil.jovens = e,
+            Especializacao::CacadorDeMedalhoes => perfil.medalhoes = e,
+            Especializacao::Tatico => perfil.tatico = e,
+            Especializacao::Generalista => perfil.generalista = e,
+        }
+        Olheiro {
+            id: Uuid::new_v4(),
+            especializacao: perfil.foco(),
+            tier: perfil.tier(),
+            nome: "Paulo Medeiros".to_string(),
+            nacao: Some(NacaoOlheiro { id: 54, nome: "Brazil".to_string(), continente: Confederacao::AmericaDoSul }),
+            perfil: Some(perfil),
+            mercados: vec![quality::Mercado::Pais { id: 54, continente: Confederacao::AmericaDoSul }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_preview_charges_market_distance_until_the_olheiro_adapts_and_offers_three_budgets() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro_brasileiro(Especializacao::Generalista, 7);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &o);
+        st.ao_abrir_painel();
+        esperar_ligas(&st);
+        st.abrir_nova_missao(o.id);
+        // Brasileirão (liga 7): o mercado dele
+        st.alternar_liga_da_missao(7);
+        let em_casa = st.previa_missao().expect("formulário");
+        assert_eq!((em_casa.distancia_mercado, em_casa.penalidade), (0, quality::Penalidade::default()));
+        // Premier League (liga 13, Inglaterra): outro continente
+        st.limpar_geografia_da_missao();
+        st.alternar_liga_da_missao(13);
+        let longe = st.previa_missao().expect("formulário");
+        assert_eq!(longe.distancia_mercado, 2);
+        assert_eq!(longe.penalidade, quality::Penalidade { qualidade: 2, velocidade: 4 });
+        let (e_casa, e_longe) = (em_casa.estimativa.expect("estimativa"), longe.estimativa.expect("estimativa"));
+        assert!(e_longe.duracao_dias > e_casa.duracao_dias);
+        assert!(e_longe.atributos_revelados < e_casa.atributos_revelados || e_longe.qualidade < e_casa.qualidade);
+        // três verbas, do mais barato ao mais caro; a escolhida vai para a Missão
+        let custos: Vec<i32> = longe.custos_por_verba.iter().map(|(_, c)| *c).collect();
+        assert_eq!(custos.len(), 3);
+        assert!(custos[0] < custos[1] && custos[1] < custos[2], "{custos:?}");
+        st.definir_investimento_da_missao(quality::Investimento::Reforcada);
+        let reforcada = st.previa_missao().expect("formulário");
+        assert_eq!(reforcada.estimativa.map(|e| e.custo), Some(custos[2]));
+        assert!(st.confirmar_nova_missao());
+        let gravada = st.estado_ativo().map(|e| e.ler(|d| d.missoes[0].clone())).expect("missão");
+        assert_eq!(gravada.investimento, quality::Investimento::Reforcada);
+
+        // seis meses depois, com a Missão inglesa no currículo, a penalidade some
+        st.data_progresso = Some(Date(20270115));
+        let livre = st.estado_ativo().cloned().expect("estado");
+        livre.mutar(|d| d.missoes[0].status = StatusMissao::Concluida).expect("gravou");
+        livre.mutar(|d| d.missoes[0].prazo_estimado = Date(20270110)).expect("gravou");
+        let (penalidade, distancia) = st.penalidade_para(&o, &gravada.filtros, gravada.tipo, Date(20270115));
+        assert_eq!(distancia, 2, "o mercado de origem não muda");
+        assert_eq!(penalidade, quality::Penalidade::default(), "adaptado");
+    }
+
+    #[test]
+    fn a_specialist_out_of_focus_is_warned_in_the_preview() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro_brasileiro(Especializacao::CacadorDeJovens, 7);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &o);
+        st.ao_abrir_painel();
+        esperar_ligas(&st);
+        st.abrir_nova_missao(o.id);
+        st.alternar_liga_da_missao(7);
+        assert!(!st.previa_missao().expect("formulário").fora_do_foco, "abre com os filtros dele (Jovens)");
+        st.aplicar_atalho_da_missao(Atalho::MudaPatamar);
+        let previa = st.previa_missao().expect("formulário");
+        assert_eq!(previa.tipo, quality::TipoMissao::Medalhoes);
+        assert!(previa.fora_do_foco);
+        assert_eq!(previa.penalidade.qualidade, 2, "1 estrela a menos até se habituar");
+    }
+
+    /// `tick` até a atualização dos Escolhidos terminar.
+    fn ticks_ate_acompanhar(st: &mut ScoutState) {
+        let inicio = Instant::now();
+        loop {
+            st.tick();
+            if !st.atualizacao_escolhidos_pendente {
+                return;
+            }
+            assert!(inicio.elapsed() < Duration::from_secs(5), "acompanhamento falso travou");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn escolhido_de_teste(player_id: u32, observado: i32) -> Escolhido {
+        let mut jogador = search::revelar(
+            &Missao::de_teste(Uuid::new_v4(), StatusMissao::Concluida),
+            &pool_de_teste(),
+            Date(observado),
+            pool_de_teste().jogadores.iter().find(|j| j.player_id == player_id).expect("jogador do pool"),
+        );
+        jogador.atributos.truncate(6);
+        Escolhido {
+            jogador,
+            adicionado_em: Date(observado),
+            observado_em: Date(observado),
+            precisao: 10,
+            prioridade: false,
+            acompanhamento: None,
+            alvo: None,
+            referencia: None,
+            relatorio_id: None,
+        }
+    }
+
+    #[test]
+    fn a_player_added_from_the_ficha_ages_until_a_new_analysis_is_needed() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let vencida = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![vencida], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let item = st.relatorios(false).into_iter().next().expect("Relatório");
+        let pid = item.relatorio.jogadores[0].player_id;
+        st.abrir_relatorio(item.relatorio.id);
+        st.abrir_ficha(pid);
+        assert_eq!(st.ficha_aberta().and_then(|f| f.escolhido), None);
+        assert!(st.adicionar_escolhido_da_ficha());
+        assert!(!st.adicionar_escolhido_da_ficha(), "já está na lista");
+        let ficha = st.ficha_aberta().expect("Ficha");
+        assert!(ficha.escolhido.is_some() && !ficha.da_lista);
+        assert!(st.esta_nos_escolhidos(pid));
+
+        let lista = st.escolhidos();
+        assert_eq!(lista.len(), 1);
+        let e = &lista[0];
+        assert_eq!((e.frescor, e.acompanhado), (quality::Frescor::Atualizado, false));
+        assert_eq!(e.escolhido.precisao, item.relatorio.precisao_mais_menos);
+        let observados = e.jogador.atributos.len();
+        assert!(observados > 0);
+
+        // 8 meses: envelhecendo, faixas mais largas
+        st.data_progresso = Some(Date(20270312));
+        let e = st.escolhidos().remove(0);
+        assert!(matches!(e.frescor, quality::Frescor::Envelhecendo { .. }), "{:?}", e.frescor);
+        assert!(e.precisao > e.escolhido.precisao);
+        assert!(e.jogador.overall.max - e.jogador.overall.min > e.escolhido.jogador.overall.max - e.escolhido.jogador.overall.min);
+        // 13 meses: desatualizado; 19 meses: vencido, sem atributos
+        st.data_progresso = Some(Date(20270812));
+        assert!(matches!(st.escolhidos()[0].frescor, quality::Frescor::Desatualizado { .. }));
+        st.data_progresso = Some(Date(20280212));
+        let vencido = st.escolhidos().remove(0);
+        assert_eq!(vencido.frescor, quality::Frescor::Vencido);
+        assert!(vencido.jogador.atributos.is_empty());
+        assert_eq!(vencido.escolhido.jogador.atributos.len(), observados, "o arquivo guarda a última observação");
+
+        // a Ficha também abre da lista
+        st.fechar_relatorio();
+        st.abrir_ficha_de_escolhido(pid);
+        let ficha = st.ficha_aberta().expect("Ficha do Escolhido");
+        assert!(ficha.da_lista);
+        assert_eq!(ficha.item.relatorio.qualidade, Qualidade::Baixa, "faixas largas");
+        assert!(st.remover_escolhido(pid));
+        assert!(st.escolhidos().is_empty());
+        assert_eq!(st.ficha_aberta(), None, "sem o Escolhido, a Ficha fecha");
+    }
+
+    #[test]
+    fn designated_generalists_keep_their_vacancies_updated_until_exact() {
+        let pasta = PastaTemporaria::nova();
+        let g = olheiro(Especializacao::Generalista, Tier::Junior); // 2,5★: 5 vagas
+        let t = olheiro(Especializacao::Tatico, Tier::Elite);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &g);
+        st.ao_abrir_painel();
+        let estado = st.estado_ativo().cloned().expect("estado");
+        let (t2, lista) = (t.clone(), (1..=6).map(|i| escolhido_de_teste(i, 20260601 + i as i32)).collect::<Vec<_>>());
+        estado.mutar(move |d| { d.olheiros.push(t2); d.escolhidos = lista; }).expect("gravou");
+        assert_eq!(st.resumo_acompanhamento().vagas, 0);
+
+        // só Generalista livre pode ser designado
+        assert!(!st.designar_acompanhamento(t.id, true), "Tático não acompanha");
+        assert!(st.designar_acompanhamento(g.id, true));
+        assert!(!st.designar_acompanhamento(g.id, true), "já designado");
+        ticks_ate_acompanhar(&mut st);
+        let resumo = st.resumo_acompanhamento();
+        assert_eq!((resumo.generalistas, resumo.vagas, resumo.jogadores, resumo.acompanhados), (1, 5, 6, 5));
+        let lista = st.escolhidos();
+        assert_eq!(lista.iter().filter(|e| e.acompanhado).count(), 5);
+        assert!(!lista[5].acompanhado && lista[5].escolhido.jogador.player_id == 6, "o mais novo fica sem vaga");
+        let primeiro = &lista[0];
+        let a = primeiro.escolhido.acompanhamento.expect("acompanhamento começou");
+        assert_eq!(primeiro.escolhido.observado_em, Date(20260712));
+        assert_eq!(a.dias, 0);
+        assert!(primeiro.dias_para_exato.is_some_and(|d| d > 0));
+
+        // designado não aceita Missão; o clique leva à aba Escolhidos
+        st.abrir_nova_missao(g.id);
+        assert!(!st.tem_nova_missao());
+        assert_eq!(st.destino_do_olheiro(g.id), Some(DestinoOlheiro::Escolhidos));
+
+        // depois do tempo todo, exato e com todos os atributos
+        let fim = Date(20260712).mais_dias(a.dias_para_exato);
+        st.data_progresso = Some(fim);
+        st.atualizar_escolhidos(fim);
+        ticks_ate_acompanhar(&mut st);
+        let exato = st.escolhidos().remove(0);
+        assert_eq!((exato.precisao, exato.dias_para_exato), (0, Some(0)));
+        assert_eq!(exato.jogador.overall.min, exato.jogador.overall.max, "valor exato");
+        assert_eq!(exato.jogador.atributos.len(), 28);
+        let real = pool_de_teste().jogadores.into_iter().find(|j| j.player_id == exato.escolhido.jogador.player_id).expect("real");
+        assert_eq!(exato.jogador.overall.min, real.overall);
+
+        // prioridade: o 6º toma a vaga do 5º, que deixa de ser acompanhado
+        st.alternar_prioridade_escolhido(6);
+        ticks_ate_acompanhar(&mut st);
+        let lista = st.escolhidos();
+        assert_eq!(lista[0].escolhido.jogador.player_id, 6);
+        assert!(lista[0].acompanhado && lista[0].escolhido.acompanhamento.is_some());
+        let quinto = lista.iter().find(|e| e.escolhido.jogador.player_id == 5).expect("5");
+        assert!(!quinto.acompanhado && quinto.escolhido.acompanhamento.is_none());
+
+        // liberar: ninguém mais é acompanhado e ele volta a aceitar Missão
+        assert!(st.designar_acompanhamento(g.id, false));
+        assert!(st.escolhidos().iter().all(|e| !e.acompanhado && e.escolhido.acompanhamento.is_none()));
+        st.abrir_nova_missao(g.id);
+        assert!(st.tem_nova_missao());
+    }
+
+    #[test]
+    fn a_retired_player_keeps_the_last_observation_without_rereading_forever() {
+        let e = escolhido_de_teste(3, 20260601);
+        let sem_ele = pool(Vec::new());
+        let hoje = Date(20260712);
+        let depois = avancar_escolhido(&e, &sem_ele, hoje);
+        assert_eq!(depois.jogador, e.jogador, "nada novo a observar");
+        assert_eq!(depois.observado_em, hoje, "não entra de novo na fila");
+        assert!(depois.acompanhamento.is_some());
+        let de_novo = avancar_escolhido(&depois, &sem_ele, hoje.mais_dias(10));
+        assert_eq!(de_novo.acompanhamento.map(|a| a.dias), Some(10));
+    }
+
+    #[test]
+    fn a_false_positive_shows_up_once_the_player_is_exact() {
+        let hoje = Date(20260712);
+        let mut e = escolhido_de_teste(3, 20260712);
+        e.jogador.falso_positivo = true;
+        assert!(!escolhido_em(&e, hoje, false).fora_do_filtro, "com faixas, ninguém sabe");
+        let exato = Escolhido { precisao: 0, ..e };
+        assert!(escolhido_em(&exato, hoje, false).fora_do_filtro);
+    }
+
+    #[test]
+    fn loading_an_older_save_rolls_back_escolhidos_designations_and_hired_offers() {
+        let pasta = PastaTemporaria::nova();
+        let mut g = olheiro(Especializacao::Generalista, Tier::Experiente);
+        g.acompanhando_desde = Some(Date(20260701));
+        let mut g2 = olheiro(Especializacao::Generalista, Tier::Junior);
+        g2.acompanhando_desde = Some(Date(20260706));
+        let mut novo = olheiro_brasileiro(Especializacao::Tatico, 7);
+        novo.contratado_em = Some(Date(20260706));
+        let oferta = Uuid::new_v4();
+        novo.oferta_id = Some(oferta);
+        let (mut st, _busca, _) = estado_com_datas(&pasta, &[20260702], Vec::new(), &g);
+        let mut atualizado = escolhido_de_teste(1, 20260601);
+        atualizado.observado_em = Date(20260708);
+        atualizado.acompanhamento =
+            Some(Acompanhamento { inicio: Date(20260601), precisao_inicial: 10, atributos_iniciais: 6, dias_para_exato: 100, dias: 37 });
+        let (n, g2c, lista) = (novo.clone(), g2.clone(), vec![atualizado, escolhido_de_teste(2, 20260601), escolhido_de_teste(3, 20260707)]);
+        EstadoPersistido::carregar(Some(&pasta.0), ID_A)
+            .mutar(move |d| {
+                d.olheiros.push(g2c);
+                d.olheiros.push(n);
+                d.escolhidos = lista;
+                d.ofertas_contratadas = vec![oferta];
+            })
+            .expect("gravou");
+        st.ao_abrir_painel();
+        let (olheiros, escolhidos, ofertas) = st
+            .estado_ativo()
+            .map(|e| e.ler(|d| (d.olheiros.clone(), d.escolhidos.clone(), d.ofertas_contratadas.clone())))
+            .expect("estado");
+        assert_eq!(olheiros.len(), 2, "o contratado em 06/07 saiu");
+        assert_eq!(olheiros[0].acompanhando_desde, Some(Date(20260701)), "designado antes do save: fica");
+        assert_eq!(olheiros[1].acompanhando_desde, None, "a designação de 06/07 foi desfeita");
+        assert!(ofertas.is_empty(), "a oferta dele volta ao mercado");
+        assert_eq!(escolhidos.iter().map(|e| e.jogador.player_id).collect::<Vec<_>>(), vec![1, 2], "o de 07/07 saiu");
+        let e = &escolhidos[0];
+        assert_eq!(e.observado_em, Date(20260703), "a data do save");
+        assert_eq!(e.acompanhamento.map(|a| a.dias), Some(32), "5 dias a menos");
+    }
+
+    // -----------------------------------------------------------------
+    // Correções da revisão (2026-10-04)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_legacy_olheiro_gets_no_market_or_focus_penalty() {
+        let pasta = PastaTemporaria::nova();
+        let antigo = olheiro(Especializacao::CacadorDeJovens, Tier::Elite);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &antigo);
+        st.ao_abrir_painel();
+        esperar_ligas(&st);
+        st.abrir_nova_missao(antigo.id);
+        st.alternar_liga_da_missao(13);
+        st.aplicar_atalho_da_missao(Atalho::MudaPatamar);
+        let previa = st.previa_missao().expect("formulário");
+        assert_eq!(previa.tipo, quality::TipoMissao::Medalhoes);
+        assert_eq!((previa.penalidade, previa.distancia_mercado), (quality::Penalidade::default(), 0));
+        let v1 = quality::estimar_missao(&quality::PedidoMissao::v1(
+            Tier::Elite,
+            Especializacao::CacadorDeJovens,
+            previa.rascunho.modo,
+            previa.tipo,
+            previa.amplitude,
+        ));
+        assert_eq!(previa.estimativa, Some(v1), "os mesmos números da tabela do v1");
+    }
+
+    #[test]
+    fn without_a_writable_state_file_tracking_never_reads_the_save() {
+        let pasta = PastaTemporaria::nova();
+        let mut o = olheiro(Especializacao::Generalista, Tier::Junior);
+        o.acompanhando_desde = Some(Date(20260701));
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &o);
+        EstadoPersistido::carregar(Some(&pasta.0), ID_A).mutar(|d| d.escolhidos = vec![escolhido_de_teste(1, 20260601)]).expect("gravou");
+        // gravado por uma DLL mais nova: lido, mas somente leitura
+        let arquivo = pasta.0.join(format!("{ID_A}.json"));
+        let texto = std::fs::read_to_string(&arquivo).unwrap_or_default().replacen("\"versao\": 2", "\"versao\": 3", 1);
+        std::fs::write(&arquivo, texto).expect("gravou");
+        st.ao_abrir_painel();
+        assert_eq!(st.resumo_acompanhamento().acompanhados, 1, "um jogador com vaga");
+        assert!(!st.atualizacao_escolhidos_pendente, "sem leitura do save que não teria onde gravar");
+    }
+
+    #[test]
+    fn the_market_keeps_its_attractiveness_for_the_whole_month() {
+        let pasta = PastaTemporaria::nova();
+        let (st, _) = estado_contratacao(63_999_988, 63_999_988, Some(pasta.0.clone()), vec![]);
+        let estado = st.estado_ativo().cloned().expect("estado");
+        let periodo = quality::periodo_do_mercado(2026, 7);
+        estado.mutar(|d| d.mercado_do_mes = Some((periodo, 100))).expect("gravou");
+        let mercado = loop {
+            if let Carga::Pronto(m) = st.mercado_de_olheiros() {
+                break m;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(mercado.atratividade, 100, "vale a do mês, mesmo com o clube desconhecido agora");
+        assert_eq!(mercado.ofertas.len(), quality::quantas_ofertas(100) as usize);
+        // mês passado não vale
+        estado.mutar(|d| d.mercado_do_mes = Some((periodo - 1, 100))).expect("gravou");
+        if let Carga::Pronto(m) = st.mercado_de_olheiros() {
+            assert_ne!(m.atratividade, 100);
+        }
+    }
+
+    #[test]
+    fn the_observation_date_follows_the_block_where_the_player_appeared() {
+        let mut m = Missao::de_teste(Uuid::new_v4(), StatusMissao::Pendente);
+        m.criada_em = Date(20260101);
+        m.prazo_estimado = Date(20260115);
+        let hoje = Date(20260601);
+        assert_eq!(data_da_observacao(Some(&m), Some(Date(20260102)), 0, hoje), Date(20260115), "prazo fixo: no prazo");
+        assert_eq!(data_da_observacao(Some(&m), None, 0, Date(20260110)), Date(20260110), "antes do prazo: hoje");
+        m.continua = true;
+        let por_bloco = usize::from(m.estimativa.alvo_jogadores);
+        assert_eq!(data_da_observacao(Some(&m), None, 0, hoje), Date(20260131), "1º bloco");
+        assert_eq!(data_da_observacao(Some(&m), None, por_bloco, hoje), Date(20260302), "2º bloco");
+        assert_eq!(data_da_observacao(None, Some(Date(20260201)), 3, hoje), Date(20260201));
     }
 }

@@ -9,12 +9,14 @@
 //!
 //! ## Como uma Missão é estimada (Story 2.1, primeira versão a calibrar)
 //!
-//! **Qualidade** sai de uma pontuação de 1 a 5:
-//! `Tier (Júnior 1, Experiente 2, Elite 3) + 1 se a Especialização
-//! combina com o tipo da Missão + 1 se o Modo é Completa`, e
-//! `1–2 = Baixa, 3 = Média, 4–5 = Alta`. A pontuação (não só o nível)
-//! decide quantos atributos o Relatório revela e a precisão de base, então
-//! subir o Tier sempre melhora o Relatório, mesmo sem mudar o nível.
+//! **Qualidade** sai de uma pontuação de 0 a 5: as estrelas inteiras do
+//! atributo do Olheiro que vale para o tipo da Missão (no máximo 4; menos
+//! a penalidade de mercado/foco, mais ou menos a verba — Épico 5) + 1 se o
+//! Modo é Completa, e `0–2 = Baixa, 3 = Média, 4–5 = Alta`. No v1 era
+//! `Tier (1–3) + 1 se a Especialização combina + 1 se Completa`; o perfil
+//! equivalente (`PerfilOlheiro::v1`) dá os mesmos pontos. A pontuação (não
+//! só o nível) decide quantos atributos o Relatório revela e a precisão de
+//! base, então mais estrelas sempre melhoram o Relatório.
 //!
 //! **Amplitude geográfica** não muda o nível de Qualidade: piora a
 //! **precisão** (faixa ± maior) e encarece/alonga a Missão (FR-4).
@@ -25,8 +27,9 @@
 //! barata; Completa leva ~3× o tempo e rende ~4× os nomes, com Qualidade
 //! maior. Dentro do Modo, mais pontuação traz mais nomes.
 //!
-//! Falsos positivos NÃO entram no v1 (decisão de 2026-10-01; ver
-//! `_bmad-output/planning-artifacts/melhorias-futuras-olheiros.md`).
+//! **Falsos positivos** (Épico 5, item 7): abaixo da Qualidade Alta, parte
+//! do Relatório é de jogadores que quase passam no filtro
+//! (`falsos_positivos`).
 //!
 //! ## Perfil do jogador (Épico 3)
 //!
@@ -54,35 +57,660 @@ use serde::{Deserialize, Serialize};
 use super::state::{Atributo, Confederacao, Especializacao, FaixaAtributo, FiltrosMissao, Funcao, ModoBusca, Qualidade, Tier};
 
 // ---------------------------------------------------------------------
-// Contratação (Story 1.4)
+// Olheiros com estrelas (Épico 5, 2026-10-04)
+// ---------------------------------------------------------------------
+//
+// A Especialização deixou de ser uma escolha única: cada Olheiro tem
+// quatro atributos de 0 a 5 estrelas, em passos de meia (Caçador de
+// Jovens, Caçador de Medalhões, Tático, Generalista), mais a Rede de
+// contatos, que decide a velocidade. O **foco** é o atributo mais alto
+// (empate: a ordem do PRD) e o **Tier** virou o resumo do foco: até 2,5★
+// Júnior, de 3★ a 4★ Experiente, 4,5★ ou mais Elite.
+//
+// Olheiros contratados antes das estrelas não têm perfil gravado: ganham o
+// perfil equivalente ao v1 (`PerfilOlheiro::v1`), com o qual a tabela da
+// Story 2.1 dá exatamente os mesmos números.
+
+/// Estrelas em MEIAS estrelas: 0 a 10 (0★ a 5★ em passos de 0,5). No JSON,
+/// o número de meias (`7` = 3,5★).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Estrelas(pub u8);
+
+impl Estrelas {
+    /// Presa entre 0 e 5★.
+    pub fn de_meias(meias: i32) -> Estrelas {
+        Estrelas(u8::try_from(meias.clamp(0, 10)).unwrap_or(0))
+    }
+
+    pub fn meias(self) -> u8 {
+        self.0.min(10)
+    }
+
+    /// Estrelas inteiras (arredondado para baixo).
+    pub fn inteiras(self) -> u8 {
+        self.meias() / 2
+    }
+
+    pub fn menos(self, meias: u8) -> Estrelas {
+        Estrelas(self.meias().saturating_sub(meias))
+    }
+
+    pub fn mais(self, meias: u8) -> Estrelas {
+        Estrelas((self.meias() + meias).min(10))
+    }
+
+    /// "3,5" / "4".
+    pub fn texto(self) -> String {
+        let m = self.meias();
+        if m.is_multiple_of(2) {
+            format!("{}", m / 2)
+        } else {
+            format!("{},5", m / 2)
+        }
+    }
+}
+
+/// Os atributos de um Olheiro (ver o topo da seção).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PerfilOlheiro {
+    pub jovens: Estrelas,
+    pub medalhoes: Estrelas,
+    pub tatico: Estrelas,
+    pub generalista: Estrelas,
+    /// Rede de contatos: velocidade de resposta das Missões.
+    pub rede: Estrelas,
+}
+
+impl PerfilOlheiro {
+    /// O perfil de um Olheiro contratado antes das estrelas (Especialização
+    /// × Tier do v1): o foco com 2,5 / 3,5 / 4,5★, os outros uma estrela
+    /// abaixo e a Rede de contatos que reproduz o fator de prazo do Tier
+    /// (120% / 100% / 85%). Com ele, `estimar_missao` dá os números do v1 —
+    /// só o Generalista melhora numa Missão Geral, que agora é a dele.
+    pub fn v1(especializacao: Especializacao, tier: Tier) -> PerfilOlheiro {
+        let (foco, rede) = match tier {
+            Tier::Junior => (5, 2),
+            Tier::Experiente => (7, 6),
+            Tier::Elite => (9, 9),
+        };
+        let outro = Estrelas(foco - 2);
+        let mut perfil = PerfilOlheiro { jovens: outro, medalhoes: outro, tatico: outro, generalista: outro, rede: Estrelas(rede) };
+        *perfil.atributo_mut(especializacao) = Estrelas(foco);
+        perfil
+    }
+
+    pub fn atributo(&self, especializacao: Especializacao) -> Estrelas {
+        match especializacao {
+            Especializacao::CacadorDeJovens => self.jovens,
+            Especializacao::CacadorDeMedalhoes => self.medalhoes,
+            Especializacao::Tatico => self.tatico,
+            Especializacao::Generalista => self.generalista,
+        }
+    }
+
+    fn atributo_mut(&mut self, especializacao: Especializacao) -> &mut Estrelas {
+        match especializacao {
+            Especializacao::CacadorDeJovens => &mut self.jovens,
+            Especializacao::CacadorDeMedalhoes => &mut self.medalhoes,
+            Especializacao::Tatico => &mut self.tatico,
+            Especializacao::Generalista => &mut self.generalista,
+        }
+    }
+
+    /// O atributo mais alto (empate: a ordem do PRD).
+    pub fn foco(&self) -> Especializacao {
+        let mut foco = Especializacao::TODAS[0];
+        for e in Especializacao::TODAS {
+            if self.atributo(e) > self.atributo(foco) {
+                foco = e;
+            }
+        }
+        foco
+    }
+
+    /// Estrelas do foco.
+    pub fn principal(&self) -> Estrelas {
+        self.atributo(self.foco())
+    }
+
+    /// O Tier é o resumo do foco.
+    pub fn tier(&self) -> Tier {
+        match self.principal().meias() {
+            0..=5 => Tier::Junior,
+            6..=8 => Tier::Experiente,
+            _ => Tier::Elite,
+        }
+    }
+
+    /// Estrelas que valem para uma Missão do `tipo`: a Geral usa o
+    /// Generalista; as outras, o atributo delas — e o Generalista, uma
+    /// estrela abaixo, serve de piso (ele sabe um pouco de tudo).
+    pub fn para_tipo(&self, tipo: TipoMissao) -> Estrelas {
+        let especifico = match tipo {
+            TipoMissao::Jovens => self.jovens,
+            TipoMissao::Medalhoes => self.medalhoes,
+            TipoMissao::Tatica => self.tatico,
+            TipoMissao::Geral => return self.generalista,
+        };
+        especifico.max(self.generalista.menos(2))
+    }
+}
+
+/// Um mercado que o Olheiro conhece bem (Épico 5): um país ou um
+/// continente inteiro. No JSON: `{"pais": {"id": 54, "continente":
+/// "america_do_sul"}}` ou `{"continente": "europa"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mercado {
+    Pais { id: u16, continente: Confederacao },
+    Continente(Confederacao),
+}
+
+impl Mercado {
+    fn continente(self) -> Confederacao {
+        match self {
+            Mercado::Pais { continente, .. } | Mercado::Continente(continente) => continente,
+        }
+    }
+}
+
+/// Um lugar onde uma Missão procura (derivado do filtro geográfico).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Regiao {
+    Pais { id: u16, continente: Confederacao },
+    Continente(Confederacao),
+    /// Sem filtro geográfico: o mundo todo.
+    Mundo,
+}
+
+/// Distância entre os mercados do Olheiro e um lugar (Questão em aberto 1,
+/// decidida em 2026-10-04): 0 = dentro do mercado dele; 1 = mesmo
+/// continente (ou uma busca no mundo todo); 2 = outro continente. Sem
+/// mercado gravado (Olheiro de antes das estrelas) é sempre 0: ele segue
+/// como era.
+pub fn distancia_mercado(mercados: &[Mercado], regiao: Regiao) -> u8 {
+    if mercados.is_empty() {
+        return 0;
+    }
+    let conhece_continente = |c: Confederacao| mercados.contains(&Mercado::Continente(c));
+    let tem_algo_no = |c: Confederacao| mercados.iter().any(|m| m.continente() == c);
+    match regiao {
+        Regiao::Pais { id, continente } => {
+            let conhece_pais = mercados.iter().any(|m| matches!(m, Mercado::Pais { id: p, .. } if *p == id));
+            if conhece_pais || conhece_continente(continente) {
+                0
+            } else if tem_algo_no(continente) {
+                1
+            } else {
+                2
+            }
+        }
+        Regiao::Continente(c) if conhece_continente(c) => 0,
+        Regiao::Continente(c) if tem_algo_no(c) => 1,
+        Regiao::Continente(_) => 2,
+        Regiao::Mundo => 1,
+    }
+}
+
+/// Penalidade de uma Missão, em MEIAS estrelas: o que sai do atributo que
+/// vale para ela (Qualidade) e da Rede de contatos (velocidade).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Penalidade {
+    pub qualidade: u8,
+    pub velocidade: u8,
+}
+
+/// Dias de carreira trabalhando num mercado novo até a penalidade sumir
+/// (Felipe: "cerca de 6 meses").
+pub const DIAS_ADAPTACAO_MERCADO: u32 = 180;
+
+/// Penalidade de mercado sem adaptação, por distância (Felipe: velocidade
+/// cai até 2★ e qualidade até 1★, em passos de 0,5).
+fn penalidade_por_distancia(distancia: u8) -> Penalidade {
+    match distancia {
+        0 => Penalidade::default(),
+        1 => Penalidade { qualidade: 1, velocidade: 2 },
+        _ => Penalidade { qualidade: 2, velocidade: 4 },
+    }
+}
+
+/// `meias × (1 − dias/total)`, arredondado para a meia estrela mais próxima.
+fn com_adaptacao(meias: u8, dias: u32, total: u32) -> u8 {
+    let total = total.max(1);
+    let faltam = total.saturating_sub(dias.min(total));
+    u8::try_from((u32::from(meias) * faltam * 2 + total) / (total * 2)).unwrap_or(meias)
+}
+
+/// Um trabalho já feito pelo Olheiro (uma Missão dele até hoje): é a
+/// experiência que adapta (Questão 2: por dias de carreira trabalhados).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrabalhoPassado {
+    pub tipo: TipoMissao,
+    pub regioes: Vec<Regiao>,
+    pub dias: u32,
+}
+
+/// Dias trabalhados num lugar: num país contam os trabalhos nele e no
+/// continente dele inteiro; num continente, os do continente; no mundo, as
+/// buscas sem filtro geográfico.
+pub fn dias_na_regiao(trabalhos: &[TrabalhoPassado], regiao: Regiao) -> u32 {
+    trabalhos
+        .iter()
+        .filter(|t| {
+            t.regioes.iter().any(|&r| match (regiao, r) {
+                (Regiao::Pais { id, .. }, Regiao::Pais { id: outro, .. }) => id == outro,
+                (Regiao::Pais { continente, .. }, Regiao::Continente(c)) => continente == c,
+                (Regiao::Continente(a), Regiao::Continente(b)) => a == b,
+                (Regiao::Mundo, Regiao::Mundo) => true,
+                _ => false,
+            })
+        })
+        .map(|t| t.dias)
+        .sum()
+}
+
+/// Dias trabalhados em Missões do `tipo`.
+pub fn dias_no_tipo(trabalhos: &[TrabalhoPassado], tipo: TipoMissao) -> u32 {
+    trabalhos.iter().filter(|t| t.tipo == tipo).map(|t| t.dias).sum()
+}
+
+/// Penalidade de fora do foco (item 5): pôr um especialista numa Missão de
+/// outro tipo tira 1★ da Qualidade até ele se habituar. A Missão Geral e o
+/// Generalista (que é de tudo um pouco) nunca têm essa penalidade.
+const PENALIDADE_ESCOPO: u8 = 2;
+
+/// Dias para se habituar a outro tipo de Missão: mais experiente, mais
+/// rápido (Felipe: de 6 meses a 1 ano).
+pub fn dias_readaptacao(tier: Tier) -> u32 {
+    match tier {
+        Tier::Elite => 180,
+        Tier::Experiente => 270,
+        Tier::Junior => 365,
+    }
+}
+
+/// Penalidade de uma Missão para um Olheiro: a pior região do filtro
+/// geográfico (mercado) mais a de fora do foco, cada uma já descontada a
+/// adaptação dos trabalhos anteriores.
+pub fn penalidade_missao(
+    perfil: &PerfilOlheiro,
+    mercados: &[Mercado],
+    regioes: &[Regiao],
+    tipo: TipoMissao,
+    trabalhos: &[TrabalhoPassado],
+) -> Penalidade {
+    let mut pior = Penalidade::default();
+    let regioes: &[Regiao] = if regioes.is_empty() { &[Regiao::Mundo] } else { regioes };
+    for &regiao in regioes {
+        let base = penalidade_por_distancia(distancia_mercado(mercados, regiao));
+        let dias = dias_na_regiao(trabalhos, regiao);
+        pior.qualidade = pior.qualidade.max(com_adaptacao(base.qualidade, dias, DIAS_ADAPTACAO_MERCADO));
+        pior.velocidade = pior.velocidade.max(com_adaptacao(base.velocidade, dias, DIAS_ADAPTACAO_MERCADO));
+    }
+    let foco = perfil.foco();
+    let fora_do_foco = tipo != TipoMissao::Geral && foco != Especializacao::Generalista && !aderente(foco, tipo);
+    if fora_do_foco {
+        let dias = dias_no_tipo(trabalhos, tipo);
+        pior.qualidade += com_adaptacao(PENALIDADE_ESCOPO, dias, dias_readaptacao(perfil.tier()));
+    }
+    pior
+}
+
+/// Verba da viagem de uma Missão (item 6): o jogador escolhe quanto investe
+/// em viagem e hospedagem. A faixa cresce com a escala da busca (o custo
+/// de base já cresce com a amplitude e o Modo). No JSON: `"economica"`,
+/// `"padrao"`, `"reforcada"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Investimento {
+    /// 60% do custo: menos nomes, faixas mais largas, um pouco mais lenta.
+    Economica,
+    #[default]
+    Padrao,
+    /// 160% do custo: mais nomes, meia estrela a mais, um pouco mais rápida.
+    Reforcada,
+}
+
+impl Investimento {
+    pub const TODOS: [Investimento; 3] = [Investimento::Economica, Investimento::Padrao, Investimento::Reforcada];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Investimento::Economica => "Econômica",
+            Investimento::Padrao => "Padrão",
+            Investimento::Reforcada => "Reforçada",
+        }
+    }
+
+    /// (custo %, duração %, jogadores %).
+    fn fatores(self) -> (i64, u32, u32) {
+        match self {
+            Investimento::Economica => (60, 110, 75),
+            Investimento::Padrao => (100, 100, 100),
+            Investimento::Reforcada => (160, 90, 125),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Mercado de Olheiros (Épico 5, item 3)
 // ---------------------------------------------------------------------
 
-/// Custo de contratação (mesma unidade do `transferbudget` do save).
-///
-/// Critério da primeira versão (2026-10-01, a calibrar jogando):
-/// - o Tier pesa mais que a Especialização: Júnior ≈ 0,3–0,5 M,
-///   Experiente ≈ 1,2–1,9 M, Elite ≈ 3,6–5,8 M — numa carreira com ~64 M
-///   de orçamento, um Elite custa ~5–9% e um Júnior menos de 1%;
-/// - dentro do Tier: Generalista (relatórios rasos) < Caçador de Jovens <
-///   Tático < Caçador de Medalhões (jogadores prontos, os mais cobiçados);
-/// - os 12 valores são distintos (FR-2), conferido em teste.
-pub fn custo_contratacao(especializacao: Especializacao, tier: Tier) -> i32 {
-    use Especializacao::*;
-    use Tier::*;
-    match (tier, especializacao) {
-        (Junior, Generalista) => 300_000,
-        (Junior, CacadorDeJovens) => 400_000,
-        (Junior, Tatico) => 450_000,
-        (Junior, CacadorDeMedalhoes) => 500_000,
-        (Experiente, Generalista) => 1_200_000,
-        (Experiente, CacadorDeJovens) => 1_500_000,
-        (Experiente, Tatico) => 1_700_000,
-        (Experiente, CacadorDeMedalhoes) => 1_900_000,
-        (Elite, Generalista) => 3_600_000,
-        (Elite, CacadorDeJovens) => 4_500_000,
-        (Elite, Tatico) => 5_200_000,
-        (Elite, CacadorDeMedalhoes) => 5_800_000,
+/// O que o save diz do clube do técnico para a oferta de Olheiros.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerfilClube {
+    /// `teams.domesticprestige` e `internationalprestige`, 0–20.
+    pub prestigio_nacional: u8,
+    pub prestigio_internacional: u8,
+    /// Divisão da liga do clube (1 = primeira).
+    pub nivel_liga: u8,
+    /// Troféus da carreira (`career_trophies`, um bit por troféu).
+    pub titulos: u16,
+    /// País do clube (para os Olheiros locais).
+    pub pais: Option<u16>,
+    pub continente: Confederacao,
+}
+
+/// Atratividade do clube para Olheiros, 0–100: prestígio (internacional
+/// pesa mais), menos para divisões de baixo, mais com títulos.
+pub fn atratividade(clube: &PerfilClube) -> u8 {
+    let prestigio = i32::from(clube.prestigio_nacional.min(20)) * 2 + i32::from(clube.prestigio_internacional.min(20)) * 3;
+    let divisao = match clube.nivel_liga {
+        0 | 1 => 0,
+        2 => -10,
+        3 => -20,
+        _ => -30,
+    };
+    let titulos = i32::from(clube.titulos.min(15));
+    u8::try_from((prestigio + divisao + titulos).clamp(0, 100)).unwrap_or(50)
+}
+
+/// "Alta", "Média", "Baixa" — como a tela fala da atratividade.
+pub fn nome_atratividade(valor: u8) -> &'static str {
+    match valor {
+        70..=100 => "Alta",
+        40..=69 => "Média",
+        _ => "Baixa",
     }
+}
+
+/// Período do mercado de Olheiros: a oferta muda a cada mês do calendário
+/// da carreira (`ano`, `mes` 1–12 da data da carreira).
+pub fn periodo_do_mercado(ano: i32, mes: i32) -> u32 {
+    u32::try_from(ano * 12 + mes - 1).unwrap_or(0)
+}
+
+/// Um país de onde pode vir um Olheiro (países com clubes no save).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaisCandidato {
+    pub id: u16,
+    pub continente: Confederacao,
+}
+
+/// Um Olheiro gerado para o mercado (sem nome: `scout::nomes` dá um pela
+/// nação, com a mesma semente).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidatoOlheiro {
+    /// Índice dentro do período (a identidade da oferta).
+    pub indice: u32,
+    pub semente: u64,
+    pub perfil: PerfilOlheiro,
+    pub pais: Option<u16>,
+    pub mercados: Vec<Mercado>,
+}
+
+/// Quantas ofertas o mercado mostra: de 4 (clube sem atrativo) a 9.
+pub fn quantas_ofertas(atratividade: u8) -> u32 {
+    4 + u32::from(atratividade.min(100)) / 20
+}
+
+/// Sorteio determinístico em `0..n`.
+fn sortear(semente: u64, canal: u32, n: u32) -> u32 {
+    u32::try_from(semente_de(semente, canal) % u64::from(n.max(1))).unwrap_or(0)
+}
+
+fn semente_de(base: u64, canal: u32) -> u64 {
+    semente(u128::from(base), canal, 77)
+}
+
+/// Os Olheiros à venda num período (item 3). Determinístico pela carreira
+/// e pelo período. A raridade vem da atratividade: num clube grande, cerca
+/// de 1 em 4 ofertas é Elite; num clube pequeno, quase todas são Júnior.
+/// A nação sai dos países com clubes, com peso maior para o país do clube
+/// (6) e o continente dele (2).
+pub fn gerar_ofertas(atratividade: u8, periodo: u32, carreira: u64, clube: &PerfilClube, paises: &[PaisCandidato]) -> Vec<CandidatoOlheiro> {
+    let atr = u32::from(atratividade.min(100));
+    (0..quantas_ofertas(atratividade))
+        .map(|indice| {
+            let s = semente_de(carreira ^ (u64::from(periodo) << 32), indice);
+            // raridade: Elite < atr/4 %, Experiente até +20% +0,3×atr
+            let rolagem = sortear(s, 1, 100);
+            let limite_elite = atr / 4;
+            let limite_experiente = limite_elite + 20 + atr * 3 / 10;
+            let (foco_meias, rede) = if rolagem < limite_elite {
+                let cinco = atr >= 70 && sortear(s, 2, 4) == 0;
+                (if cinco { 10 } else { 9 }, 6 + sortear(s, 3, 5))
+            } else if rolagem < limite_experiente {
+                (6 + sortear(s, 2, 3), 4 + sortear(s, 3, 4))
+            } else {
+                (3 + sortear(s, 2, 3), 1 + sortear(s, 3, 4))
+            };
+            let foco = Especializacao::TODAS[usize::try_from(sortear(s, 4, 4)).unwrap_or(0)];
+            let generalista = foco == Especializacao::Generalista;
+            let mut perfil = PerfilOlheiro {
+                jovens: Estrelas(0),
+                medalhoes: Estrelas(0),
+                tatico: Estrelas(0),
+                generalista: Estrelas(0),
+                rede: Estrelas::de_meias(i32::try_from(rede).unwrap_or(2)),
+            };
+            for (canal, e) in (10u32..).zip(Especializacao::TODAS) {
+                // o Generalista é equilibrado: os outros ficam mais perto do foco
+                let queda = if generalista { 1 + sortear(s, canal, 3) } else { 2 + sortear(s, canal, 4) };
+                let meias = if e == foco { foco_meias } else { foco_meias.saturating_sub(queda).max(1) };
+                *perfil.atributo_mut(e) = Estrelas::de_meias(i32::try_from(meias).unwrap_or(1));
+            }
+            let pais = escolher_pais(s, clube, paises);
+            let mut mercados: Vec<Mercado> = pais.iter().map(|p| Mercado::Pais { id: p.id, continente: p.continente }).collect();
+            let tier = perfil.tier();
+            let conhece_continente = match tier {
+                Tier::Elite => true,
+                Tier::Experiente => sortear(s, 20, 2) == 0,
+                Tier::Junior => false,
+            };
+            if let (true, Some(p)) = (conhece_continente, &pais) {
+                mercados.push(Mercado::Continente(p.continente));
+            }
+            if tier != Tier::Junior && sortear(s, 21, 10) < 3 {
+                if let Some(outro) = escolher_pais(semente_de(s, 22), clube, paises).filter(|o| Some(o.id) != pais.as_ref().map(|p| p.id)) {
+                    mercados.push(Mercado::Pais { id: outro.id, continente: outro.continente });
+                }
+            }
+            CandidatoOlheiro { indice, semente: s, perfil, pais: pais.map(|p| p.id), mercados }
+        })
+        .collect()
+}
+
+fn escolher_pais(s: u64, clube: &PerfilClube, paises: &[PaisCandidato]) -> Option<PaisCandidato> {
+    let peso = |p: &PaisCandidato| -> u32 {
+        if Some(p.id) == clube.pais {
+            6 * paises.len().max(1) as u32 / 10 + 6
+        } else if p.continente == clube.continente {
+            2
+        } else {
+            1
+        }
+    };
+    let total: u32 = paises.iter().map(peso).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut alvo = sortear(s, 30, total);
+    for p in paises {
+        let w = peso(p);
+        if alvo < w {
+            return Some(p.clone());
+        }
+        alvo -= w;
+    }
+    paises.last().cloned()
+}
+
+/// Custo de contratação (mesma unidade do `transferbudget`), a calibrar
+/// jogando: o foco manda (≈ 0,4 M com 2,5★, 1,4 M com 3,5★, 4,6 M com
+/// 4,5★, ×3,4 por estrela), a Rede de contatos e os outros atributos somam
+/// (+8% e +4% por estrela acima do meio), cada mercado a mais +10%, e a
+/// nacionalidade mexe no preço (Felipe, item 1): europeus +10%,
+/// sul-americanos +5%, os demais −5%. Arredondado a 10 mil.
+pub fn custo_contratacao(perfil: &PerfilOlheiro, continente: Option<Confederacao>, mercados: usize) -> i32 {
+    let estrelas = |e: Estrelas| f64::from(e.meias()) / 2.0;
+    let foco = perfil.foco();
+    let base = 400_000.0 * 3.4f64.powf(estrelas(perfil.principal()) - 2.5);
+    let rede = 1.0 + 0.08 * (estrelas(perfil.rede) - 2.5);
+    let outros: f64 = Especializacao::TODAS.iter().filter(|&&e| e != foco).map(|&e| estrelas(perfil.atributo(e))).sum();
+    let amplitude = 1.0 + 0.04 * (outros - 4.5);
+    let extras = 1.0 + 0.1 * mercados.saturating_sub(1) as f64;
+    let nacao = match continente {
+        Some(Confederacao::Europa) => 1.1,
+        Some(Confederacao::AmericaDoSul) => 1.05,
+        _ => 0.95,
+    };
+    let custo = (base * rede.max(0.6) * amplitude.max(0.6) * extras * nacao / 10_000.0).round() * 10_000.0;
+    (custo as i32).max(100_000)
+}
+
+// ---------------------------------------------------------------------
+// Lista de Escolhidos (Épico 6, 2026-10-04)
+// ---------------------------------------------------------------------
+//
+// Pedido do Felipe: os jogadores escolhidos ficam com os stats por até 1
+// ano; depois de 6 meses a precisão começa a cair, e com 1 ano e meio é
+// preciso uma análise nova. Generalistas designados para o acompanhamento
+// mantêm X jogadores atualizados cada (pelo nível) e, enquanto acompanham,
+// as faixas fecham até o valor exato num tempo que depende de quão
+// especificado o jogador chegou à lista.
+
+/// Até aqui (6 meses) a observação vale como foi feita.
+pub const DIAS_FRESCO: u32 = 180;
+/// A partir daqui (1 ano) o jogador aparece como desatualizado.
+pub const DIAS_DESATUALIZADO: u32 = 365;
+/// Com 1 ano e meio a observação vence: os atributos somem.
+pub const DIAS_VENCIDO: u32 = 540;
+/// Quanto as faixas alargam (± pontos) até vencer.
+pub const PERDA_MAXIMA: u8 = 8;
+
+/// Como está a observação de um jogador da lista.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frescor {
+    /// Até 6 meses: como observado.
+    Atualizado,
+    /// De 6 meses a 1 ano: faixas `extra` pontos mais largas.
+    Envelhecendo { extra: u8 },
+    /// De 1 ano a 1 ano e meio: ainda aparece, marcado.
+    Desatualizado { extra: u8 },
+    /// 1 ano e meio ou mais: precisa de uma análise nova.
+    Vencido,
+}
+
+impl Frescor {
+    pub fn extra(self) -> u8 {
+        match self {
+            Frescor::Envelhecendo { extra } | Frescor::Desatualizado { extra } => extra,
+            _ => 0,
+        }
+    }
+}
+
+/// Frescor de uma observação feita há `dias` dias de carreira: de 6 meses a
+/// 1 ano e meio as faixas alargam em linha reta até `PERDA_MAXIMA`.
+pub fn frescor(dias: u32) -> Frescor {
+    if dias >= DIAS_VENCIDO {
+        return Frescor::Vencido;
+    }
+    if dias <= DIAS_FRESCO {
+        return Frescor::Atualizado;
+    }
+    let passados = dias - DIAS_FRESCO;
+    let janela = DIAS_VENCIDO - DIAS_FRESCO;
+    let extra = u8::try_from((u32::from(PERDA_MAXIMA) * passados).div_ceil(janela)).unwrap_or(PERDA_MAXIMA);
+    if dias >= DIAS_DESATUALIZADO {
+        Frescor::Desatualizado { extra }
+    } else {
+        Frescor::Envelhecendo { extra }
+    }
+}
+
+/// Jogadores que um Generalista mantém atualizados: duas por estrela de
+/// Generalista (2,5★ → 5; 4,5★ → 9; 5★ → 10).
+pub fn capacidade_acompanhamento(generalista: Estrelas) -> usize {
+    usize::from(generalista.meias())
+}
+
+/// Dias de acompanhamento até o valor exato: 10 por ponto de precisão e 2
+/// por atributo ainda não observado, no mínimo 7. Um jogador de Relatório
+/// de Qualidade Alta (±1, tudo observado) fica exato em ~10 dias; um de
+/// Qualidade Baixa (±14, 6 de 28 atributos), em ~6 meses.
+pub fn dias_para_exato(precisao: u8, observados: usize, total: usize) -> u32 {
+    let faltam = u32::try_from(total.saturating_sub(observados)).unwrap_or(0);
+    (10 * u32::from(precisao) + 2 * faltam).max(7)
+}
+
+/// Precisão (±) depois de `dias` de acompanhamento, de `inicial` até 0.
+pub fn precisao_acompanhada(inicial: u8, dias: u32, total: u32) -> u8 {
+    if dias >= total {
+        return 0;
+    }
+    let restante = u32::from(inicial) * (total - dias);
+    u8::try_from(restante.div_ceil(total.max(1))).unwrap_or(inicial)
+}
+
+/// Atributos observados depois de `dias` de acompanhamento.
+pub fn atributos_acompanhados(iniciais: usize, total_atributos: usize, dias: u32, total: u32) -> usize {
+    if dias >= total {
+        return total_atributos;
+    }
+    let faltam = total_atributos.saturating_sub(iniciais);
+    iniciais + faltam * dias as usize / total.max(1) as usize
+}
+
+/// Precisão de partida de uma análise refeita do zero (observação vencida).
+pub const PRECISAO_ANALISE_NOVA: u8 = 14;
+/// Atributos de partida de uma análise refeita do zero.
+pub const ATRIBUTOS_ANALISE_NOVA: usize = 6;
+
+// ---------------------------------------------------------------------
+// Falsos positivos (item 7)
+// ---------------------------------------------------------------------
+
+/// Parte do Relatório que vem de "quase": jogadores que o Olheiro achou que
+/// passavam no filtro, mas não passam (Felipe: Qualidade também é
+/// "a quantidade de falsos positivos"). Baixa: 1 em 4; Média: 1 em 10;
+/// Alta: nenhum. Eles não vêm marcados; ficam visíveis quando o
+/// acompanhamento da Lista de Escolhidos chega ao valor exato.
+pub fn falsos_positivos(qualidade: Qualidade, quantos: usize) -> usize {
+    let pct = match qualidade {
+        Qualidade::Baixa => 25,
+        Qualidade::Media => 10,
+        Qualidade::Alta => 0,
+    };
+    quantos * pct / 100
+}
+
+/// Folgas do filtro "quase" dos falsos positivos.
+pub const FOLGA_OVERALL: u8 = 4;
+pub const FOLGA_IDADE: u8 = 1;
+/// Tetos de valor e salário com 25% a mais.
+pub const FOLGA_TETO_PCT: i64 = 125;
+
+/// O jogador está "quase" no nível pedido (3 pontos de folga na régua do
+/// elenco)?
+pub fn quase_no_nivel(nivel: NivelEquipe, overall: u8, potencial: u8, titular: u8) -> bool {
+    no_nivel(nivel, overall.saturating_add(3), potencial.saturating_add(3), titular)
+        || match nivel {
+            NivelEquipe::Titular | NivelEquipe::Banco => no_nivel(nivel, overall.saturating_sub(3), potencial, titular),
+            _ => false,
+        }
 }
 
 // ---------------------------------------------------------------------
@@ -136,11 +764,30 @@ impl AmplitudeGeografica {
 /// Tudo o que a estimativa precisa saber da Missão.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PedidoMissao {
-    pub tier: Tier,
-    pub especializacao: Especializacao,
+    /// Os atributos do Olheiro (Épico 5).
+    pub perfil: PerfilOlheiro,
     pub modo: ModoBusca,
     pub tipo: TipoMissao,
     pub amplitude: AmplitudeGeografica,
+    /// Mercado e fora do foco, já com a adaptação (`penalidade_missao`).
+    pub penalidade: Penalidade,
+    pub investimento: Investimento,
+}
+
+#[cfg(test)]
+impl PedidoMissao {
+    /// Pedido de um Olheiro do v1 (Especialização × Tier), sem penalidade e
+    /// com a verba Padrão.
+    pub fn v1(tier: Tier, especializacao: Especializacao, modo: ModoBusca, tipo: TipoMissao, amplitude: AmplitudeGeografica) -> Self {
+        PedidoMissao {
+            perfil: PerfilOlheiro::v1(especializacao, tier),
+            modo,
+            tipo,
+            amplitude,
+            penalidade: Penalidade::default(),
+            investimento: Investimento::Padrao,
+        }
+    }
 }
 
 /// O que o formulário mostra antes de confirmar e o que a busca (2.4)
@@ -166,35 +813,36 @@ pub struct EstimativaMissao {
 // A tabela de balanceamento
 // ---------------------------------------------------------------------
 
-/// Pontos de Qualidade de cada Tier.
-fn pontos_tier(tier: Tier) -> u8 {
-    match tier {
-        Tier::Junior => 1,
-        Tier::Experiente => 2,
-        Tier::Elite => 3,
-    }
-}
-
-/// Bônus de Qualidade quando a Especialização combina com a Missão. O
-/// Generalista não combina especialmente com nada (relatórios rasos).
-const BONUS_ADERENCIA: u8 = 1;
 /// Bônus de Qualidade do Modo Completa.
 const BONUS_COMPLETA: u8 = 1;
 
+/// O foco do Olheiro é o do tipo da Missão? (O Generalista é o da Geral.)
 fn aderente(especializacao: Especializacao, tipo: TipoMissao) -> bool {
     matches!(
         (especializacao, tipo),
         (Especializacao::CacadorDeJovens, TipoMissao::Jovens)
             | (Especializacao::CacadorDeMedalhoes, TipoMissao::Medalhoes)
             | (Especializacao::Tatico, TipoMissao::Tatica)
+            | (Especializacao::Generalista, TipoMissao::Geral)
     )
 }
 
-/// Pontuação de 1 a 5 (ver o topo do módulo).
+/// Estrelas que valem para a Missão, já com a penalidade e a verba.
+pub fn estrelas_efetivas(pedido: &PedidoMissao) -> Estrelas {
+    let base = pedido.perfil.para_tipo(pedido.tipo).menos(pedido.penalidade.qualidade);
+    match pedido.investimento {
+        Investimento::Economica => base.menos(1),
+        Investimento::Padrao => base,
+        Investimento::Reforcada => base.mais(1),
+    }
+}
+
+/// Pontuação de 0 a 5 (ver o topo do módulo): as estrelas inteiras que
+/// valem para a Missão (no máximo 4, como Elite + aderência no v1) + 1 se
+/// o Modo é Completa. No perfil do v1, 2,5★ = 2 pontos = Júnior aderente.
 fn pontuacao(pedido: &PedidoMissao) -> u8 {
-    let aderencia = if aderente(pedido.especializacao, pedido.tipo) { BONUS_ADERENCIA } else { 0 };
     let modo = if pedido.modo == ModoBusca::Completa { BONUS_COMPLETA } else { 0 };
-    pontos_tier(pedido.tier) + aderencia + modo
+    estrelas_efetivas(pedido).inteiras().min(4) + modo
 }
 
 fn qualidade_da_pontuacao(pontos: u8) -> Qualidade {
@@ -271,14 +919,19 @@ fn fatores_amplitude(amplitude: AmplitudeGeografica) -> (u32, i64) {
     }
 }
 
-/// Multiplicadores do Tier, em %: (duração — Elite é mais rápido, custo —
-/// Elite cobra mais caro por Missão).
-fn fatores_tier(tier: Tier) -> (u32, i64) {
+/// Multiplicador de custo do Tier, em % (Elite cobra mais caro por Missão).
+fn fator_custo_tier(tier: Tier) -> i64 {
     match tier {
-        Tier::Junior => (120, 100),
-        Tier::Experiente => (100, 150),
-        Tier::Elite => (85, 220),
+        Tier::Junior => 100,
+        Tier::Experiente => 150,
+        Tier::Elite => 220,
     }
+}
+
+/// Multiplicador de duração da Rede de contatos, em %: `130 − 5 × meias`
+/// (1★ → 120%, 3★ → 100%, 4,5★ → 85%, como os Tiers do v1; 5★ → 80%).
+fn fator_duracao_rede(rede: Estrelas) -> u32 {
+    130 - 5 * u32::from(rede.meias())
 }
 
 /// Custos de Missão são arredondados para este múltiplo.
@@ -459,25 +1112,33 @@ pub fn combina(especializacao: Especializacao, tipo: TipoMissao) -> bool {
 // ---------------------------------------------------------------------
 
 /// Custo, duração e Qualidade de uma Missão. Pura e determinística.
+///
+/// Épico 5: a Rede de contatos (menos a penalidade de velocidade) decide o
+/// prazo; a verba mexe no custo, no prazo e nos jogadores; a Econômica
+/// ainda alarga a precisão em 1 ponto.
 pub fn estimar_missao(pedido: &PedidoMissao) -> EstimativaMissao {
     let pontos = pontuacao(pedido);
     let (dias_base, custo_base) = base_do_modo(pedido.modo);
     let (dias_amplitude, custo_amplitude) = fatores_amplitude(pedido.amplitude);
-    let (dias_tier, custo_tier) = fatores_tier(pedido.tier);
+    let dias_rede = fator_duracao_rede(pedido.perfil.rede.menos(pedido.penalidade.velocidade));
+    let custo_tier = fator_custo_tier(pedido.perfil.tier());
+    let (custo_verba, dias_verba, jogadores_verba) = pedido.investimento.fatores();
 
     // Dias: arredonda para cima (uma Missão nunca termina "antes" do que
     // a conta diz).
-    let duracao_dias = (dias_base * dias_amplitude * dias_tier).div_ceil(100 * 100);
-    let custo = custo_base * custo_amplitude * custo_tier / (100 * 100);
+    let duracao_dias = (dias_base * dias_amplitude * dias_rede * dias_verba).div_ceil(100 * 100 * 100);
+    let custo = custo_base * custo_amplitude * custo_tier * custo_verba / (100 * 100 * 100);
     let custo = (custo + ARREDONDAMENTO_CUSTO / 2) / ARREDONDAMENTO_CUSTO * ARREDONDAMENTO_CUSTO;
+    let alvo = (u32::from(alvo_jogadores(pedido.modo, pontos)) * jogadores_verba).div_ceil(100);
+    let extra_verba = u8::from(pedido.investimento == Investimento::Economica);
 
     EstimativaMissao {
         custo: i32::try_from(custo).unwrap_or(i32::MAX),
         duracao_dias,
         qualidade: qualidade_da_pontuacao(pontos),
         atributos_revelados: atributos_da_pontuacao(pontos),
-        precisao_mais_menos: precisao_base(pontos) + precisao_extra_amplitude(pedido.amplitude),
-        alvo_jogadores: alvo_jogadores(pedido.modo, pontos),
+        precisao_mais_menos: precisao_base(pontos) + precisao_extra_amplitude(pedido.amplitude) + extra_verba,
+        alvo_jogadores: u8::try_from(alvo.max(1)).unwrap_or(u8::MAX),
     }
 }
 
@@ -1387,67 +2048,101 @@ pub fn semente(missao: u128, jogador: u32, canal: u32) -> u64 {
 mod tests {
     use super::*;
 
-    fn todos() -> Vec<(Especializacao, Tier)> {
-        Tier::TODOS
-            .iter()
-            .flat_map(|&t| Especializacao::TODAS.iter().map(move |&e| (e, t)))
-            .collect()
+    /// Um pedido do v1 com a Especialização e o Tier que o geraram.
+    #[derive(Debug, Clone, Copy)]
+    struct Caso {
+        tier: Tier,
+        especializacao: Especializacao,
+        pedido: PedidoMissao,
     }
 
-    #[test]
-    fn twelve_distinct_positive_costs() {
-        let mut custos: Vec<i32> = todos().into_iter().map(|(e, t)| custo_contratacao(e, t)).collect();
-        assert_eq!(custos.len(), 12);
-        assert!(custos.iter().all(|&c| c > 0));
-        custos.sort_unstable();
-        custos.dedup();
-        assert_eq!(custos.len(), 12, "custos repetidos");
+    impl Caso {
+        fn com_tier(self, tier: Tier) -> Caso {
+            let p = self.pedido;
+            Caso { tier, pedido: PedidoMissao::v1(tier, self.especializacao, p.modo, p.tipo, p.amplitude), ..self }
+        }
     }
 
-    #[test]
-    fn a_higher_tier_always_costs_more_than_any_lower_tier() {
-        let maximo = |tier| Especializacao::TODAS.iter().map(|&e| custo_contratacao(e, tier)).max();
-        let minimo = |tier| Especializacao::TODAS.iter().map(|&e| custo_contratacao(e, tier)).min();
-        assert!(maximo(Tier::Junior) < minimo(Tier::Experiente));
-        assert!(maximo(Tier::Experiente) < minimo(Tier::Elite));
-    }
-
-    #[test]
-    fn generalista_junior_is_the_cheapest() {
-        let mais_barato = todos().into_iter().min_by_key(|&(e, t)| custo_contratacao(e, t));
-        assert_eq!(mais_barato, Some((Especializacao::Generalista, Tier::Junior)));
-    }
-
-    /// Todas as 4 × 3 × 2 × 4 × 4 = 384 combinações de entrada.
-    fn todos_os_pedidos() -> Vec<PedidoMissao> {
-        let mut pedidos = Vec::new();
+    /// Todas as 4 × 3 × 2 × 4 × 4 = 384 combinações de entrada do v1.
+    fn todos_os_casos() -> Vec<Caso> {
+        let mut casos = Vec::new();
         for tier in Tier::TODOS {
             for especializacao in Especializacao::TODAS {
                 for modo in ModoBusca::TODOS {
                     for tipo in TipoMissao::TODOS {
                         for amplitude in AmplitudeGeografica::TODAS {
-                            pedidos.push(PedidoMissao { tier, especializacao, modo, tipo, amplitude });
+                            casos.push(Caso { tier, especializacao, pedido: PedidoMissao::v1(tier, especializacao, modo, tipo, amplitude) });
                         }
                     }
                 }
             }
         }
-        pedidos
+        casos
+    }
+
+    fn todos_os_pedidos() -> Vec<PedidoMissao> {
+        todos_os_casos().into_iter().map(|c| c.pedido).collect()
+    }
+
+    /// A pontuação da tabela da Story 2.1: `Tier (1–3) + 1 se combina + 1
+    /// se Completa` (o Generalista, que no v1 não combinava com nada, agora
+    /// combina com a Geral).
+    fn pontuacao_v1(c: &Caso) -> u8 {
+        let tier = match c.tier {
+            Tier::Junior => 1,
+            Tier::Experiente => 2,
+            Tier::Elite => 3,
+        };
+        tier + u8::from(aderente(c.especializacao, c.pedido.tipo)) + u8::from(c.pedido.modo == ModoBusca::Completa)
+    }
+
+    #[test]
+    fn the_v1_profile_reproduces_the_story_2_1_table() {
+        for c in todos_os_casos() {
+            assert_eq!(pontuacao(&c.pedido), pontuacao_v1(&c), "{c:?}");
+            assert_eq!(c.pedido.perfil.tier(), c.tier, "o Tier é o resumo do foco");
+            assert_eq!(c.pedido.perfil.foco(), c.especializacao);
+        }
+        // prazo: a Rede do v1 reproduz os fatores de Tier (120/100/85%)
+        let r = |tier| fator_duracao_rede(PerfilOlheiro::v1(Especializacao::Tatico, tier).rede);
+        assert_eq!((r(Tier::Junior), r(Tier::Experiente), r(Tier::Elite)), (120, 100, 85));
+    }
+
+    #[test]
+    fn hiring_cost_grows_with_the_focus_stars_and_the_extras() {
+        let perfil = |foco: u8, rede: u8| PerfilOlheiro {
+            jovens: Estrelas(foco),
+            medalhoes: Estrelas(foco.saturating_sub(3)),
+            tatico: Estrelas(foco.saturating_sub(3)),
+            generalista: Estrelas(foco.saturating_sub(3)),
+            rede: Estrelas(rede),
+        };
+        let custo = |p: &PerfilOlheiro| custo_contratacao(p, Some(Confederacao::Africa), 1);
+        let junior = custo(&perfil(5, 5));
+        let experiente = custo(&perfil(7, 5));
+        let elite = custo(&perfil(9, 5));
+        assert!((250_000..600_000).contains(&junior), "{junior}");
+        assert!((1_000_000..2_000_000).contains(&experiente), "{experiente}");
+        assert!((3_000_000..6_000_000).contains(&elite), "{elite}");
+        assert!(custo(&perfil(7, 9)) > experiente, "Rede maior custa mais");
+        assert!(custo_contratacao(&perfil(7, 5), Some(Confederacao::Africa), 3) > experiente, "mais mercados custam mais");
+        assert!(custo_contratacao(&perfil(7, 5), Some(Confederacao::Europa), 1) > experiente, "europeu custa mais");
+        assert!(junior % 10_000 == 0 && custo(&perfil(0, 0)) >= 100_000);
     }
 
     #[test]
     fn a_higher_tier_gives_a_better_report() {
-        for pedido in todos_os_pedidos().into_iter().filter(|p| p.tier != Tier::Elite) {
-            let acima = PedidoMissao { tier: if pedido.tier == Tier::Junior { Tier::Experiente } else { Tier::Elite }, ..pedido };
-            let (a, b) = (estimar_missao(&pedido), estimar_missao(&acima));
-            assert!(b.qualidade >= a.qualidade, "{pedido:?}");
-            assert!(b.atributos_revelados > a.atributos_revelados, "{pedido:?}");
-            assert!(b.precisao_mais_menos < a.precisao_mais_menos, "{pedido:?}");
+        for c in todos_os_casos().into_iter().filter(|c| c.tier != Tier::Elite) {
+            let acima = c.com_tier(if c.tier == Tier::Junior { Tier::Experiente } else { Tier::Elite });
+            let (a, b) = (estimar_missao(&c.pedido), estimar_missao(&acima.pedido));
+            assert!(b.qualidade >= a.qualidade, "{c:?}");
+            assert!(b.atributos_revelados > a.atributos_revelados, "{c:?}");
+            assert!(b.precisao_mais_menos < a.precisao_mais_menos, "{c:?}");
         }
         // de Júnior para Elite o nível sempre sobe
-        for pedido in todos_os_pedidos().into_iter().filter(|p| p.tier == Tier::Junior) {
-            let elite = PedidoMissao { tier: Tier::Elite, ..pedido };
-            assert!(estimar_missao(&elite).qualidade > estimar_missao(&pedido).qualidade, "{pedido:?}");
+        for c in todos_os_casos().into_iter().filter(|c| c.tier == Tier::Junior) {
+            let elite = c.com_tier(Tier::Elite);
+            assert!(estimar_missao(&elite.pedido).qualidade > estimar_missao(&c.pedido).qualidade, "{c:?}");
         }
     }
 
@@ -1489,40 +2184,26 @@ mod tests {
             (Especializacao::CacadorDeJovens, TipoMissao::Jovens),
             (Especializacao::CacadorDeMedalhoes, TipoMissao::Medalhoes),
             (Especializacao::Tatico, TipoMissao::Tatica),
+            (Especializacao::Generalista, TipoMissao::Geral),
         ];
-        for pedido in todos_os_pedidos() {
+        for c in todos_os_casos() {
             for (especializacao, tipo) in casos {
-                if pedido.especializacao != especializacao || pedido.tipo == tipo {
+                if c.especializacao != especializacao || c.pedido.tipo == tipo {
                     continue;
                 }
-                let combinando = PedidoMissao { tipo, ..pedido };
-                let (fora, dentro) = (estimar_missao(&pedido), estimar_missao(&combinando));
-                assert!(dentro.qualidade >= fora.qualidade, "{pedido:?}");
-                assert!(dentro.atributos_revelados > fora.atributos_revelados, "{pedido:?}");
+                let combinando = PedidoMissao { tipo, ..c.pedido };
+                let (fora, dentro) = (estimar_missao(&c.pedido), estimar_missao(&combinando));
+                assert!(dentro.qualidade >= fora.qualidade, "{c:?}");
+                assert!(dentro.atributos_revelados > fora.atributos_revelados, "{c:?}");
             }
-        }
-        // Generalista: nenhum tipo é "dele"
-        for tipo in TipoMissao::TODOS {
-            assert!(!aderente(Especializacao::Generalista, tipo));
         }
     }
 
     #[test]
     fn extremes_match_the_documented_table() {
-        let pior = PedidoMissao {
-            tier: Tier::Junior,
-            especializacao: Especializacao::Generalista,
-            modo: ModoBusca::Rapida,
-            tipo: TipoMissao::Geral,
-            amplitude: AmplitudeGeografica::Mundo,
-        };
-        let melhor = PedidoMissao {
-            tier: Tier::Elite,
-            especializacao: Especializacao::CacadorDeJovens,
-            modo: ModoBusca::Completa,
-            tipo: TipoMissao::Jovens,
-            amplitude: AmplitudeGeografica::Pais,
-        };
+        let pior = PedidoMissao::v1(Tier::Junior, Especializacao::Tatico, ModoBusca::Rapida, TipoMissao::Geral, AmplitudeGeografica::Mundo);
+        let melhor =
+            PedidoMissao::v1(Tier::Elite, Especializacao::CacadorDeJovens, ModoBusca::Completa, TipoMissao::Jovens, AmplitudeGeografica::Pais);
         assert_eq!(
             estimar_missao(&pior),
             EstimativaMissao {
@@ -1558,7 +2239,8 @@ mod tests {
         // jovens vence medalhões quando as duas regras valem
         assert_eq!(tipo_por_faixas(faixa(75, 80), faixa(90, 99)), TipoMissao::Jovens);
         assert!(combina(Especializacao::CacadorDeJovens, TipoMissao::Jovens));
-        assert!(!combina(Especializacao::Generalista, TipoMissao::Geral));
+        assert!(combina(Especializacao::Generalista, TipoMissao::Geral), "Épico 5: a Geral é a do Generalista");
+        assert!(!combina(Especializacao::Generalista, TipoMissao::Jovens));
     }
 
     #[test]
@@ -1850,12 +2532,8 @@ mod tests {
         assert_eq!(tipo_por_filtros(&filtros), TipoMissao::Geral);
         filtros.fit_posicional = Some(PosicaoAlvo::Volante);
         assert_eq!(tipo_por_filtros(&filtros), TipoMissao::Tatica);
-        let pedido = |especializacao| PedidoMissao {
-            tier: Tier::Experiente,
-            especializacao,
-            modo: ModoBusca::Rapida,
-            tipo: tipo_por_filtros(&filtros),
-            amplitude: AmplitudeGeografica::Pais,
+        let pedido = |especializacao| {
+            PedidoMissao::v1(Tier::Experiente, especializacao, ModoBusca::Rapida, tipo_por_filtros(&filtros), AmplitudeGeografica::Pais)
         };
         for outra in [Especializacao::Generalista, Especializacao::CacadorDeJovens, Especializacao::CacadorDeMedalhoes] {
             assert!(estimar_missao(&pedido(Especializacao::Tatico)).qualidade > estimar_missao(&pedido(outra)).qualidade);
@@ -1946,5 +2624,216 @@ mod tests {
         assert_eq!(degrau_dinheiro(10_000, -1), 10_000, "não passa do mínimo");
         assert_eq!(degrau_dinheiro(1_000_000_000, 1), 1_000_000_000, "nem do máximo");
         assert_eq!(Perfil::TODOS.len(), 11);
+    }
+
+    // -----------------------------------------------------------------
+    // Épico 5: estrelas, mercados, adaptação, verba, mercado de Olheiros
+    // -----------------------------------------------------------------
+
+    fn brasil() -> Regiao {
+        Regiao::Pais { id: 54, continente: Confederacao::AmericaDoSul }
+    }
+
+    fn china() -> Regiao {
+        Regiao::Pais { id: 155, continente: Confederacao::Asia }
+    }
+
+    fn argentina() -> Regiao {
+        Regiao::Pais { id: 52, continente: Confederacao::AmericaDoSul }
+    }
+
+    fn do_brasil() -> Vec<Mercado> {
+        vec![Mercado::Pais { id: 54, continente: Confederacao::AmericaDoSul }]
+    }
+
+    #[test]
+    fn stars_are_half_steps_and_the_focus_is_the_highest_attribute() {
+        assert_eq!(Estrelas(7).texto(), "3,5");
+        assert_eq!(Estrelas(8).texto(), "4");
+        assert_eq!(Estrelas::de_meias(14), Estrelas(10));
+        assert_eq!(Estrelas::de_meias(-3), Estrelas(0));
+        assert_eq!((Estrelas(9).inteiras(), Estrelas(9).menos(4), Estrelas(9).mais(4)), (4, Estrelas(5), Estrelas(10)));
+        let perfil = PerfilOlheiro { jovens: Estrelas(4), medalhoes: Estrelas(8), tatico: Estrelas(8), generalista: Estrelas(6), rede: Estrelas(5) };
+        assert_eq!(perfil.foco(), Especializacao::CacadorDeMedalhoes, "empate: a ordem do PRD");
+        assert_eq!(perfil.tier(), Tier::Experiente);
+        assert_eq!(perfil.para_tipo(TipoMissao::Geral), Estrelas(6), "a Geral usa o Generalista");
+        assert_eq!(perfil.para_tipo(TipoMissao::Jovens), Estrelas(4), "Generalista 3★ − 1 = 2★ de piso");
+    }
+
+    #[test]
+    fn market_distance_goes_from_home_to_same_continent_to_elsewhere() {
+        let mercados = do_brasil();
+        assert_eq!(distancia_mercado(&mercados, brasil()), 0);
+        assert_eq!(distancia_mercado(&mercados, argentina()), 1);
+        assert_eq!(distancia_mercado(&mercados, china()), 2);
+        assert_eq!(distancia_mercado(&mercados, Regiao::Continente(Confederacao::AmericaDoSul)), 1);
+        assert_eq!(distancia_mercado(&mercados, Regiao::Continente(Confederacao::Europa)), 2);
+        assert_eq!(distancia_mercado(&mercados, Regiao::Mundo), 1);
+        let continental = vec![Mercado::Continente(Confederacao::AmericaDoSul)];
+        assert_eq!(distancia_mercado(&continental, argentina()), 0, "conhece o continente inteiro");
+        assert_eq!(distancia_mercado(&[], china()), 0, "Olheiro de antes das estrelas: sem penalidade");
+    }
+
+    #[test]
+    fn the_market_penalty_shrinks_with_six_months_of_work_there() {
+        let perfil = PerfilOlheiro::v1(Especializacao::Generalista, Tier::Elite);
+        let mercados = do_brasil();
+        let sem_trabalho = penalidade_missao(&perfil, &mercados, &[china()], TipoMissao::Geral, &[]);
+        assert_eq!(sem_trabalho, Penalidade { qualidade: 2, velocidade: 4 }, "−1★ e −2★ em outro continente");
+        let meio = [TrabalhoPassado { tipo: TipoMissao::Geral, regioes: vec![china()], dias: 90 }];
+        assert_eq!(penalidade_missao(&perfil, &mercados, &[china()], TipoMissao::Geral, &meio), Penalidade { qualidade: 1, velocidade: 2 });
+        let adaptado = [TrabalhoPassado { tipo: TipoMissao::Geral, regioes: vec![Regiao::Continente(Confederacao::Asia)], dias: 200 }];
+        assert_eq!(
+            penalidade_missao(&perfil, &mercados, &[china()], TipoMissao::Geral, &adaptado),
+            Penalidade::default(),
+            "trabalhar no continente vale para os países dele"
+        );
+        assert_eq!(penalidade_missao(&perfil, &mercados, &[brasil(), china()], TipoMissao::Geral, &[]).qualidade, 2, "vale a pior região");
+        assert_eq!(penalidade_missao(&perfil, &mercados, &[], TipoMissao::Geral, &[]), Penalidade { qualidade: 1, velocidade: 2 }, "mundo todo");
+    }
+
+    #[test]
+    fn a_specialist_out_of_focus_loses_quality_until_he_gets_used_to_it() {
+        let cj = PerfilOlheiro::v1(Especializacao::CacadorDeJovens, Tier::Experiente);
+        let p = penalidade_missao(&cj, &[], &[], TipoMissao::Medalhoes, &[]);
+        assert_eq!(p, Penalidade { qualidade: 2, velocidade: 0 });
+        let meses = |dias| [TrabalhoPassado { tipo: TipoMissao::Medalhoes, regioes: vec![Regiao::Mundo], dias }];
+        assert_eq!(penalidade_missao(&cj, &[], &[], TipoMissao::Medalhoes, &meses(270)).qualidade, 0, "Experiente: 9 meses");
+        let elite = PerfilOlheiro::v1(Especializacao::CacadorDeJovens, Tier::Elite);
+        assert_eq!(penalidade_missao(&elite, &[], &[], TipoMissao::Medalhoes, &meses(180)).qualidade, 0, "Elite: 6 meses");
+        let junior = PerfilOlheiro::v1(Especializacao::CacadorDeJovens, Tier::Junior);
+        assert!(penalidade_missao(&junior, &[], &[], TipoMissao::Medalhoes, &meses(180)).qualidade > 0, "Júnior: 1 ano");
+        // a Geral e o Generalista nunca têm penalidade de foco
+        assert_eq!(penalidade_missao(&cj, &[], &[], TipoMissao::Geral, &[]), Penalidade::default());
+        let g = PerfilOlheiro::v1(Especializacao::Generalista, Tier::Junior);
+        assert_eq!(penalidade_missao(&g, &[], &[], TipoMissao::Tatica, &[]), Penalidade::default());
+        assert_eq!(penalidade_missao(&cj, &[], &[], TipoMissao::Jovens, &[]), Penalidade::default());
+    }
+
+    #[test]
+    fn penalties_lower_quality_and_slow_the_missao() {
+        let base = PedidoMissao::v1(Tier::Elite, Especializacao::Tatico, ModoBusca::Completa, TipoMissao::Tatica, AmplitudeGeografica::Pais);
+        let longe = PedidoMissao { penalidade: Penalidade { qualidade: 2, velocidade: 4 }, ..base };
+        let (a, b) = (estimar_missao(&base), estimar_missao(&longe));
+        assert!(b.atributos_revelados < a.atributos_revelados && b.precisao_mais_menos > a.precisao_mais_menos, "{a:?} {b:?}");
+        assert!(b.duracao_dias > a.duracao_dias);
+        let junior = PedidoMissao::v1(Tier::Junior, Especializacao::Tatico, ModoBusca::Rapida, TipoMissao::Tatica, AmplitudeGeografica::Pais);
+        let junior_longe = PedidoMissao { penalidade: Penalidade { qualidade: 2, velocidade: 0 }, ..junior };
+        assert!(estimar_missao(&junior_longe).qualidade <= estimar_missao(&junior).qualidade);
+        assert_eq!(b.custo, a.custo, "a penalidade não muda o custo");
+    }
+
+    #[test]
+    fn the_travel_budget_trades_money_for_players_quality_and_speed() {
+        let base = PedidoMissao::v1(Tier::Experiente, Especializacao::Tatico, ModoBusca::Completa, TipoMissao::Tatica, AmplitudeGeografica::Continente);
+        let com = |investimento| estimar_missao(&PedidoMissao { investimento, ..base });
+        let (eco, pad, ref_) = (com(Investimento::Economica), com(Investimento::Padrao), com(Investimento::Reforcada));
+        assert_eq!(pad, estimar_missao(&base));
+        assert!(eco.custo < pad.custo && pad.custo < ref_.custo);
+        assert!(eco.alvo_jogadores < pad.alvo_jogadores && pad.alvo_jogadores < ref_.alvo_jogadores);
+        assert!(eco.precisao_mais_menos > pad.precisao_mais_menos);
+        assert!(eco.duracao_dias > pad.duracao_dias && ref_.duracao_dias < pad.duracao_dias);
+        assert!(ref_.atributos_revelados >= pad.atributos_revelados);
+        // a faixa de valores cresce com a escala da busca
+        let mundo = PedidoMissao { amplitude: AmplitudeGeografica::Mundo, ..base };
+        let faixa = |p: PedidoMissao| {
+            estimar_missao(&PedidoMissao { investimento: Investimento::Reforcada, ..p }).custo
+                - estimar_missao(&PedidoMissao { investimento: Investimento::Economica, ..p }).custo
+        };
+        assert!(faixa(mundo) > faixa(base));
+    }
+
+    fn clube(nacional: u8, internacional: u8, nivel: u8, titulos: u16) -> PerfilClube {
+        PerfilClube { prestigio_nacional: nacional, prestigio_internacional: internacional, nivel_liga: nivel, titulos, pais: Some(45), continente: Confederacao::Europa }
+    }
+
+    fn paises() -> Vec<PaisCandidato> {
+        [(45, Confederacao::Europa), (14, Confederacao::Europa), (54, Confederacao::AmericaDoSul), (52, Confederacao::AmericaDoSul), (155, Confederacao::Asia), (103, Confederacao::Africa)]
+            .into_iter()
+            .map(|(id, continente)| PaisCandidato { id, continente })
+            .collect()
+    }
+
+    #[test]
+    fn club_attractiveness_comes_from_prestige_division_and_titles() {
+        assert_eq!(atratividade(&clube(20, 20, 1, 21)), 100);
+        assert!(atratividade(&clube(10, 5, 1, 0)) < 50);
+        assert!(atratividade(&clube(10, 5, 3, 0)) < atratividade(&clube(10, 5, 1, 0)));
+        assert!(atratividade(&clube(10, 5, 1, 8)) > atratividade(&clube(10, 5, 1, 0)));
+        assert_eq!(nome_atratividade(100), "Alta");
+        assert_eq!(nome_atratividade(50), "Média");
+        assert_eq!(nome_atratividade(10), "Baixa");
+        assert_eq!(periodo_do_mercado(2035, 8), periodo_do_mercado(2035, 7) + 1);
+    }
+
+    #[test]
+    fn the_monthly_market_is_deterministic_and_bigger_clubs_see_more_and_better_olheiros() {
+        let grande = clube(20, 20, 1, 21);
+        let pequeno = clube(4, 1, 3, 0);
+        let ofertas = |c: &PerfilClube, periodo| gerar_ofertas(atratividade(c), periodo, 0xABCDEF, c, &paises());
+        assert_eq!(ofertas(&grande, 24_400), ofertas(&grande, 24_400), "mesmo mês, mesmas ofertas");
+        assert_ne!(ofertas(&grande, 24_400), ofertas(&grande, 24_401), "o mercado muda no mês seguinte");
+        assert_eq!(ofertas(&grande, 1).len(), 9);
+        assert_eq!(ofertas(&pequeno, 1).len(), 4);
+        // em muitos meses: o clube grande vê bem mais Elites
+        let elites = |c: &PerfilClube| (0..60).flat_map(|m| ofertas(c, m)).filter(|o| o.perfil.tier() == Tier::Elite).count();
+        let total = |c: &PerfilClube| (0..60).flat_map(|m| ofertas(c, m)).count();
+        let (eg, tg) = (elites(&grande), total(&grande));
+        let (ep, tp) = (elites(&pequeno), total(&pequeno));
+        assert!(eg * 100 / tg >= 15, "grande: {eg}/{tg}");
+        assert!(ep * 100 / tp <= 5, "pequeno: {ep}/{tp}");
+        for o in (0..60).flat_map(|m| ofertas(&grande, m)) {
+            assert!(o.perfil.principal() >= Estrelas(3), "{o:?}");
+            assert!(Especializacao::TODAS.iter().all(|&e| o.perfil.atributo(e) <= o.perfil.principal()));
+            assert!(o.pais.is_some() && !o.mercados.is_empty(), "todo Olheiro novo tem nação e mercado");
+            if o.perfil.tier() == Tier::Elite {
+                assert!(o.mercados.iter().any(|m| matches!(m, Mercado::Continente(_))), "Elite conhece o continente");
+            }
+        }
+        // Olheiros locais são os mais comuns
+        let locais = (0..60).flat_map(|m| ofertas(&grande, m)).filter(|o| o.pais == Some(45)).count();
+        assert!(locais * 100 / tg >= 25, "{locais}/{tg}");
+    }
+
+    #[test]
+    fn freshness_ages_from_six_months_to_eighteen() {
+        assert_eq!(frescor(0), Frescor::Atualizado);
+        assert_eq!(frescor(180), Frescor::Atualizado);
+        assert!(matches!(frescor(181), Frescor::Envelhecendo { extra: 1 }));
+        assert!(matches!(frescor(364), Frescor::Envelhecendo { .. }));
+        let um_ano = frescor(365);
+        assert!(matches!(um_ano, Frescor::Desatualizado { .. }), "{um_ano:?}");
+        assert!(um_ano.extra() >= 4 && um_ano.extra() < PERDA_MAXIMA);
+        assert_eq!(frescor(539).extra(), PERDA_MAXIMA);
+        assert_eq!(frescor(540), Frescor::Vencido);
+    }
+
+    #[test]
+    fn following_closes_the_ranges_in_a_time_that_depends_on_how_specified_the_player_was() {
+        assert_eq!(dias_para_exato(1, 28, 28), 10, "Qualidade Alta");
+        assert_eq!(dias_para_exato(14, 6, 28), 184, "Qualidade Baixa: ~6 meses");
+        assert_eq!(dias_para_exato(0, 28, 28), 7, "mínimo");
+        assert_eq!(precisao_acompanhada(14, 0, 184), 14);
+        assert_eq!(precisao_acompanhada(14, 92, 184), 7);
+        assert_eq!(precisao_acompanhada(14, 184, 184), 0);
+        assert_eq!(precisao_acompanhada(14, 183, 184), 1, "só exato no fim");
+        assert_eq!(atributos_acompanhados(6, 28, 0, 184), 6);
+        assert_eq!(atributos_acompanhados(6, 28, 92, 184), 17);
+        assert_eq!(atributos_acompanhados(6, 28, 500, 184), 28);
+        assert_eq!(capacidade_acompanhamento(Estrelas(5)), 5);
+        assert_eq!(capacidade_acompanhamento(Estrelas(9)), 9);
+        assert_eq!(capacidade_acompanhamento(Estrelas(10)), 10);
+    }
+
+    #[test]
+    fn false_positives_shrink_with_quality_and_near_misses_are_close() {
+        assert_eq!(falsos_positivos(Qualidade::Baixa, 8), 2);
+        assert_eq!(falsos_positivos(Qualidade::Media, 30), 3);
+        assert_eq!(falsos_positivos(Qualidade::Media, 7), 0);
+        assert_eq!(falsos_positivos(Qualidade::Alta, 44), 0);
+        // titular 71, "muda patamar" pede 74+: 72 é quase, 68 não
+        assert!(quase_no_nivel(NivelEquipe::MudaPatamar, 72, 72, 71));
+        assert!(!quase_no_nivel(NivelEquipe::MudaPatamar, 68, 68, 71));
+        assert!(quase_no_nivel(NivelEquipe::Titular, 75, 75, 71), "um pouco acima do nível titular");
     }
 }

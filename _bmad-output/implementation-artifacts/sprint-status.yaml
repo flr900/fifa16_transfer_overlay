@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-09-30
-last_updated: 2026-10-03
+last_updated: 2026-10-04
 project: Central de Scout (FIFA 16 Companion)
 project_key: NOKEY
 tracking_system: file-system
@@ -84,3 +84,11 @@ development_status:
   4-1-see-coverage-by-country-on-the-sonar-map: backlog
   4-2-read-a-countrys-missao-counts: backlog
   epic-4-retrospective: optional
+
+  epic-5: in-progress
+  5-1-olheiros-with-identity-stars-markets-and-a-monthly-market: review
+  epic-5-retrospective: optional
+
+  epic-6: in-progress
+  6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists: review
+  epic-6-retrospective: optional

@@ -33,13 +33,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::state::{Missao, Olheiro, Relatorio};
+use super::state::{Escolhido, Missao, Olheiro, Relatorio};
 use super::Aba;
 
 /// Versão do formato do arquivo. Um arquivo com versão MAIOR foi gravado
 /// por uma DLL mais nova: lemos o que entendemos e não gravamos por cima
 /// (gravar com esta versão apagaria os campos que não conhecemos).
-pub const VERSAO_FORMATO: u32 = 1;
+/// v2 (2026-10-04): Olheiros com nome/nação/estrelas/mercados, Lista de
+/// Escolhidos e ofertas contratadas — uma DLL v1 apagaria tudo isso.
+pub const VERSAO_FORMATO: u32 = 2;
 
 /// Conteúdo do JSON de estado de uma carreira.
 ///
@@ -55,6 +57,16 @@ pub struct ScoutStateFile {
     pub missoes: Vec<Missao>,
     #[serde(default)]
     pub relatorios: Vec<Relatorio>,
+    /// Lista de Escolhidos (Épico 6).
+    #[serde(default)]
+    pub escolhidos: Vec<Escolhido>,
+    /// Ofertas do mercado de Olheiros já contratadas (não voltam à lista).
+    #[serde(default)]
+    pub ofertas_contratadas: Vec<uuid::Uuid>,
+    /// Atratividade do clube fixada para o mês do mercado de Olheiros:
+    /// `(período, atratividade)`.
+    #[serde(default)]
+    pub mercado_do_mes: Option<(u32, u8)>,
     /// Preferência de UI inválida (ex. aba que não existe mais) não pode
     /// custar os Olheiros: só esta seção volta ao padrão.
     #[serde(default, deserialize_with = "ou_padrao")]
@@ -68,6 +80,9 @@ impl Default for ScoutStateFile {
             olheiros: Vec::new(),
             missoes: Vec::new(),
             relatorios: Vec::new(),
+            escolhidos: Vec::new(),
+            ofertas_contratadas: Vec::new(),
+            mercado_do_mes: None,
             ui_prefs: UiPrefs::default(),
         }
     }
@@ -182,6 +197,19 @@ impl EstadoPersistido {
         }
 
         match serde_json::from_slice::<ScoutStateFile>(&bytes) {
+            Ok(mut dados) if dados.versao < VERSAO_FORMATO => {
+                // Formato anterior: tudo o que ele tinha continua igual
+                // (campos novos com `default`); a próxima gravação já sai
+                // na versão atual.
+                tracing::info!(
+                    "[scout::persistence] {} estava no formato v{}; atualizado para v{}.",
+                    caminho.display(),
+                    dados.versao,
+                    VERSAO_FORMATO
+                );
+                dados.versao = VERSAO_FORMATO;
+                EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: Some(caminho) }
+            }
             Ok(dados) if dados.versao > VERSAO_FORMATO => {
                 tracing::warn!(
                     "[scout::persistence] {} tem formato v{} (esta DLL entende até v{}): lido sem gravar.",
@@ -357,10 +385,13 @@ pub(crate) mod tests {
         assert_eq!(
             json_do_arquivo(&pasta, ID_A),
             serde_json::json!({
-                "versao": 1,
+                "versao": 2,
                 "olheiros": [],
                 "missoes": [],
                 "relatorios": [],
+                "escolhidos": [],
+                "ofertas_contratadas": [],
+                "mercado_do_mes": null,
                 "ui_prefs": { "aba_ativa": "olheiros", "densidade": "tabular", "densidade_olheiros": "cards" }
             })
         );
@@ -391,7 +422,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ids_and_dates_follow_ad12() {
-        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente, contratado_em: None };
+        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente, ..Default::default() };
         let missao = Missao {
             criada_em: Date(20260703),
             prazo_estimado: Date(20261015),
@@ -449,7 +480,7 @@ pub(crate) mod tests {
         assert_eq!(arquivos.len(), 2, "{arquivos:?}");
         let copia = arquivos.iter().find(|n| n.contains(".corrompido-")).cloned().unwrap_or_default();
         assert_eq!(fs::read(pasta.0.join(copia)).unwrap_or_default(), original);
-        assert_eq!(json_do_arquivo(&pasta, ID_A)["versao"], 1, "arquivo novo é válido");
+        assert_eq!(json_do_arquivo(&pasta, ID_A)["versao"], 2, "arquivo novo é válido");
     }
 
     #[test]
@@ -459,7 +490,29 @@ pub(crate) mod tests {
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
         assert!(estado.gravavel());
         assert_eq!(estado.ler(Clone::clone), ScoutStateFile::default());
-        assert_eq!(json_do_arquivo(&pasta, ID_A)["versao"], 1);
+        assert_eq!(json_do_arquivo(&pasta, ID_A)["versao"], 2);
+    }
+
+    #[test]
+    fn a_v1_file_keeps_everything_and_is_written_back_as_v2() {
+        let pasta = PastaTemporaria::nova();
+        let id = Uuid::new_v4();
+        let conteudo = format!(
+            r#"{{"versao": 1, "olheiros": [{{"id": "{id}", "especializacao": "tatico", "tier": "elite", "contratado_em": 20260701}}],
+                "missoes": [], "relatorios": [], "ui_prefs": {{"aba_ativa": "missoes"}}}}"#
+        );
+        let _ = fs::write(pasta.0.join(format!("{ID_A}.json")), conteudo);
+        let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
+        assert!(estado.gravavel(), "v1 é mais antigo: pode gravar");
+        let olheiro = estado.ler(|d| d.olheiros[0].clone());
+        assert_eq!((olheiro.id, olheiro.tier, olheiro.contratado_em), (id, Tier::Elite, Some(Date(20260701))));
+        assert_eq!(olheiro.perfil, None, "sem estrelas gravadas: vale o perfil do v1");
+        assert!(olheiro.nome.is_empty() && olheiro.mercados.is_empty());
+        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Missoes);
+        estado.mutar(|d| d.ofertas_contratadas.clear()).unwrap_or_else(|e| panic!("{e:?}"));
+        let json = json_do_arquivo(&pasta, ID_A);
+        assert_eq!(json["versao"], 2);
+        assert_eq!(json["olheiros"][0]["tier"], "elite");
     }
 
     #[test]
@@ -473,7 +526,7 @@ pub(crate) mod tests {
         let _ = fs::write(pasta.0.join(format!("{ID_A}.json")), conteudo);
 
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        let esperado = Olheiro { id, especializacao: Especializacao::CacadorDeJovens, tier: Tier::Elite, contratado_em: None };
+        let esperado = Olheiro { id, especializacao: Especializacao::CacadorDeJovens, tier: Tier::Elite, ..Default::default() };
         assert_eq!(estado.ler(|d| d.olheiros.clone()), vec![esperado]);
         assert_eq!(estado.ler(|d| d.ui_prefs.clone()), UiPrefs::default());
         assert_eq!(estado.ler(|d| d.versao), VERSAO_FORMATO, "versão ausente = atual");
@@ -482,7 +535,7 @@ pub(crate) mod tests {
     #[test]
     fn newer_format_is_read_but_never_overwritten() {
         let pasta = PastaTemporaria::nova();
-        let conteudo = r#"{"versao": 2, "ui_prefs": {"aba_ativa": "sonar"}, "campo_novo": 1}"#;
+        let conteudo = r#"{"versao": 3, "ui_prefs": {"aba_ativa": "sonar"}, "campo_novo": 1}"#;
         let _ = fs::write(pasta.0.join(format!("{ID_A}.json")), conteudo);
 
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);

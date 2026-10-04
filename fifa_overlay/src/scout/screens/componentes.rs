@@ -13,6 +13,7 @@ use imgui::{DrawListMut, FontId, StyleColor, StyleVar, Ui};
 
 use super::theme::{self, Fonts};
 use super::{com_fonte, contorno_hover, ESPESSURA_FOCO};
+use crate::scout::quality::{Estrelas, Frescor};
 use crate::scout::state::{Qualidade, Tier};
 
 // ---------------------------------------------------------------------
@@ -136,6 +137,25 @@ pub fn badge_fit() -> EstiloBadge {
     }
 }
 
+/// "ESCOLHIDO" em verde-campo: o jogador está na Lista de Escolhidos.
+pub fn badge_escolhido() -> EstiloBadge {
+    EstiloBadge { texto: "ESCOLHIDO", contorno: theme::FIELD_GREEN, fundo: theme::FIELD_GREEN_DIM, cor_texto: theme::FIELD_GREEN }
+}
+
+/// Estado de um Escolhido: ACOMPANHADO (roxo), ATUALIZADO (verde),
+/// ENVELHECENDO/DESATUALIZADO (dourado), VENCIDO (vermelho). Sempre com
+/// texto (NFR5).
+pub fn badge_frescor(frescor: Frescor, acompanhado: bool) -> EstiloBadge {
+    let (texto, cor, fundo) = match (acompanhado, frescor) {
+        (true, _) => ("ACOMPANHADO", theme::ACCENT_PRIMARY, theme::ACCENT_PRIMARY_DIM),
+        (false, Frescor::Atualizado) => ("ATUALIZADO", theme::FIELD_GREEN, theme::FIELD_GREEN_DIM),
+        (false, Frescor::Envelhecendo { .. }) => ("ENVELHECENDO", theme::WARNING, theme::TRANSPARENTE),
+        (false, Frescor::Desatualizado { .. }) => ("DESATUALIZADO", theme::WARNING, theme::TRANSPARENTE),
+        (false, Frescor::Vencido) => ("VENCIDO", theme::DANGER, theme::TRANSPARENTE),
+    };
+    EstiloBadge { texto, contorno: cor, fundo, cor_texto: cor }
+}
+
 /// Desenha o badge em `pos`, centralizado na altura `altura_linha`, pelo
 /// draw list (sem criar item). Devolve o tamanho ocupado.
 pub fn desenhar_badge(
@@ -242,6 +262,77 @@ pub fn alternador(ui: &Ui, fonts: Option<&Fonts>, opcoes: &[&str], escolhida: us
     clicada
 }
 
+// ---------------------------------------------------------------------
+// Estrelas (Épico 5)
+// ---------------------------------------------------------------------
+
+/// Os 10 vértices de uma estrela de 5 pontas (pontas e vales alternados),
+/// começando pela ponta de cima.
+pub fn vertices_estrela(centro: [f32; 2], raio: f32) -> [[f32; 2]; 10] {
+    let mut v = [[0.0; 2]; 10];
+    for (i, p) in v.iter_mut().enumerate() {
+        let r = if i % 2 == 0 { raio } else { raio * 0.45 };
+        let angulo = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+        *p = [centro[0] + r * angulo.cos(), centro[1] + r * angulo.sin()];
+    }
+    v
+}
+
+/// Uma estrela cheia: 5 triângulos das pontas + o pentágono do meio (o
+/// draw list só preenche polígonos convexos).
+fn estrela_cheia(dl: &DrawListMut<'_>, centro: [f32; 2], raio: f32, cor: [f32; 4]) {
+    let v = vertices_estrela(centro, raio);
+    let vale = |i: usize| v[(i + 10) % 10];
+    for ponta in (0..10).step_by(2) {
+        dl.add_triangle(vale(ponta + 9), v[ponta], vale(ponta + 1), cor).filled(true).build();
+    }
+    let pentagono: Vec<[f32; 2]> = (1..10).step_by(2).map(|i| v[i]).collect();
+    dl.add_polyline(pentagono, cor).filled(true).build();
+}
+
+/// Cinco estrelas a partir de `pos` (canto superior esquerdo), cada uma
+/// com `lado` px: cheias, meia e vazias conforme `estrelas`. Devolve a
+/// largura ocupada. Sem glifo de estrela na fonte do overlay, elas são
+/// desenhadas.
+pub fn desenhar_estrelas(dl: &DrawListMut<'_>, pos: [f32; 2], estrelas: Estrelas, lado: f32, cor: [f32; 4]) -> f32 {
+    let raio = lado * 0.5;
+    let passo = lado + 2.0;
+    let apagada = [cor[0], cor[1], cor[2], cor[3] * 0.22];
+    let meias = estrelas.meias();
+    for i in 0..5u8 {
+        let centro = [pos[0] + raio + f32::from(i) * passo, pos[1] + raio];
+        estrela_cheia(dl, centro, raio, apagada);
+        let cheias = meias / 2;
+        if i < cheias {
+            estrela_cheia(dl, centro, raio, cor);
+        } else if i == cheias && meias % 2 == 1 {
+            // meia estrela: só a metade esquerda
+            dl.with_clip_rect_intersect([centro[0] - raio - 1.0, centro[1] - raio - 1.0], [centro[0], centro[1] + raio + 1.0], || {
+                estrela_cheia(dl, centro, raio, cor);
+            });
+        }
+    }
+    passo * 5.0 - 2.0
+}
+
+/// "Rótulo ★★★½☆" pelo draw list: o rótulo em texto secundário e as
+/// estrelas ao lado, centradas na linha. Devolve a largura ocupada.
+pub fn rotulo_com_estrelas(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    dl: &DrawListMut<'_>,
+    pos: [f32; 2],
+    rotulo: &str,
+    estrelas: Estrelas,
+    cor: [f32; 4],
+) -> f32 {
+    let [w, h] = texto_em(ui, fonts.map(|f| f.meta), dl, pos, theme::TEXT_SECONDARY, rotulo);
+    let lado = (h * 0.8).max(8.0);
+    let x = pos[0] + w + theme::ESPACO_1;
+    let largura = desenhar_estrelas(dl, [x, pos[1] + (h - lado) * 0.5], estrelas, lado, cor);
+    w + theme::ESPACO_1 + largura
+}
+
 /// Texto pelo draw list numa fonte do tema; devolve o tamanho.
 pub fn texto_em(
     ui: &Ui,
@@ -271,6 +362,26 @@ mod tests {
         assert_eq!(badge_qualidade(Qualidade::Baixa).contorno, theme::TIER_JUNIOR);
         for estilo in Tier::TODOS.map(badge_tier).into_iter().chain(qualidades.map(badge_qualidade)) {
             assert!(estilo.fundo[3] <= 0.15, "{}", estilo.texto);
+        }
+    }
+
+    #[test]
+    fn every_freshness_badge_says_it_in_words() {
+        let estados = [Frescor::Atualizado, Frescor::Envelhecendo { extra: 2 }, Frescor::Desatualizado { extra: 6 }, Frescor::Vencido];
+        let textos: Vec<&str> = estados.iter().map(|&f| badge_frescor(f, false).texto).collect();
+        assert_eq!(textos, ["ATUALIZADO", "ENVELHECENDO", "DESATUALIZADO", "VENCIDO"]);
+        assert_eq!(badge_frescor(Frescor::Vencido, true).texto, "ACOMPANHADO");
+        assert_eq!(badge_escolhido().texto, "ESCOLHIDO");
+    }
+
+    #[test]
+    fn a_star_alternates_tips_and_valleys_starting_at_the_top() {
+        let v = vertices_estrela([0.0, 0.0], 10.0);
+        assert!((v[0][0]).abs() < 1e-4 && (v[0][1] + 10.0).abs() < 1e-4, "ponta de cima");
+        for (i, p) in v.iter().enumerate() {
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            let esperado = if i % 2 == 0 { 10.0 } else { 4.5 };
+            assert!((r - esperado).abs() < 1e-3, "{i}: {r}");
         }
     }
 }

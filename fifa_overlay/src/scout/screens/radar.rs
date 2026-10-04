@@ -219,6 +219,7 @@ mod tests {
             estrelas_drible: None,
             pe_fraco: None,
             titular_elenco: None,
+            falso_positivo: false,
         }
     }
 

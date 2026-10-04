@@ -20,10 +20,11 @@ use uuid::Uuid;
 
 use super::quality;
 use super::state::{
-    Atributo, AtributoRevelado, FiltroPe, FiltrosMissao, JogadorEncontrado, JogadorReferencia, Missao, PosicaoAlvo, Relatorio,
+    Atributo, AtributoRevelado, FaixaAtributo, FiltroPe, FiltrosMissao, JogadorEncontrado, JogadorReferencia, Missao, PosicaoAlvo,
+    Relatorio,
 };
 use crate::async_task::AsyncTask;
-use crate::save_repo::{self, Date, Liga, Nacao, PlayerPool, PlayerRaw, SaveRepoError};
+use crate::save_repo::{self, DadosDoClube, Date, Liga, Nacao, PlayerPool, PlayerRaw, SaveRepoError};
 
 /// Id do quadro "Outros" do mapa: nações dos jogadores que não existem na
 /// tabela de nações (nunca somem em silêncio — Story 2.9).
@@ -72,6 +73,11 @@ pub trait CareerSource: Send + Sync {
     fn read_leagues(&self) -> Result<Vec<Liga>, SaveRepoError> {
         Ok(self.read_all_players()?.ligas)
     }
+    /// Prestígio, liga e títulos do clube do técnico, para o mercado de
+    /// Olheiros (lê o save: `AsyncTask`). Por padrão, desconhecido.
+    fn read_club_profile(&self) -> Result<DadosDoClube, SaveRepoError> {
+        Err(SaveRepoError::NaoLocalizado)
+    }
 }
 
 /// Fonte real: o `save_repo` da Story 1.1.
@@ -104,6 +110,10 @@ impl CareerSource for SaveRepoSource {
 
     fn read_leagues(&self) -> Result<Vec<Liga>, SaveRepoError> {
         save_repo::read_leagues()
+    }
+
+    fn read_club_profile(&self) -> Result<DadosDoClube, SaveRepoError> {
+        save_repo::read_club_profile()
     }
 
     fn read_snapshot(&self) -> Result<CareerSnapshot, SaveRepoError> {
@@ -327,8 +337,32 @@ pub fn tem_dominantes(jogador: &PlayerRaw, atributos: &[Atributo]) -> bool {
     atributos.iter().all(|&a| quality::eh_dominante(&valores, a, top))
 }
 
+/// A Missão com os filtros "quase" dos falsos positivos (Épico 5, item 7):
+/// faixas numéricas com folga e sem o nível no elenco (que tem a folga
+/// própria, `quality::quase_no_nivel`). Geografia, posições e perfil
+/// continuam valendo: o Olheiro erra por pouco, não de lugar.
+fn missao_folgada(missao: &Missao) -> Missao {
+    let mut m = missao.clone();
+    let f = &mut m.filtros;
+    let folga = |x: &mut FaixaAtributo, d: u8, menor: u8, maior: u8| {
+        x.min = x.min.saturating_sub(d).max(menor);
+        x.max = x.max.saturating_add(d).min(maior);
+    };
+    folga(&mut f.overall, quality::FOLGA_OVERALL, 1, 99);
+    folga(&mut f.potencial, quality::FOLGA_OVERALL, 1, 99);
+    folga(&mut f.idade, quality::FOLGA_IDADE, 0, 99);
+    folga(&mut f.contrato, 1, 0, quality::CONTRATO_MAIOR);
+    f.teto_valor = f.teto_valor.map(|t| t * quality::FOLGA_TETO_PCT / 100);
+    f.teto_salario = f.teto_salario.map(|t| t * quality::FOLGA_TETO_PCT / 100);
+    f.nivel_elenco = None;
+    m
+}
+
 /// Escolhe até `quantos` candidatos (fora de `excluir`) e revela cada um
 /// conforme a Qualidade da Missão. Determinístico para a mesma Missão.
+/// Abaixo da Qualidade Alta, `quality::falsos_positivos` das vagas vão para
+/// jogadores que quase passam no filtro (marcados só no arquivo); sem
+/// "quase" suficientes, as vagas ficam com os que passam.
 pub fn escolher_jogadores(
     missao: &Missao,
     pool: &PlayerPool,
@@ -339,26 +373,113 @@ pub fn escolher_jogadores(
     let id = missao.id.as_u128();
     let qualidade = missao.estimativa.qualidade;
     let elenco = nivel_do_elenco(pool);
-    let mut candidatos: Vec<(u32, &PlayerRaw)> = pool
-        .jogadores
-        .iter()
-        .filter(|j| !excluir.contains(&j.player_id) && passa_nos_filtros_com(missao, pool, j, hoje, &elenco))
-        .map(|j| {
-            let relevancia = quality::relevancia(missao.tipo, j.overall, j.potencial, &notas_de_perfil(missao, j));
-            (quality::nota_de_escolha(relevancia, qualidade, quality::semente(id, j.player_id, 0)), j)
-        })
-        .collect();
+    let folgada = missao_folgada(missao);
+    let querem_falsos = quality::falsos_positivos(qualidade, quantos) > 0;
+    let nota = |j: &PlayerRaw| {
+        let relevancia = quality::relevancia(missao.tipo, j.overall, j.potencial, &notas_de_perfil(missao, j));
+        quality::nota_de_escolha(relevancia, qualidade, quality::semente(id, j.player_id, 0))
+    };
+    let mut candidatos: Vec<(u32, &PlayerRaw)> = Vec::new();
+    let mut quase: Vec<(u32, &PlayerRaw)> = Vec::new();
+    for j in pool.jogadores.iter().filter(|j| !excluir.contains(&j.player_id)) {
+        if passa_nos_filtros_com(missao, pool, j, hoje, &elenco) {
+            candidatos.push((nota(j), j));
+        } else if querem_falsos
+            && passa_nos_filtros_com(&folgada, pool, j, hoje, &elenco)
+            && missao.filtros.nivel_elenco.is_none_or(|nivel| {
+                quality::quase_no_nivel(nivel, j.overall, j.potencial, elenco.titular(perfil_comparado(missao, j)))
+            })
+        {
+            quase.push((nota(j), j));
+        }
+    }
     // maior nota primeiro; empate pelo id (ordem estável e determinística)
-    candidatos.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.player_id.cmp(&b.1.player_id)));
+    let ordem = |a: &(u32, &PlayerRaw), b: &(u32, &PlayerRaw)| b.0.cmp(&a.0).then(a.1.player_id.cmp(&b.1.player_id));
+    candidatos.sort_by(ordem);
+    quase.sort_by(ordem);
+    let falsos = quality::falsos_positivos(qualidade, quantos).min(quase.len());
+    let verdadeiros = quantos.saturating_sub(falsos);
     candidatos
-        .into_iter()
-        .take(quantos)
-        .map(|(_, j)| {
+        .iter()
+        .take(verdadeiros)
+        .map(|(_, j)| (*j, false))
+        .chain(quase.iter().take(falsos).map(|(_, j)| (*j, true)))
+        .map(|(j, falso)| {
             let mut encontrado = revelar(missao, pool, hoje, j);
             encontrado.titular_elenco = Some(elenco.titular(perfil_comparado(missao, j)));
+            encontrado.falso_positivo = falso;
             encontrado
         })
         .collect()
+}
+
+/// Nova observação de um jogador da Lista de Escolhidos pelo acompanhamento
+/// (Épico 6): faixas com a `precisao` de agora, a partir dos valores atuais
+/// do save, e os `atributos` primeiros na ordem de observação. Bio, clube e
+/// contrato também se atualizam (o Olheiro acompanha o jogador). Nunca
+/// guarda o valor real além do que a precisão revela.
+pub fn reobservar(
+    anterior: &JogadorEncontrado,
+    jogador: &PlayerRaw,
+    pool: &PlayerPool,
+    hoje: Date,
+    precisao: u8,
+    atributos: usize,
+    alvo: Option<PosicaoAlvo>,
+    referencia: Option<&JogadorReferencia>,
+) -> JogadorEncontrado {
+    let pid = jogador.player_id;
+    let base = (u128::from(pid) << 64) | 0xE5C0;
+    let funcao = save_repo::funcao_da_posicao(jogador.posicao);
+    // o que já tinha sido observado (os atributos pedidos na Missão vêm
+    // primeiro lá) continua na frente; depois, a ordem da função
+    let ja_vistos: Vec<Atributo> = anterior.atributos.iter().map(|a| a.atributo).collect();
+    let mut ordem = ja_vistos.clone();
+    ordem.extend(quality::ordem_de_observacao(funcao, &ja_vistos, alvo).into_iter().filter(|a| !ja_vistos.contains(a)));
+    let atributos = ordem
+        .into_iter()
+        .take(atributos)
+        .map(|atributo| {
+            let canal = 100 + u32::try_from(atributo.indice()).unwrap_or(0);
+            AtributoRevelado {
+                atributo,
+                valor: quality::faixa_revelada(jogador.atributo(atributo), precisao, quality::semente(base, pid, canal)),
+            }
+        })
+        .collect();
+    let nacao = pool.nacoes.iter().find(|n| n.id == jogador.nacionalidade);
+    let mut novo = JogadorEncontrado {
+        player_id: pid,
+        nome: jogador.nome.clone(),
+        idade: jogador.idade(hoje),
+        posicao: jogador.posicao,
+        nacao_id: jogador.nacionalidade,
+        nacao: nacao.map(|n| n.nome.clone()).unwrap_or_else(|| anterior.nacao.clone()),
+        clube: jogador.clube.clone(),
+        contrato_ate: jogador.clube_id.map(|_| jogador.contrato_ate),
+        observacao: Default::default(),
+        overall: quality::faixa_revelada(jogador.overall, precisao, quality::semente(base, pid, 1)),
+        potencial: quality::faixa_revelada(jogador.potencial, precisao, quality::semente(base, pid, 2)),
+        atributos,
+        pe: Some(jogador.pe),
+        similaridade: None,
+        fit: None,
+        variacao_overall: None,
+        ritmo_ataque: Some(jogador.ritmo_ataque),
+        ritmo_defesa: Some(jogador.ritmo_defesa),
+        estrelas_drible: Some(jogador.estrelas_drible),
+        pe_fraco: Some(jogador.pe_fraco),
+        titular_elenco: anterior.titular_elenco,
+        falso_positivo: anterior.falso_positivo,
+    };
+    let visto = |a: Atributo| novo.valor_visto(a);
+    let fit = alvo.and_then(|alvo| quality::forca_fit(alvo, jogador.posicao, visto));
+    let variacao = alvo.and_then(|alvo| quality::variacao_overall(alvo, jogador.posicao, visto));
+    let similaridade = referencia.and_then(|r| quality::similaridade(visto, |a| r.atributo(a).map(f32::from), r.goleiro()));
+    novo.fit = fit;
+    novo.variacao_overall = variacao;
+    novo.similaridade = similaridade;
+    novo
 }
 
 /// O que o Relatório mostra de um jogador: faixas de Overall/Potencial e
@@ -403,6 +524,7 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         estrelas_drible: Some(jogador.estrelas_drible),
         pe_fraco: Some(jogador.pe_fraco),
         titular_elenco: None,
+        falso_positivo: false,
     };
     // Similaridade e fit "pelo que o Olheiro viu" (nunca o valor real).
     let visto = |a: Atributo| encontrado.valor_visto(a);
@@ -876,5 +998,64 @@ pub mod tests {
         assert_eq!(ids(&m), vec![2, 3], "Overall 88 pede mais que a folha");
         m.filtros.posicoes = vec![crate::scout::state::Perfil::Centroavante];
         assert_eq!(ids(&m), vec![2]);
+    }
+
+    // -----------------------------------------------------------------
+    // Épicos 5 e 6: falsos positivos e reobservação dos Escolhidos
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn low_quality_reports_bring_some_near_misses_flagged_only_in_the_file() {
+        // 20 que passam (Overall 70) e 20 "quase" (Overall 67, filtro 68+)
+        let jogadores = (1..=20).map(|i| jogador(i, 70, 75, 24)).chain((21..=40).map(|i| jogador(i, 67, 75, 24))).collect();
+        let p = pool(jogadores);
+        let mut m = missao_com((68, 99), (50, 99));
+        m.estimativa.qualidade = crate::scout::state::Qualidade::Baixa;
+        let lista = escolher_jogadores(&m, &p, HOJE, &HashSet::new(), 8);
+        assert_eq!(lista.len(), 8);
+        let falsos: Vec<&JogadorEncontrado> = lista.iter().filter(|j| j.falso_positivo).collect();
+        assert_eq!(falsos.len(), quality::falsos_positivos(m.estimativa.qualidade, 8));
+        assert!(falsos.iter().all(|j| j.player_id > 20), "os falsos são os de 67");
+        assert!(lista.iter().filter(|j| !j.falso_positivo).all(|j| j.player_id <= 20));
+        // a faixa revelada continua contendo o valor real
+        for j in &falsos {
+            assert!(j.overall.min <= 67 && 67 <= j.overall.max);
+        }
+        // Qualidade Alta: nenhum
+        m.estimativa.qualidade = crate::scout::state::Qualidade::Alta;
+        assert!(escolher_jogadores(&m, &p, HOJE, &HashSet::new(), 8).iter().all(|j| !j.falso_positivo));
+        // longe demais (Overall 60) nunca é "quase"
+        let longe = pool((1..=10).map(|i| jogador(i, 70, 75, 24)).chain((11..=20).map(|i| jogador(i, 60, 75, 24))).collect());
+        m.estimativa.qualidade = crate::scout::state::Qualidade::Baixa;
+        assert!(escolher_jogadores(&m, &longe, HOJE, &HashSet::new(), 8).iter().all(|j| !j.falso_positivo));
+    }
+
+    #[test]
+    fn reobserving_reveals_current_values_within_the_new_precision() {
+        let mut real = jogador(9, 72, 80, 25);
+        real.atributos[Atributo::Finalizacao.indice()] = 85;
+        let p = pool(vec![real.clone()]);
+        let m = missao_com((50, 99), (50, 99));
+        let mut antes = revelar(&m, &p, HOJE, &real);
+        antes.atributos.truncate(3);
+        antes.falso_positivo = true;
+        let depois = reobservar(&antes, &real, &p, Date(20270101), 2, 20, None, None);
+        let ja_vistos: Vec<Atributo> = antes.atributos.iter().map(|a| a.atributo).collect();
+        let primeiros: Vec<Atributo> = depois.atributos.iter().take(3).map(|a| a.atributo).collect();
+        assert_eq!(primeiros, ja_vistos, "o que já tinha sido observado continua na frente");
+        assert_eq!(depois.atributos.len(), 20);
+        assert!(depois.overall.max - depois.overall.min <= 4);
+        assert!(depois.overall.min <= 72 && 72 <= depois.overall.max);
+        for a in &depois.atributos {
+            let v = real.atributo(a.atributo);
+            assert!(a.valor.min <= v && v <= a.valor.max);
+        }
+        assert!(depois.falso_positivo, "a marca segue com o jogador");
+        let referencia = JogadorReferencia { player_id: 1, nome: "R".to_string(), posicao: 25, atributos: real.atributos.to_vec() };
+        let exato = reobservar(&antes, &real, &p, Date(20270101), 0, 28, Some(PosicaoAlvo::SegundoAtacante), Some(&referencia));
+        assert_eq!(exato.similaridade, Some(100), "similaridade recalculada com a referência da Missão");
+        assert_eq!((exato.overall.min, exato.overall.max), (72, 72));
+        assert_eq!(exato.atributos.len(), 28);
+        assert!(exato.fit.is_some(), "fit recalculado com o alvo da Missão de origem");
     }
 }
