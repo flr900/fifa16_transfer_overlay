@@ -3,6 +3,9 @@
 //! ANTES de debitar. A escrita no jogo só acontece no botão confirmar
 //! (FR-3); "Cancelar" volta sem tocar em nada.
 //!
+//! Épico 5: o modal mostra o Olheiro do mercado (nome, nação, mercados,
+//! estrelas) e deixa trocar o nome antes de confirmar (teclado).
+//!
 //! Desenhada como janela própria, por cima do painel (que fica
 //! desabilitado e escurecido por baixo), em vez de popup modal do ImGui:
 //! um popup aberto sobrevive ao painel fechar com F10 no meio e pode
@@ -88,18 +91,36 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             ui.dummy([0.0, theme::ESPACO_2]);
 
             let c = &previa.contratacao;
-            olheiros::nome_com_badge(ui, fonts, c.especializacao, c.tier);
+            let o = &c.oferta.olheiro;
+            let perfil = o.perfil();
+            olheiros::nome_com_badge(ui, fonts, &o.nome, o.tier);
             com_fonte(ui, fonts.map(|f| f.meta), || {
                 ui.text_colored(
                     theme::TEXT_SECONDARY,
-                    format!("Tier {} · {}", c.tier.nome(), olheiros::descricao(c.especializacao)),
-                )
+                    format!("Foco {} ({} estrelas) · {}", perfil.foco().nome(), perfil.principal().texto(), olheiros::descricao(perfil.foco())),
+                );
+                let nacao = |id: u16| state.nome_da_nacao(id);
+                ui.text_colored(theme::TEXT_SECONDARY, olheiros::texto_origem(o, &nacao));
             });
+            ui.dummy([0.0, theme::ESPACO_1]);
+            let pos = ui.cursor_screen_pos();
+            let largura = olheiros::estrelas_do_perfil(ui, fonts, &ui.get_window_draw_list(), pos, &perfil);
+            ui.dummy([largura, ui.text_line_height()]);
+            ui.dummy([0.0, theme::ESPACO_2]);
+            // Nome (item 1): começa com o gerado; vazio volta a ele.
+            com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, "Nome do Olheiro"));
+            let mut nome = c.nome.clone();
+            {
+                let _largura = ui.push_item_width(LARGURA);
+                if com_fonte(ui, fonts.map(|f| f.body), || ui.input_text("##nome_olheiro", &mut nome).build()) {
+                    state.definir_nome_da_contratacao(&nome);
+                }
+            }
             ui.dummy([0.0, theme::ESPACO_3]);
             ui.separator();
             ui.dummy([0.0, theme::ESPACO_2]);
 
-            linha(ui, fonts, "Custo de contratação", &formatar_milhar(c.custo), theme::TEXT_PRIMARY);
+            linha(ui, fonts, "Custo de contratação", &formatar_milhar(c.custo()), theme::TEXT_PRIMARY);
             linha(ui, fonts, "Orçamento atual", &formatar_milhar(previa.orcamento_atual), theme::TEXT_PRIMARY);
             let (texto_apos, cor_apos) = match previa.faltam {
                 Some(_) => ("—".to_string(), theme::TEXT_DISABLED),

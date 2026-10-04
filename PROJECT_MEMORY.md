@@ -1475,6 +1475,36 @@ dominantes múltiplos. Ver a Story 3.6.
 - **Contrato:** `CZUM.contractvaliduntil` (`qvmK`) é o ano; no save, quase
   tudo entre 2036 e 2040 (carreira em 2035).
 
+## Sessão 14 — Épicos 5 e 6: Olheiros com estrelas e mercado; Lista de Escolhidos (2026-10-04)
+
+Felipe pediu para endereçar todas as melhorias de
+`melhorias-futuras-olheiros.md` e acrescentou a Lista de Escolhidos.
+Branch `claude/melhorias-mapeadas-eca5c4`, build `5.0-v2` (com o main: Épico 4 e correção do B); 281 testes.
+Stories 5.1 e 6.1 (decisões das questões em aberto nelas e no fim do
+documento de melhorias). Sem teste em jogo.
+
+- **Prestígio do clube no save:** `teams` (`lyxL`): `domesticprestige`
+  `ppLE` e `internationalprestige` `edvw`, 0–20 (Barcelona 20/20; o
+  histograma do save tem degraus pares). **Troféus da carreira:**
+  `career_trophies` (`KNNX`): uma linha por temporada (`vojK`), `flags`
+  (`glmx`) com um bit por troféu; o bit 1 aparece em quase toda
+  temporada do Barcelona (a liga). 13 temporadas = 21 troféus.
+  `career_users.leagueid` (`mPrV.aQrQ`) dá a liga do técnico (53 = La Liga).
+- **Fonte do overlay só tem Latin-1** (`theme::FAIXAS_DE_GLIFOS`: 0x20–0xFF,
+  0x2010–0x203A, €, ≈): nada de ★ — as estrelas são desenhadas pelo draw
+  list (`componentes::desenhar_estrelas`, meia estrela com clip) — e nomes
+  como "Yılmaz"/"Kovačević" viraram "Yilmaz"/"Kovacevic" (teste garante).
+- **Olheiro antigo = perfil v1:** sem estrelas gravadas, `Olheiro::perfil()`
+  devolve o equivalente da Especialização × Tier, que reproduz a tabela da
+  Story 2.1 (teste). A única mudança: o Generalista agora "combina" com a
+  Missão Geral.
+- **Adaptação sem estado novo:** os dias trabalhados por lugar e por tipo
+  saem das Missões do próprio Olheiro, então voltar no tempo já desfaz.
+- **Escolhidos:** a atualização do acompanhamento lê o `DATA` num
+  `AsyncTask` na abertura do painel (e ao mudar designação/lista); o
+  acompanhado não envelhece; quem perde a vaga volta a envelhecer da
+  última observação. Formato do arquivo de estado v2.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —

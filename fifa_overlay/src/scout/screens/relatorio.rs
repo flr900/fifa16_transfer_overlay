@@ -20,7 +20,9 @@
 
 use imgui::Ui;
 
-use super::componentes::{self, badge_fit, badge_qualidade, badge_tier, card_com_largura, desenhar_badge_texto, texto_em, EstiloBotao};
+use super::componentes::{
+    self, badge_escolhido, badge_fit, badge_qualidade, badge_tier, card_com_largura, desenhar_badge_texto, texto_em, EstiloBotao,
+};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data};
 use crate::save_repo::{nome_posicao, Date};
@@ -229,7 +231,7 @@ pub fn detalhe(item: &RelatorioNaLista) -> String {
     let r = &item.relatorio;
     let mut partes = Vec::new();
     if let Some(o) = &item.olheiro {
-        partes.push(format!("{} ({})", o.especializacao.nome(), o.tier.nome()));
+        partes.push(format!("{} ({})", o.nome_exibicao(), o.tier.nome()));
     }
     if let Some(m) = &item.missao {
         partes.push(super::missoes::nome_modo(m.modo_busca).to_string());
@@ -358,8 +360,19 @@ fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorE
     let meta = fonts.map(|f| f.meta);
     let mono = fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body));
 
-    let (nome, nome_cortado) = truncar(&j.nome, largura_texto, medir(fonts.map(|f| f.heading)));
-    y += texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, &nome)[1];
+    // Já na Lista de Escolhidos (Épico 6): badge ao lado do nome.
+    let escolhido = state.esta_nos_escolhidos(j.player_id);
+    let largura_badge = if escolhido {
+        com_fonte(ui, fonts.map(|f| f.badge), || ui.calc_text_size(badge_escolhido().texto)[0]) + theme::ESPACO_2 * 3.0
+    } else {
+        0.0
+    };
+    let (nome, nome_cortado) = truncar(&j.nome, largura_texto - largura_badge, medir(fonts.map(|f| f.heading)));
+    let [w_nome, h_nome] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, &nome);
+    if escolhido {
+        componentes::desenhar_badge(ui, fonts, &dl, &badge_escolhido(), [x + w_nome + theme::ESPACO_2, y], h_nome);
+    }
+    y += h_nome;
 
     let clube = if j.clube.is_empty() { "Sem clube" } else { j.clube.as_str() };
     // Fit Posicional: badge extra na linha da posição nativa (Story 3.5).
@@ -487,6 +500,7 @@ mod tests {
             estrelas_drible: None,
             pe_fraco: None,
             titular_elenco: None,
+            falso_positivo: false,
         }
     }
 

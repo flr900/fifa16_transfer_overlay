@@ -5,6 +5,7 @@
 //! AD-1: as telas só falam com `scout::state`. Formatar valores para
 //! exibição (milhar, data dd/mm/aaaa) é responsabilidade desta camada.
 
+mod acompanhamento;
 pub mod aviso;
 mod componentes;
 mod confirmacao_contratacao;
@@ -13,6 +14,7 @@ mod missoes;
 mod campo_atributo;
 mod campo_fit;
 mod cartograma;
+mod escolhidos;
 mod ficha_jogador;
 mod nova_missao;
 mod olheiros;
@@ -26,7 +28,7 @@ pub mod theme;
 
 use imgui::{Condition, FontId, StyleColor, StyleVar, Ui, WindowFlags};
 
-use super::state::{CarreiraStatus, DestinoOlheiro, Especializacao, ScoutState, Tier};
+use super::state::{CarreiraStatus, DestinoOlheiro, OfertaOlheiro, ScoutState};
 use super::{Aba, ContextoSeletor, Navigation, Satelite, ScoutScreen};
 use crate::save_repo::Date;
 use theme::Fonts;
@@ -121,8 +123,8 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         });
 
     match pedido {
-        Some(Pedido::Contratar(especializacao, tier)) if !confirmando => {
-            state.preparar_contratacao(especializacao, tier);
+        Some(Pedido::Contratar(oferta)) if !confirmando => {
+            state.preparar_contratacao(oferta);
             nav.push(Satelite::ConfirmacaoContratacao);
         }
         Some(Pedido::EscolherOlheiro) => {
@@ -164,6 +166,10 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
                 nav.trocar_aba(Aba::Missoes);
                 state.definir_aba_ativa(Aba::Missoes);
             }
+            Some(DestinoOlheiro::Escolhidos) => {
+                nav.trocar_aba(Aba::Escolhidos);
+                state.definir_aba_ativa(Aba::Escolhidos);
+            }
             None => {}
         },
         Some(Pedido::AbrirCampo(satelite)) => {
@@ -185,6 +191,12 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         }
         Some(Pedido::AbrirFicha(player_id)) => {
             state.abrir_ficha(player_id);
+            if state.ficha_aberta().is_some() {
+                nav.push(Satelite::FichaJogador);
+            }
+        }
+        Some(Pedido::AbrirFichaDeEscolhido(player_id)) => {
+            state.abrir_ficha_de_escolhido(player_id);
             if state.ficha_aberta().is_some() {
                 nav.push(Satelite::FichaJogador);
             }
@@ -380,7 +392,7 @@ fn botoes_das_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: 
 /// próprio scroll (o ImGui mantém o estado por ID mesmo sem desenhar).
 /// O que o conteúdo pediu para a navegação neste frame.
 enum Pedido {
-    Contratar(Especializacao, Tier),
+    Contratar(OfertaOlheiro),
     /// "Contratar Olheiro" na aba Olheiros: abre as ofertas.
     AbrirContratacao,
     /// Clique num Olheiro contratado (ver `DestinoOlheiro`).
@@ -397,6 +409,8 @@ enum Pedido {
     FecharRelatorio,
     /// Ficha de um jogador do Relatório aberto (Story 3.1).
     AbrirFicha(u32),
+    /// Ficha de um jogador da Lista de Escolhidos (Épico 6).
+    AbrirFichaDeEscolhido(u32),
     FecharFicha,
     /// Arquivou o Relatório pela Ficha: volta para a aba.
     ArquivouDaFicha,
@@ -475,7 +489,7 @@ fn conteudo_da_tela(
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::ContratarOlheiro) => {
             match olheiros::render_contratacao(ui, fonts, state) {
                 olheiros::AcaoContratacao::Voltar => *pedido = Some(Pedido::FecharCampo),
-                olheiros::AcaoContratacao::Contratar(e, t) => *pedido = Some(Pedido::Contratar(e, t)),
+                olheiros::AcaoContratacao::Contratar(oferta) => *pedido = Some(Pedido::Contratar(oferta)),
                 olheiros::AcaoContratacao::Nenhuma => {}
             }
         }
@@ -505,8 +519,14 @@ fn conteudo_da_tela(
                 *pedido = Some(Pedido::AbrirCampo(Satelite::SeletorElenco(ContextoSeletor::ComparacaoFicha)));
             }
             ficha_jogador::Acao::Arquivou => *pedido = Some(Pedido::ArquivouDaFicha),
+            ficha_jogador::Acao::RemoveuEscolhido => *pedido = Some(Pedido::FecharFicha),
             ficha_jogador::Acao::Nenhuma => {}
         },
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::AcompanhamentoOlheiros) => {
+            if acompanhamento::render(ui, fonts, state) == acompanhamento::Acao::Voltar {
+                *pedido = Some(Pedido::FecharCampo);
+            }
+        }
         CarreiraStatus::Pronta(_) if matches!(tela, ScoutScreen::Satelite(Satelite::SeletorElenco(_))) => {
             let contexto = match tela {
                 ScoutScreen::Satelite(Satelite::SeletorElenco(c)) => c,
@@ -534,6 +554,11 @@ fn conteudo_da_tela(
                     *pedido = Some(Pedido::AbrirRelatorio(id));
                 }
             }
+            Aba::Escolhidos => match escolhidos::render(ui, fonts, state) {
+                escolhidos::Acao::GerenciarAcompanhamento => *pedido = Some(Pedido::AbrirCampo(Satelite::AcompanhamentoOlheiros)),
+                escolhidos::Acao::AbrirFicha(player_id) => *pedido = Some(Pedido::AbrirFichaDeEscolhido(player_id)),
+                escolhidos::Acao::Nenhuma => {}
+            },
             Aba::Sonar => sonar::render(ui, fonts, state),
         },
     }

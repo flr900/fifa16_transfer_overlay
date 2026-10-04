@@ -23,7 +23,7 @@ use imgui::{StyleColor, Ui};
 use super::componentes::{self, badge_qualidade, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar, olheiros};
-use crate::scout::quality::TipoMissao;
+use crate::scout::quality::{Investimento, TipoMissao};
 use crate::scout::{ContextoSeletor, Satelite};
 use crate::scout::quality;
 use crate::scout::state::{
@@ -39,6 +39,7 @@ const LARGURA_VALOR_CAMPO: f32 = 320.0;
 const LARGURA_RITMO: f32 = 120.0;
 const LARGURA_POSICAO: f32 = 64.0;
 const LARGURA_LIMITE: f32 = 190.0;
+const LARGURA_VERBA: f32 = 200.0;
 
 pub const MSG_SEM_OLHEIRO: &str = "Nenhum Olheiro disponível.";
 
@@ -69,7 +70,8 @@ pub fn texto_tipo(previa: &PreviaMissao) -> String {
         TipoMissao::Jovens => Some("Caçador de Jovens"),
         TipoMissao::Medalhoes => Some("Caçador de Medalhões"),
         TipoMissao::Tatica => Some("Tático"),
-        TipoMissao::Geral => None,
+        // Épico 5: a Missão Geral é a do Generalista
+        TipoMissao::Geral => Some("Generalista"),
     };
     match (previa.combina, especialista) {
         (true, Some(nome)) => format!("Tipo de Missão: {tipo}. O {nome} combina com ela: Qualidade maior."),
@@ -180,6 +182,8 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
 
             secao(ui, fonts, "Busca");
             campo_busca(ui, fonts, state, previa.rascunho.modo, previa.rascunho.continua);
+            ui.dummy([0.0, theme::ESPACO_1]);
+            campo_verba(ui, fonts, state, &previa);
 
             // Detalhes: fechados por padrão, com o resumo do que está ativo.
             ui.dummy([0.0, theme::ESPACO_3]);
@@ -302,7 +306,7 @@ fn cabecalho_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pre
         .map(|c| c.olheiro.clone());
     match escolhido {
         Some(o) => {
-            olheiros::nome_com_badge(ui, fonts, o.especializacao, o.tier);
+            olheiros::nome_com_badge(ui, fonts, &o.nome_exibicao(), o.tier);
             ui.same_line_with_spacing(0.0, theme::ESPACO_4);
             if componentes::botao(ui, fonts, "Restaurar sugestão", EstiloBotao::Secundario, true) {
                 state.restaurar_filtros_ideais();
@@ -312,13 +316,18 @@ fn cabecalho_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pre
             if componentes::focado_pelo_controle(ui) && ui.scroll_y() > 0.0 {
                 ui.set_scroll_y(0.0);
             }
+            let foco = o.perfil().foco();
             ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
             com_fonte(ui, fonts.map(|f| f.meta), || {
                 ui.text_colored(
                     theme::TEXT_SECONDARY,
-                    format!("{} Os filtros abaixo já vêm com o que combina com ele.", olheiros::descricao(o.especializacao)),
+                    format!("Foco {}: {} Os filtros abaixo já vêm com o que combina com ele.", foco.nome(), olheiros::descricao(foco)),
                 )
             });
+            if let Some(aviso) = texto_penalidade(previa) {
+                ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+                com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::WARNING, aviso));
+            }
         }
         None => com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_OLHEIRO)),
     }
@@ -703,6 +712,71 @@ fn campo_busca(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: Mod
     });
 }
 
+/// Verba da viagem (Épico 5, item 6): Econômica / Padrão / Reforçada, cada
+/// uma com o custo (escolha única: foco = escolha). A faixa cresce com a
+/// escala da busca (Modo e amplitude).
+fn campo_verba(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
+    let _id = ui.push_id("verba");
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Verba da viagem");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let atual = previa.rascunho.investimento;
+    for (indice, opcao) in Investimento::TODOS.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        let custo = previa.custos_por_verba.iter().find(|(i, _)| *i == opcao).map(|(_, c)| *c);
+        // o custo muda com os filtros: o id fica só no nome (foco estável)
+        let texto = match custo {
+            Some(c) => format!("{} · {}##{}", opcao.nome(), super::relatorio::formatar_dinheiro(i64::from(c)), opcao.nome()),
+            None => format!("{0}##{0}", opcao.nome()),
+        };
+        let estilo = if opcao == atual { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        let clicou = componentes::botao_com_largura(ui, fonts, &texto, estilo, true, Some(LARGURA_VERBA));
+        if (clicou || componentes::focado_pelo_controle(ui)) && opcao != atual {
+            state.definir_investimento_da_missao(opcao);
+        }
+    }
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_wrapped(descricao_verba(atual)));
+}
+
+pub fn descricao_verba(investimento: Investimento) -> &'static str {
+    match investimento {
+        Investimento::Economica => "Viagens curtas e hotéis simples: 40% mais barata, um quarto a menos de nomes, faixas mais largas e meia estrela a menos.",
+        Investimento::Padrao => "Viagem e hospedagem normais para a escala da busca.",
+        Investimento::Reforcada => "Mais viagens e mais tempo em campo: 60% mais cara, um quarto a mais de nomes, meia estrela a mais e um pouco mais rápida.",
+    }
+}
+
+/// O aviso do Olheiro escolhido: fora do mercado dele e/ou fora do foco,
+/// com o que isso tira (em estrelas) enquanto ele não se adapta.
+pub fn texto_penalidade(previa: &PreviaMissao) -> Option<String> {
+    let p = previa.penalidade;
+    if p.qualidade == 0 && p.velocidade == 0 {
+        return None;
+    }
+    let meias = |m: u8| quality::Estrelas(m).texto();
+    let mut motivos = Vec::new();
+    match previa.distancia_mercado {
+        0 => {}
+        1 => motivos.push("parte da busca fica fora do mercado dele"),
+        _ => motivos.push("a busca fica em outro continente, longe do mercado dele"),
+    }
+    if previa.fora_do_foco {
+        motivos.push("o tipo de Missão não é o foco dele");
+    }
+    let motivo = if motivos.is_empty() { "ele ainda está se adaptando".to_string() } else { motivos.join(" e ") };
+    let mut efeitos = Vec::new();
+    if p.qualidade > 0 {
+        efeitos.push(format!("Qualidade -{} estrela(s)", meias(p.qualidade)));
+    }
+    if p.velocidade > 0 {
+        efeitos.push(format!("velocidade -{} estrela(s)", meias(p.velocidade)));
+    }
+    Some(format!("Atenção: {motivo}. {} até ele se adaptar (trabalhando nesse mercado/tipo).", efeitos.join(", ")))
+}
+
 pub fn descricao_duracao(continua: bool) -> String {
     if continua {
         format!(
@@ -818,6 +892,7 @@ mod tests {
                 filtros: FiltrosMissao::default(),
                 modo: ModoBusca::Rapida,
                 continua: false,
+                investimento: Investimento::Padrao,
                 erro: None,
             },
             olheiros: Vec::new(),
@@ -832,12 +907,16 @@ mod tests {
             teto_salario: None,
             orcamento_apos_missao: None,
             folha_disponivel: None,
+            penalidade: quality::Penalidade::default(),
+            distancia_mercado: 0,
+            fora_do_foco: false,
+            custos_por_verba: Vec::new(),
         }
     }
 
     #[test]
     fn the_type_line_explains_the_quality_bonus() {
-        assert_eq!(texto_tipo(&previa(TipoMissao::Geral, false)), "Tipo de Missão: Geral.");
+        assert_eq!(texto_tipo(&previa(TipoMissao::Geral, false)), "Tipo de Missão: Geral. Um Generalista teria Qualidade maior.");
         assert_eq!(
             texto_tipo(&previa(TipoMissao::Jovens, true)),
             "Tipo de Missão: Jovens. O Caçador de Jovens combina com ela: Qualidade maior."
@@ -846,6 +925,22 @@ mod tests {
             texto_tipo(&previa(TipoMissao::Medalhoes, false)),
             "Tipo de Missão: Medalhões. Um Caçador de Medalhões teria Qualidade maior."
         );
+    }
+
+    #[test]
+    fn the_olheiro_warning_says_why_and_how_much() {
+        let mut p = previa(TipoMissao::Medalhoes, false);
+        assert_eq!(texto_penalidade(&p), None, "sem penalidade, sem aviso");
+        p.penalidade = quality::Penalidade { qualidade: 3, velocidade: 4 };
+        p.distancia_mercado = 2;
+        p.fora_do_foco = true;
+        let texto = texto_penalidade(&p).unwrap_or_default();
+        assert!(texto.contains("outro continente") && texto.contains("não é o foco dele"), "{texto}");
+        assert!(texto.contains("Qualidade -1,5") && texto.contains("velocidade -2"), "{texto}");
+        assert!(!texto.contains('!'));
+        for i in Investimento::TODOS {
+            assert!(!descricao_verba(i).contains('!'));
+        }
     }
 
     #[test]
