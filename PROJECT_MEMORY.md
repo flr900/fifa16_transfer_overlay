@@ -1479,7 +1479,7 @@ dominantes múltiplos. Ver a Story 3.6.
 
 Felipe pediu para endereçar todas as melhorias de
 `melhorias-futuras-olheiros.md` e acrescentou a Lista de Escolhidos.
-Branch `claude/melhorias-mapeadas-eca5c4`, build `5.0-v1`; 267 testes.
+Branch `claude/melhorias-mapeadas-eca5c4`, build `5.0-v2` (com o main: Épico 4 e correção do B); 281 testes.
 Stories 5.1 e 6.1 (decisões das questões em aberto nelas e no fim do
 documento de melhorias). Sem teste em jogo.
 
