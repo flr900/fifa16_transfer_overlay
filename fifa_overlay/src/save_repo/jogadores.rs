@@ -16,6 +16,11 @@
 //!    depois em `playernames` (banco estático). Os ids que existem nas duas
 //!    tabelas têm o mesmo texto.
 //!
+//! **Ligas** (2026-10-03, filtro geográfico por onde o jogador joga): da
+//! tabela `leagues` (`onMQ`) do save, com o país (`countryid` = nationid) e
+//! o continente da nação. Só entram ligas com clubes; ver `ler_ligas` para
+//! as ligas especiais do banco do FIFA Friends.
+//!
 //! Devolve dados crus (AD-3): nenhum filtro de Missão passa por aqui.
 //! Quem filtra é `scout::search`.
 
@@ -299,6 +304,24 @@ impl Confederacao {
     }
 }
 
+/// Uma liga com clubes, para o filtro geográfico.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Liga {
+    /// `leagues.leagueid`.
+    pub id: u32,
+    pub nome: String,
+    /// País (`Crbb.nationid`); `None` nas ligas que juntam clubes de um
+    /// continente inteiro ("Clubes da UEFA") ou sem país (passes livres).
+    pub pais: Option<u16>,
+    /// Nome do país (vazio sem país).
+    pub pais_nome: String,
+    pub continente: Confederacao,
+    /// Divisão (1 = primeira).
+    pub nivel: u8,
+    /// Quantos clubes a liga tem.
+    pub clubes: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nacao {
     /// `Crbb.nationid` — o mesmo valor de `CZUM.nationality`.
@@ -333,6 +356,47 @@ pub struct PlayerRaw {
     pub clube: String,
     /// O clube é da liga "Rest of World" (times genéricos, fora do mercado).
     pub resto_do_mundo: bool,
+    /// `preferredfoot` (Story 3.1).
+    pub pe: Pe,
+    /// Liga do clube (`leagueteamlinks`); `None` sem clube ou fora das
+    /// ligas de `ler_ligas`.
+    pub liga_id: Option<u32>,
+    /// `contractvaliduntil`: ano em que o contrato termina (no fim da
+    /// temporada europeia, 30/06).
+    pub contrato_ate: u16,
+    pub ritmo_ataque: RitmoTrabalho,
+    pub ritmo_defesa: RitmoTrabalho,
+    /// Estrelas de drible, 1–5 (`skillmoves` 0–4 + 1).
+    pub estrelas_drible: u8,
+    /// Estrelas do pé fraco, 1–5 (`weakfootabilitytypecode`).
+    pub pe_fraco: u8,
+}
+
+/// Pé preferido (`CZUM.preferredfoot`: 1 = direito, 2 = esquerdo). No JSON
+/// do Scout: `"direito"` / `"esquerdo"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pe {
+    #[default]
+    Direito,
+    Esquerdo,
+}
+
+impl Pe {
+    fn de_raw(valor: i64) -> Pe {
+        if valor == 2 {
+            Pe::Esquerdo
+        } else {
+            Pe::Direito
+        }
+    }
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Pe::Direito => "Direito",
+            Pe::Esquerdo => "Esquerdo",
+        }
+    }
 }
 
 impl PlayerRaw {
@@ -350,12 +414,17 @@ impl PlayerRaw {
     }
 }
 
-/// Sigla da posição (`preferredposition1`; enum do FIFA 16, igual ao de
-/// `fifa16_search.py`).
+/// Sigla da posição (`preferredposition1`). Enum do FIFA: 0 GK, 1 SW,
+/// 2 RWB, 3 RB, 4 RCB, 5 CB, 6 LCB, 7 LB, 8 LWB, 9 RDM, 10 CDM, 11 LDM,
+/// 12 RM, 13 RCM, 14 CM, 15 LCM, 16 LM, 17 RAM, 18 CAM, 19 LAM, 20 RF,
+/// 21 CF, 22 LF, 23 RW, 24 RS, 25 ST, 26 LS, 27 LW. Conferido no save do
+/// Felipe (2026-10-03): 5 (CB) e 25 (ST) são os mais comuns, Mbappé é 25
+/// com 27 de segunda posição. Até essa data a tabela estava deslocada uma
+/// casa (sem o SW): lateral direito aparecia como "ZAD".
 pub fn nome_posicao(posicao: u8) -> &'static str {
     const NOMES: [&str; 28] = [
-        "GOL", "ALD", "LD", "ZAD", "ZAG", "ZAE", "LE", "ALE", "VOD", "VOL", "VOE", "MD", "MCD", "MC", "MCE", "ME", "MAD",
-        "MEI", "MAE", "SAD", "SA", "SAE", "PD", "ATD", "ATA", "ATE", "PE", "RES",
+        "GOL", "LIB", "ALD", "LD", "ZAD", "ZAG", "ZAE", "LE", "ALE", "VOD", "VOL", "VOE", "MD", "MCD", "MC", "MCE", "ME",
+        "MAD", "MEI", "MAE", "SAD", "SA", "SAE", "PD", "ATD", "ATA", "ATE", "PE",
     ];
     NOMES.get(posicao as usize).copied().unwrap_or("?")
 }
@@ -373,9 +442,41 @@ pub enum Funcao {
 pub fn funcao_da_posicao(posicao: u8) -> Funcao {
     match posicao {
         0 => Funcao::Goleiro,
-        1..=7 => Funcao::Defensor,
-        8..=18 => Funcao::MeioCampo,
+        1..=8 => Funcao::Defensor,
+        9..=19 => Funcao::MeioCampo,
         _ => Funcao::Atacante,
+    }
+}
+
+/// Ritmo de trabalho (`attackingworkrate` / `defensiveworkrate`: 0 =
+/// médio, 1 = baixo, 2 = alto; conferido com Mbappé, alto/baixo). No JSON:
+/// `"baixo"`, `"medio"`, `"alto"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RitmoTrabalho {
+    Baixo,
+    #[default]
+    Medio,
+    Alto,
+}
+
+impl RitmoTrabalho {
+    pub const TODOS: [RitmoTrabalho; 3] = [RitmoTrabalho::Baixo, RitmoTrabalho::Medio, RitmoTrabalho::Alto];
+
+    fn de_raw(valor: i64) -> RitmoTrabalho {
+        match valor {
+            1 => RitmoTrabalho::Baixo,
+            2 => RitmoTrabalho::Alto,
+            _ => RitmoTrabalho::Medio,
+        }
+    }
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            RitmoTrabalho::Baixo => "Baixo",
+            RitmoTrabalho::Medio => "Médio",
+            RitmoTrabalho::Alto => "Alto",
+        }
     }
 }
 
@@ -387,6 +488,19 @@ pub struct PlayerPool {
     /// Clube do técnico (`mPrV.clubteamid`): os jogadores dele não entram
     /// num Relatório.
     pub clube_usuario: i64,
+    /// Ligas com clubes (filtro geográfico).
+    pub ligas: Vec<Liga>,
+}
+
+impl PlayerPool {
+    /// Só os jogadores do clube do técnico.
+    pub fn elenco(self) -> PlayerPool {
+        let clube = self.clube_usuario;
+        PlayerPool {
+            jogadores: self.jogadores.into_iter().filter(|j| j.clube_id.map(i64::from) == Some(clube)).collect(),
+            ..self
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -463,14 +577,41 @@ pub fn read_all_players() -> Result<PlayerPool, SaveRepoError> {
         tracing::warn!("[save_repo] Save ativo ilegível ({}): {err}", caminho.display());
         SaveRepoError::ProcessoInacessivel
     })?;
-    let jogadores = ler_jogadores(&dados, &estatico.nomes)?;
+    let mut jogadores = ler_jogadores(&dados, &estatico.nomes)?;
+    let ligas = ler_ligas(&dados, &estatico.nacoes)?;
+    // liga fora do filtro geográfico (seleção, resto do mundo…) = sem liga
+    let validas: std::collections::HashSet<u32> = ligas.iter().map(|l| l.id).collect();
+    for j in &mut jogadores {
+        j.liga_id = j.liga_id.filter(|l| validas.contains(l));
+    }
     tracing::info!(
-        "[save_repo] {} jogadores lidos de {} em {} ms.",
+        "[save_repo] {} jogadores e {} ligas lidos de {} em {} ms.",
         jogadores.len(),
+        ligas.len(),
         caminho.display(),
         inicio.elapsed().as_millis()
     );
-    Ok(PlayerPool { jogadores, nacoes: estatico.nacoes.clone(), clube_usuario })
+    Ok(PlayerPool { jogadores, nacoes: estatico.nacoes.clone(), clube_usuario, ligas })
+}
+
+/// Ligas com clubes do save ativo (filtro geográfico). Lê o `DATA` do
+/// disco: chamar fora do thread de render.
+pub fn read_leagues() -> Result<Vec<Liga>, SaveRepoError> {
+    let (caminho, _) = caminho_save_ativo()?;
+    let estatico = estatico()?;
+    let dados = std::fs::read(&caminho).map_err(|err| {
+        tracing::warn!("[save_repo] Save ativo ilegível ({}): {err}", caminho.display());
+        SaveRepoError::ProcessoInacessivel
+    })?;
+    ler_ligas(&dados, &estatico.nacoes)
+}
+
+/// Elenco do técnico (`clube_id == mPrV.clubteamid`), da mesma fonte que
+/// `read_all_players` — o `DATA` do save ativo. Não é uma leitura barata:
+/// o arquivo inteiro é decodificado (~0,5 s), então também roda num
+/// `AsyncTask` (AD-4, emenda da Story 3.2).
+pub fn read_squad_players() -> Result<PlayerPool, SaveRepoError> {
+    Ok(read_all_players()?.elenco())
 }
 
 /// Tabela + buffer, com busca de campo por short name.
@@ -558,6 +699,88 @@ fn ler_estatico(dados: &[u8]) -> Result<Estatico, SaveRepoError> {
 /// Liga "Rest of World" (`onMQ.leagueid` 76).
 const LIGA_RESTO_DO_MUNDO: i64 = 76;
 
+/// "Países" especiais do `countryid` das ligas (conferido no save do Felipe,
+/// 2026-10-03, banco do FIFA Friends):
+/// - 75 "International" — seleções (fora do mercado);
+/// - 210 "Free Agents Country" — passes livres (sem país);
+/// - 211 "Rest of World" — ligas que juntam clubes de um continente
+///   ("Clubes da UEFA", "Clubes da Concacaf", "Clubes da AFC", "Clubes da
+///   CAF/OFC"); "Clubes do Mundo" (liga 76) é o resto do mundo, fora;
+/// - 216 "Creation Zone" e 0 — sem clubes;
+/// - 156, 217, 220, 221, 223, 224 ("Brasil Sudeste", "Brasil Sul"…) —
+///   regiões das federações estaduais brasileiras: valem como Brasil.
+const PAIS_SELECOES: i64 = 75;
+const PAIS_PASSES_LIVRES: i64 = 210;
+const PAIS_RESTO_DO_MUNDO: i64 = 211;
+const REGIOES_DO_BRASIL: [i64; 6] = [156, 217, 220, 221, 223, 224];
+const BRASIL: u16 = 54;
+
+/// Continente de uma liga "Clubes da …" pelo nome.
+fn continente_da_liga_regional(nome: &str) -> Option<Confederacao> {
+    let nome = nome.to_uppercase();
+    if nome.contains("UEFA") {
+        Some(Confederacao::Europa)
+    } else if nome.contains("CONCACAF") {
+        Some(Confederacao::AmericaDoNorte)
+    } else if nome.contains("AFC") && !nome.contains("CAF") {
+        Some(Confederacao::Asia)
+    } else if nome.contains("CAF") || nome.contains("OFC") {
+        Some(Confederacao::Africa)
+    } else {
+        None
+    }
+}
+
+/// Ligas com pelo menos um clube, com país e continente (ver os "países"
+/// especiais acima). O sufixo " [OFF]" das federações estaduais sai do nome.
+fn ler_ligas(dados: &[u8], nacoes: &[Nacao]) -> Result<Vec<Liga>, SaveRepoError> {
+    let todas = tabelas(dados);
+    let onmq = achar(dados, &todas, b"onMQ")?;
+    let (id, pais, nivel, nome) = (onmq.campo(b"aQrQ")?, onmq.campo(b"WDGJ")?, onmq.campo(b"paPI")?, onmq.campo(b"HEQX")?);
+    let huffman = HuffmanStrings::for_table(dados, onmq.descritor);
+    let ligas_dos_times = achar(dados, &todas, b"qdZF")?;
+    let liga_do_time = ligas_dos_times.campo(b"aQrQ")?;
+    let mut clubes: HashMap<u32, u16> = HashMap::new();
+    for r in ligas_dos_times.registros() {
+        *clubes.entry(como(inteiro(r, liga_do_time, 1))).or_default() += 1;
+    }
+    let nacao = |id: u16| nacoes.iter().find(|n| n.id == id);
+    let mut ligas: Vec<Liga> = onmq
+        .registros()
+        .filter_map(|r| {
+            let liga_id: u32 = como(inteiro(r, id, 1));
+            let pais_raw = inteiro(r, pais, 0);
+            let texto = fifa_db::read_fixed_string(r, nome).or_else(|| huffman.as_ref().and_then(|h| h.read(r, nome)))?;
+            let texto = texto.trim().trim_end_matches("[OFF]").trim().to_string();
+            let qtd = clubes.get(&liga_id).copied().unwrap_or(0);
+            if qtd == 0 || texto.is_empty() || i64::from(liga_id) == LIGA_RESTO_DO_MUNDO {
+                return None;
+            }
+            let (pais_id, continente) = match pais_raw {
+                0 | PAIS_SELECOES => return None,
+                PAIS_PASSES_LIVRES => (None, Confederacao::Outras),
+                PAIS_RESTO_DO_MUNDO => (None, continente_da_liga_regional(&texto)?),
+                p if REGIOES_DO_BRASIL.contains(&p) => (Some(BRASIL), Confederacao::AmericaDoSul),
+                p => {
+                    let n = nacao(como(p))?;
+                    (Some(n.id), n.confederacao)
+                }
+            };
+            Some(Liga {
+                id: liga_id,
+                nome: if pais_raw == PAIS_PASSES_LIVRES { "Passes livres".to_string() } else { texto },
+                pais_nome: pais_id.and_then(nacao).map(|n| n.nome.clone()).unwrap_or_default(),
+                pais: pais_id,
+                continente,
+                nivel: como(inteiro(r, nivel, 1)),
+                clubes: qtd,
+            })
+        })
+        .collect();
+    ligas.sort_by(|a, b| (a.continente, &a.pais_nome, a.nivel, &a.nome).cmp(&(b.continente, &b.pais_nome, b.nivel, &b.nome)));
+    Ok(ligas)
+}
+
 fn ler_jogadores(dados: &[u8], nomes_estaticos: &HashMap<u32, String>) -> Result<Vec<PlayerRaw>, SaveRepoError> {
     let todas = tabelas(dados);
 
@@ -604,6 +827,7 @@ fn ler_jogadores(dados: &[u8], nomes_estaticos: &HashMap<u32, String>) -> Result
     let liga_do_time: HashMap<u32, i64> =
         ligas.registros().map(|r| (como(inteiro(r, liga_time, 1)), inteiro(r, liga_id, 1))).collect();
 
+
     // Vínculo jogador → clube (ignora a seleção).
     let vinculos = achar(dados, &todas, b"RrqT")?;
     let (vinc_time, vinc_jogador) = (vinculos.campo(b"mCXg")?, vinculos.campo(b"ykFq")?);
@@ -644,6 +868,15 @@ fn ler_jogadores(dados: &[u8], nomes_estaticos: &HashMap<u32, String>) -> Result
                 clube: clube_id.and_then(|t| nome_do_time.get(&t).cloned()).unwrap_or_default(),
                 resto_do_mundo: clube_id.and_then(|t| liga_do_time.get(&t)) == Some(&LIGA_RESTO_DO_MUNDO),
                 clube_id,
+                pe: Pe::de_raw(inteiro(r, campos.pe, 1)),
+                liga_id: clube_id
+                    .and_then(|t| liga_do_time.get(&t))
+                    .and_then(|&l| u32::try_from(l).ok()),
+                contrato_ate: como(inteiro(r, campos.contrato, 0)),
+                ritmo_ataque: RitmoTrabalho::de_raw(inteiro(r, campos.ritmo_ataque, 0)),
+                ritmo_defesa: RitmoTrabalho::de_raw(inteiro(r, campos.ritmo_defesa, 0)),
+                estrelas_drible: como::<u8>(inteiro(r, campos.dribles, 0)).saturating_add(1),
+                pe_fraco: como(inteiro(r, campos.pe_fraco, 1)),
             }
         })
         .collect();
@@ -662,6 +895,12 @@ struct CamposJogador<'a> {
     nacionalidade: &'a FieldDescriptor,
     nascimento: &'a FieldDescriptor,
     genero: &'a FieldDescriptor,
+    pe: &'a FieldDescriptor,
+    contrato: &'a FieldDescriptor,
+    ritmo_ataque: &'a FieldDescriptor,
+    ritmo_defesa: &'a FieldDescriptor,
+    dribles: &'a FieldDescriptor,
+    pe_fraco: &'a FieldDescriptor,
     atributos: Vec<&'a FieldDescriptor>,
 }
 
@@ -678,6 +917,12 @@ impl<'a> CamposJogador<'a> {
             nacionalidade: czum.campo(b"enmm")?,
             nascimento: czum.campo(b"WVIU")?,
             genero: czum.campo(b"EveZ")?,
+            pe: czum.campo(b"MDvm")?,
+            contrato: czum.campo(b"qvmK")?,
+            ritmo_ataque: czum.campo(b"BqFe")?,
+            ritmo_defesa: czum.campo(b"boFm")?,
+            dribles: czum.campo(b"BAPc")?,
+            pe_fraco: czum.campo(b"aOBn")?,
             atributos: Atributo::TODOS.iter().map(|a| czum.campo(a.campo())).collect::<Result<_, _>>()?,
         })
     }
@@ -740,6 +985,38 @@ mod tests {
     }
 
     #[test]
+    fn regional_club_leagues_map_to_their_continent() {
+        assert_eq!(continente_da_liga_regional("Clubes da UEFA"), Some(Confederacao::Europa));
+        assert_eq!(continente_da_liga_regional("Clubes da Concacaf"), Some(Confederacao::AmericaDoNorte));
+        assert_eq!(continente_da_liga_regional("Clubes da AFC"), Some(Confederacao::Asia));
+        assert_eq!(continente_da_liga_regional("Clubes da CAF/OFC"), Some(Confederacao::Africa));
+        assert_eq!(continente_da_liga_regional("Clubes do Mundo"), None);
+    }
+
+    /// Ligas do save versionado: só ligas com clubes, com país e continente.
+    #[test]
+    fn real_save_lists_only_leagues_with_clubs() {
+        let Some(estatico) = banco_estatico() else {
+            eprintln!("banco estático do FIFA 16 não instalado; teste pulado");
+            return;
+        };
+        let nacoes = ler_estatico(&std::fs::read(estatico).expect("banco")).expect("estático").nacoes;
+        let ligas = ler_ligas(&std::fs::read(backup()).expect("save"), &nacoes).expect("ligas");
+        assert!(ligas.iter().all(|l| l.clubes > 0));
+        let premier = ligas.iter().find(|l| l.id == 13).expect("Premier League");
+        assert_eq!((premier.pais, premier.continente, premier.nivel), (Some(14), Confederacao::Europa, 1));
+        let brasileirao = ligas.iter().find(|l| l.id == 7).expect("Brasileirão");
+        assert_eq!(brasileirao.nome, "Brasileirão", "acento lido em Latin-1");
+        // federações estaduais valem como Brasil, sem o [OFF]
+        let paulista = ligas.iter().find(|l| l.id == 101).expect("Federação Paulista");
+        assert_eq!((paulista.pais, paulista.nome.as_str()), (Some(54), "Federação Paulista"));
+        // seleções e resto do mundo ficam de fora; clubes da UEFA sem país
+        assert!(!ligas.iter().any(|l| l.id == 78 || l.id == 76));
+        let uefa = ligas.iter().find(|l| l.id == 77).expect("Clubes da UEFA");
+        assert_eq!((uefa.pais, uefa.continente), (None, Confederacao::Europa));
+    }
+
+    #[test]
     fn names_prefer_the_nickname() {
         assert_eq!(juntar_nome("Neymar", "Neymar", "da Silva Santos"), "Neymar");
         assert_eq!(juntar_nome("", "Kylian", "Mbappé"), "Kylian Mbappé");
@@ -749,11 +1026,17 @@ mod tests {
     #[test]
     fn positions_and_roles() {
         assert_eq!(nome_posicao(0), "GOL");
-        assert_eq!(nome_posicao(24), "ATA");
+        assert_eq!(nome_posicao(3), "LD", "lateral direito não é ZAD");
+        assert_eq!(nome_posicao(5), "ZAG");
+        assert_eq!(nome_posicao(7), "LE");
+        assert_eq!(nome_posicao(10), "VOL");
+        assert_eq!(nome_posicao(18), "MEI");
+        assert_eq!(nome_posicao(25), "ATA");
+        assert_eq!(nome_posicao(27), "PE");
         assert_eq!(nome_posicao(99), "?");
         assert_eq!(funcao_da_posicao(0), Funcao::Goleiro);
-        assert_eq!(funcao_da_posicao(4), Funcao::Defensor);
-        assert_eq!(funcao_da_posicao(13), Funcao::MeioCampo);
+        assert_eq!(funcao_da_posicao(8), Funcao::Defensor, "ala esquerdo");
+        assert_eq!(funcao_da_posicao(14), Funcao::MeioCampo);
         assert_eq!(funcao_da_posicao(25), Funcao::Atacante);
     }
 
@@ -771,6 +1054,13 @@ mod tests {
             clube_id: None,
             clube: String::new(),
             resto_do_mundo: false,
+            pe: Pe::Direito,
+            liga_id: None,
+            contrato_ate: 2030,
+            ritmo_ataque: RitmoTrabalho::Medio,
+            ritmo_defesa: RitmoTrabalho::Medio,
+            estrelas_drible: 3,
+            pe_fraco: 3,
         };
         assert_eq!(p.idade(Date(20350720)), 34);
         assert_eq!(p.idade(Date(20350721)), 35);
@@ -792,6 +1082,9 @@ mod tests {
         let mbappe = jogadores.iter().find(|j| j.player_id == 231747).expect("Mbappé no save");
         assert_eq!(mbappe.nome, "Kylian Mbappé");
         assert_eq!(mbappe.nascimento, Date(19981220));
+        assert_eq!(nome_posicao(mbappe.posicao), "ATA");
+        assert_eq!((mbappe.ritmo_ataque, mbappe.ritmo_defesa), (RitmoTrabalho::Alto, RitmoTrabalho::Baixo));
+        assert_eq!((mbappe.estrelas_drible, mbappe.pe_fraco), (5, 4));
         assert!((80..=99).contains(&mbappe.overall));
         // em 2035 ele tem 36 anos: a velocidade caiu, a finalização não
         assert!(mbappe.atributo(Atributo::Finalizacao) >= 75);
@@ -800,5 +1093,12 @@ mod tests {
         assert_eq!(franca.nome, "France");
         assert_eq!(franca.confederacao, Confederacao::Europa);
         assert!(jogadores.iter().all(|j| j.atributos.iter().all(|&v| (1..=99).contains(&v))));
+        // contratos: anos de verdade, e quase todo mundo de clube tem liga
+        assert!(jogadores.iter().filter(|j| j.clube_id.is_some()).all(|j| (2000..=2100).contains(&j.contrato_ate)));
+        let com_liga = jogadores.iter().filter(|j| j.liga_id.is_some()).count(); // inclui ligas fora do filtro
+        assert!(com_liga > jogadores.len() / 2, "{com_liga}");
+        // canhotos existem, mas são minoria
+        let canhotos = jogadores.iter().filter(|j| j.pe == Pe::Esquerdo).count();
+        assert!(canhotos > jogadores.len() / 10 && canhotos < jogadores.len() / 2, "{canhotos}");
     }
 }

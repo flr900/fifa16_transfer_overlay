@@ -1,11 +1,11 @@
-//! Cartograma de países (Story 2.9): um quadro por nação, agrupados por
-//! continente, desenhados com `ImDrawList`. Componente reaproveitável: o
-//! Painel de Seleção Geográfica usa no modo seleção e o Sonar (Épico 4)
-//! vai usar no modo visualização, com os estados de Missão.
+//! Cartograma de países (Story 2.9): um quadro por país, agrupados por
+//! continente, desenhados com `ImDrawList`. Nasceu para o filtro
+//! geográfico; desde 2026-10-03 o filtro usa ligas (`selecao_geografica`)
+//! e o cartograma ficou só no Sonar (Épico 4), com os estados de Missão.
 //!
 //! Cada quadro é UM item navegável (mouse e controle: o D-pad anda entre
-//! vizinhos, A ativa); o nome inteiro aparece no tooltip. Cor nunca é o
-//! único indicador: selecionado também ganha borda de 2 px e um "•".
+//! vizinhos, A ativa); o nome inteiro aparece no tooltip. O quadro
+//! marcado (o do resumo do Sonar) ganha um "•", além da cor.
 
 use imgui::Ui;
 
@@ -23,8 +23,6 @@ const ALTURA_QUADRO: f32 = 36.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EstadoQuadro {
     Livre,
-    /// Escolhido no filtro (roxo, contorno + preenchimento tênue).
-    Selecionado,
     /// Sonar: há Missão ativa no país (roxo).
     MissaoAtiva,
     /// Sonar: Missão concluída, Relatório disponível (verde).
@@ -36,7 +34,7 @@ pub enum EstadoQuadro {
 pub fn cores(estado: EstadoQuadro) -> ([f32; 4], [f32; 4], f32, [f32; 4]) {
     match estado {
         EstadoQuadro::Livre => (theme::BG_PANEL_RAISED, theme::BORDER_HAIRLINE_SUBTLE, 1.0, theme::TEXT_SECONDARY),
-        EstadoQuadro::Selecionado | EstadoQuadro::MissaoAtiva => {
+        EstadoQuadro::MissaoAtiva => {
             (theme::ACCENT_PRIMARY_DIM, theme::ACCENT_PRIMARY, ESPESSURA_FOCO, theme::TEXT_PRIMARY)
         }
         EstadoQuadro::MissaoConcluida => (theme::FIELD_GREEN_DIM, theme::FIELD_GREEN, ESPESSURA_FOCO, theme::TEXT_PRIMARY),
@@ -74,11 +72,20 @@ pub struct Resposta {
 }
 
 /// Desenha o cartograma.
-pub fn render(ui: &Ui, fonts: Option<&Fonts>, nacoes: &[Nacao], estado_de: &dyn Fn(u16) -> EstadoQuadro) -> Resposta {
+/// `com_outros`: acrescenta o quadro "Outros" (Missões antigas por
+/// nacionalidade). `marcado`: o quadro que ganha o "•".
+pub fn render(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    nacoes: &[Nacao],
+    com_outros: bool,
+    marcado: Option<u16>,
+    estado_de: &dyn Fn(u16) -> EstadoQuadro,
+) -> Resposta {
     let mut resposta = Resposta::default();
     for continente in Confederacao::TODAS {
         let lista = do_continente(nacoes, continente);
-        let com_outros = continente == Confederacao::Outras;
+        let com_outros = com_outros && continente == Confederacao::Outras;
         if lista.is_empty() && !com_outros {
             continue;
         }
@@ -94,7 +101,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, nacoes: &[Nacao], estado_de: &dyn 
             if indice % por_linha != 0 {
                 ui.same_line_with_spacing(0.0, theme::ESPACO_1);
             }
-            if quadro(ui, fonts, id, nome, estado_de(id)) {
+            if quadro(ui, fonts, id, nome, estado_de(id), marcado == Some(id)) {
                 resposta.ativado = Some(id);
             }
             if focado_pelo_controle(ui) {
@@ -105,7 +112,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, nacoes: &[Nacao], estado_de: &dyn 
     resposta
 }
 
-fn quadro(ui: &Ui, fonts: Option<&Fonts>, id: u16, nome: &str, estado: EstadoQuadro) -> bool {
+fn quadro(ui: &Ui, fonts: Option<&Fonts>, id: u16, nome: &str, estado: EstadoQuadro, marcado: bool) -> bool {
     let _id = ui.push_id_usize(usize::from(id));
     let min = ui.cursor_screen_pos();
     let max = [min[0] + LARGURA_QUADRO, min[1] + ALTURA_QUADRO];
@@ -122,7 +129,7 @@ fn quadro(ui: &Ui, fonts: Option<&Fonts>, id: u16, nome: &str, estado: EstadoQua
             .thickness(ESPESSURA_FOCO)
             .build();
     }
-    let marca = if estado == EstadoQuadro::Selecionado { "• " } else { "" };
+    let marca = if marcado { "• " } else { "" };
     let largura_texto = LARGURA_QUADRO - theme::ESPACO_2 * 2.0;
     let medir = |t: &str| com_fonte(ui, fonts.map(|f| f.meta), || ui.calc_text_size(t)[0]);
     let (visivel, cortou) = truncar(&format!("{marca}{nome}"), largura_texto, medir);

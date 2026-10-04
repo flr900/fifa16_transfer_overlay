@@ -125,6 +125,17 @@ pub fn badge_novo() -> EstiloBadge {
     EstiloBadge { texto: "NOVO", contorno: theme::FIELD_GREEN, fundo: theme::FIELD_GREEN_DIM, cor_texto: theme::FIELD_GREEN }
 }
 
+/// Fit Posicional ("FIT VOL 96%", Story 3.5) em roxo: o texto é montado
+/// na hora, com `desenhar_badge_texto`.
+pub fn badge_fit() -> EstiloBadge {
+    EstiloBadge {
+        texto: "FIT",
+        contorno: theme::ACCENT_PRIMARY,
+        fundo: theme::ACCENT_PRIMARY_DIM,
+        cor_texto: theme::ACCENT_PRIMARY,
+    }
+}
+
 /// Desenha o badge em `pos`, centralizado na altura `altura_linha`, pelo
 /// draw list (sem criar item). Devolve o tamanho ocupado.
 pub fn desenhar_badge(
@@ -135,15 +146,28 @@ pub fn desenhar_badge(
     pos: [f32; 2],
     altura_linha: f32,
 ) -> [f32; 2] {
+    desenhar_badge_texto(ui, fonts, dl, estilo, estilo.texto, pos, altura_linha)
+}
+
+/// Como `desenhar_badge`, com um texto montado na hora nas cores de `estilo`.
+pub fn desenhar_badge_texto(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    dl: &DrawListMut<'_>,
+    estilo: &EstiloBadge,
+    texto: &str,
+    pos: [f32; 2],
+    altura_linha: f32,
+) -> [f32; 2] {
     com_fonte(ui, fonts.map(|f| f.badge), || {
-        let [w, h] = ui.calc_text_size(estilo.texto);
+        let [w, h] = ui.calc_text_size(texto);
         let padding = [theme::ESPACO_2, 2.0];
         let tamanho = [w + padding[0] * 2.0, h + padding[1] * 2.0];
         let b_min = [pos[0], pos[1] + (altura_linha - tamanho[1]).max(0.0) * 0.5];
         let b_max = [b_min[0] + tamanho[0], b_min[1] + tamanho[1]];
         dl.add_rect(b_min, b_max, estilo.fundo).filled(true).rounding(theme::RAIO_SM).build();
         dl.add_rect(b_min, b_max, estilo.contorno).rounding(theme::RAIO_SM).build();
-        dl.add_text([b_min[0] + padding[0], b_min[1] + padding[1]], estilo.cor_texto, estilo.texto);
+        dl.add_text([b_min[0] + padding[0], b_min[1] + padding[1]], estilo.cor_texto, texto);
         tamanho
     })
 }
