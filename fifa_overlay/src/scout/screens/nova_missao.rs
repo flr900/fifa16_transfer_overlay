@@ -27,7 +27,7 @@ use crate::scout::quality::TipoMissao;
 use crate::scout::{ContextoSeletor, Satelite};
 use crate::scout::quality;
 use crate::scout::state::{
-    Atributo, BloqueioMissao, Carga, CampoFaixa, ErroCompra, FaixaAtributo, FiltroPe, ModoBusca, PreviaMissao, RitmoTrabalho,
+    Atalho, Atributo, BloqueioMissao, NivelEquipe, Carga, CampoFaixa, ErroCompra, FaixaAtributo, FiltroPe, ModoBusca, PreviaMissao, RitmoTrabalho,
     ScoutState,
 };
 
@@ -135,16 +135,22 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
 
     let mut campo = None;
     let altura_campos = (ui.content_region_avail()[1] - ALTURA_RODAPE).max(120.0);
+    let rolagem = state.rolagem();
     ui.child_window("##campos_nova_missao")
         .size([0.0, altura_campos])
         .border(false)
         .flags(super::flags_conteudo())
         .build(|| {
+            super::rolar_com_analogico(ui, rolagem);
             com_fonte(ui, fonts.map(|f| f.heading), || ui.text("Nova Missão"));
             ui.dummy([0.0, theme::ESPACO_2]);
             cabecalho_olheiro(ui, fonts, state, &previa);
             divisor(ui);
+            campo_atalhos(ui, fonts, state);
+            divisor(ui);
             let f = &previa.rascunho.filtros;
+            campo_nivel(ui, fonts, state, f.nivel_elenco);
+            divisor(ui);
             campo_faixa(ui, fonts, state, "Overall", f.overall, CampoFaixa::OverallMin, CampoFaixa::OverallMax, "");
             divisor(ui);
             campo_faixa(ui, fonts, state, "Potencial", f.potencial, CampoFaixa::PotencialMin, CampoFaixa::PotencialMax, "");
@@ -186,6 +192,8 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             if campo_painel(ui, fonts, "Jogador de Referência", referencia) {
                 campo = Some(Satelite::SeletorElenco(ContextoSeletor::FiltroMissao));
             }
+            divisor(ui);
+            campo_teto(ui, fonts, state, f.sem_teto, previa.teto);
             divisor(ui);
             campo_modo(ui, fonts, state, previa.rascunho.modo);
             divisor(ui);
@@ -398,6 +406,95 @@ fn campo_pe(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pe: Option<F
     }
 }
 
+/// Atalhos de filtro (2026-10-03): um clique monta uma busca comum
+/// (mantém a geografia e o teto). O tooltip diz o que cada um faz.
+fn campo_atalhos(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Atalhos");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    for (indice, atalho) in Atalho::TODOS.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        if componentes::botao(ui, fonts, atalho.nome(), EstiloBotao::Secundario, true) {
+            state.aplicar_atalho_da_missao(atalho);
+        }
+        if ui.is_item_hovered() || componentes::focado_pelo_controle(ui) {
+            ui.tooltip_text(atalho.descricao());
+        }
+    }
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        ui.text_colored(theme::TEXT_SECONDARY, "Um clique monta a busca; a geografia e o teto de gastos ficam como estão.")
+    });
+}
+
+/// Nível em relação ao elenco: Qualquer / Muda patamar / Titular / Banco /
+/// Promessa (escolha única: foco = escolha). Embaixo, a régua: os
+/// titulares do elenco por posição.
+fn campo_nivel(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, nivel: Option<NivelEquipe>) {
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Nível no elenco");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let opcoes: Vec<(Option<NivelEquipe>, &str)> =
+        std::iter::once((None, "Qualquer")).chain(NivelEquipe::TODOS.into_iter().map(|n| (Some(n), n.nome()))).collect();
+    for (indice, (opcao, nome)) in opcoes.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        let estilo = if opcao == nivel { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        let clicou = componentes::botao(ui, fonts, nome, estilo, true);
+        if (clicou || componentes::focado_pelo_controle(ui)) && opcao != nivel {
+            state.definir_nivel_da_missao(opcao);
+        }
+    }
+    let regua = match (nivel, state.nivel_do_elenco()) {
+        (None, _) => "Sem comparação com o seu elenco.".to_string(),
+        (Some(_), None) => "Lendo o seu elenco…".to_string(),
+        (Some(n), Some(elenco)) => texto_regua(n, &elenco),
+    };
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_wrapped(regua));
+}
+
+/// "Comparado ao seu titular na posição de cada jogador. Muda patamar:
+/// ATA 74+ · ZAG 78+ …".
+pub fn texto_regua(nivel: NivelEquipe, elenco: &quality::NivelElenco) -> String {
+    let mut por_perfil = elenco.por_perfil.clone();
+    por_perfil.sort_by_key(|(p, _)| *p as u8);
+    let partes: Vec<String> = por_perfil
+        .iter()
+        .map(|&(perfil, titular)| format!("{} {}", perfil.sigla(), nivel.regra(titular).to_lowercase()))
+        .collect();
+    format!("Comparado ao seu titular na posição de cada jogador. {}: {}", nivel.nome(), partes.join(" · "))
+}
+
+/// Teto de gastos (2026-10-03): por padrão a busca só traz quem cabe no
+/// orçamento; "Sem teto de gastos" libera qualquer valor.
+fn campo_teto(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, sem_teto: bool, teto: Option<i64>) {
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Teto de gastos");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let estilo = if sem_teto { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+    let rotulo_botao = if sem_teto { "[x] Sem teto de gastos" } else { "[ ] Sem teto de gastos" };
+    if componentes::botao(ui, fonts, rotulo_botao, estilo, true) {
+        state.definir_sem_teto_da_missao(!sem_teto);
+    }
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto_teto(teto)));
+}
+
+pub fn texto_teto(teto: Option<i64>) -> String {
+    match teto {
+        Some(v) if v > 0 => format!(
+            "Só jogadores com valor estimado até {} (o orçamento depois de pagar a Missão).",
+            super::relatorio::formatar_dinheiro(v)
+        ),
+        Some(_) => "O orçamento não cobre nenhum jogador depois de pagar a Missão.".to_string(),
+        None => "Sem limite: o Olheiro pode trazer jogadores de qualquer valor.".to_string(),
+    }
+}
+
 fn campo_modo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: ModoBusca) {
     let inicio = ui.cursor_pos();
     rotulo(ui, fonts, "Modo de Busca");
@@ -560,6 +657,7 @@ mod tests {
             orcamento_atual: 0,
             data_atual: Date(20280924),
             bloqueio: None,
+            teto: None,
         }
     }
 
@@ -574,6 +672,16 @@ mod tests {
             texto_tipo(&previa(TipoMissao::Medalhoes, false)),
             "Tipo de Missão: Medalhões. Um Caçador de Medalhões teria Qualidade maior."
         );
+    }
+
+    #[test]
+    fn the_level_row_explains_the_ruler_with_the_squad_starters() {
+        let elenco = quality::NivelElenco::de(&[(25, 71), (5, 75)]);
+        let texto = texto_regua(NivelEquipe::MudaPatamar, &elenco);
+        assert!(texto.contains("ZAG overall 78 ou mais"), "{texto}");
+        assert!(texto.contains("ATA overall 74 ou mais"), "{texto}");
+        assert!(texto_teto(Some(15_000_000)).contains("15,0 M"));
+        assert!(texto_teto(None).starts_with("Sem limite"));
     }
 
     #[test]

@@ -172,7 +172,9 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
                 }
             }
             Carga::Pronto(ligas) => {
+                let rolagem = state.rolagem();
                 ui.child_window("##niveis").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
+        super::rolar_com_analogico(ui, rolagem);
                     clique = match foco {
                         FocoGeografico::Continentes => nivel_continentes(ui, fonts, ligas, &filtros),
                         FocoGeografico::Continente(c) => nivel_continente(ui, fonts, ligas, &filtros, c),

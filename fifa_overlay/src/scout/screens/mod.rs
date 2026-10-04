@@ -79,6 +79,9 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         state.fechar_ficha();
         nav.pop();
     }
+    // LB/RB (ou clique numa aba) com a Nova Missão aberta: aviso por cima.
+    let trocando = state.troca_de_aba_pendente();
+    let modal = confirmando || trocando.is_some();
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -95,7 +98,7 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         )
         .build(|| {
             // Com o modal aberto o painel fica inerte e escurecido por baixo.
-            let desabilitado = ui.begin_disabled(confirmando);
+            let desabilitado = ui.begin_disabled(modal);
             cabecalho(ui, fonts, state.status());
             ui.dummy([0.0, theme::ESPACO_2]);
             barra_de_abas(ui, fonts, nav, state);
@@ -103,11 +106,11 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             // Foco no primeiro item da tela nova (só com conteúdo de verdade
             // na tela; com "Localizando…" o pedido espera).
             let com_conteudo = matches!(state.status(), CarreiraStatus::Pronta(_) | CarreiraStatus::ErroLeitura);
-            let focar = !confirmando && com_conteudo && nav.tomar_foco_pendente();
+            let focar = !modal && com_conteudo && nav.tomar_foco_pendente();
             let tela = if confirmando { nav.tela_abaixo() } else { nav.tela_atual() };
             pedido = conteudo(ui, fonts, nav.aba_ativa(), tela, state, focar);
             drop(desabilitado);
-            if confirmando {
+            if modal {
                 let canto = ui.window_pos();
                 let [w, h] = ui.window_size();
                 ui.get_window_draw_list()
@@ -197,6 +200,16 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         }
         _ => {}
     }
+    if let Some(aba) = trocando {
+        match aviso_troca_de_aba(ui, fonts, aba) {
+            Some(true) => crate::scout::trocar_aba_agora(nav, state, aba),
+            Some(false) => {
+                state.definir_troca_de_aba_pendente(None);
+                nav.pedir_foco();
+            }
+            None => {}
+        }
+    }
     if confirmando {
         match confirmacao_contratacao::render(ui, fonts, state) {
             confirmacao_contratacao::Acao::Nenhuma => {}
@@ -207,6 +220,49 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
                 nav.pop();
             }
         }
+    }
+}
+
+/// Aviso "Sair da Nova Missão?" (2026-10-03): `Some(true)` = descartar e
+/// trocar de aba; `Some(false)` = continuar editando (B faz o mesmo, em
+/// `Scout::aplicar_controle`).
+fn aviso_troca_de_aba(ui: &Ui, fonts: Option<&Fonts>, aba: Aba) -> Option<bool> {
+    let [largura_tela, altura_tela] = ui.io().display_size;
+    let _fundo = ui.push_style_color(StyleColor::WindowBg, theme::BG_PANEL_RAISED);
+    let _borda = ui.push_style_color(StyleColor::Border, theme::BORDER_HAIRLINE);
+    let _raio = ui.push_style_var(StyleVar::WindowRounding(theme::RAIO_LG));
+    let _padding = ui.push_style_var(StyleVar::WindowPadding([theme::ESPACO_5, theme::ESPACO_5]));
+    let mut escolha = None;
+    ui.window("Sair da Nova Missão##aviso_troca")
+        .position([largura_tela * 0.5, altura_tela * 0.5], Condition::Always)
+        .position_pivot([0.5, 0.5])
+        .focused(true)
+        .flags(WindowFlags::NO_DECORATION | WindowFlags::NO_MOVE | WindowFlags::NO_SAVED_SETTINGS | WindowFlags::ALWAYS_AUTO_RESIZE)
+        .build(|| {
+            ui.dummy([460.0, 0.0]);
+            com_fonte(ui, fonts.map(|f| f.heading), || ui.text("Sair da Nova Missão?"));
+            ui.dummy([0.0, theme::ESPACO_2]);
+            com_fonte(ui, fonts.map(|f| f.body), || ui.text_wrapped(MSG_SAIR_DA_MISSAO));
+            ui.dummy([0.0, theme::ESPACO_3]);
+            let rotulo = format!("Descartar e ir para {}", aba.rotulo());
+            if componentes::botao(ui, fonts, &rotulo, componentes::EstiloBotao::Primario, true) {
+                escolha = Some(true);
+            }
+            ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+            if componentes::botao(ui, fonts, "Continuar editando", componentes::EstiloBotao::Secundario, true) {
+                escolha = Some(false);
+            }
+        });
+    escolha
+}
+
+pub const MSG_SAIR_DA_MISSAO: &str = "Os filtros desta Missão ainda não foram confirmados e serão descartados. Nada foi cobrado.";
+
+/// Rola a janela atual pelo analógico direito (`pixels` deste frame, ver
+/// `gamepad::rolagem_do_analogico`). Chamar dentro de cada área com rolagem.
+pub(super) fn rolar_com_analogico(ui: &Ui, pixels: f32) {
+    if pixels != 0.0 && ui.scroll_max_y() > 0.0 {
+        ui.set_scroll_y((ui.scroll_y() + pixels).clamp(0.0, ui.scroll_max_y()));
     }
 }
 
@@ -313,9 +369,9 @@ fn botoes_das_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: 
             let rotulo = format!("{}##aba", aba.rotulo());
             let clicou = ui.button_with_size(rotulo, [LARGURA_ABA, theme::ALVO_MINIMO + theme::ESPACO_1]);
             contorno_hover(ui, theme::RAIO_MD);
-            if clicou && !ativa {
-                nav.trocar_aba(aba);
-                state.definir_aba_ativa(aba);
+            // de qualquer tela; com a Nova Missão aberta, pergunta antes
+            if clicou && (!ativa || nav.profundidade() > 1) {
+                crate::scout::pedir_troca_de_aba(nav, state, aba);
             }
         }
     });
@@ -357,7 +413,9 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
     let status = state.status().clone();
     let id = format!("##conteudo_{:?}", aba);
     let mut pedido = None;
+    let rolagem = state.rolagem();
     ui.child_window(id).size([0.0, 0.0]).border(false).flags(flags_conteudo()).build(|| {
+        rolar_com_analogico(ui, rolagem);
         if focar {
             // O próximo item navegável desta tela recebe o foco (botões não
             // são "clicados": só focados).

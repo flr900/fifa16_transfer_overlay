@@ -47,7 +47,9 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, focar: boo
     let mut escolha: Option<Option<PosicaoAlvo>> = None;
 
     let altura = (ui.content_region_avail()[1] - nova_missao::ALTURA_RESUMO).max(160.0);
+    let rolagem = state.rolagem();
     ui.child_window("##campo_fit").size([0.0, altura]).border(false).flags(super::flags_conteudo()).build(|| {
+        super::rolar_com_analogico(ui, rolagem);
         if componentes::botao(ui, fonts, "Voltar", EstiloBotao::Secundario, true) {
             voltar = true;
         }

@@ -329,40 +329,44 @@ pub fn tipo_por_filtros(filtros: &FiltrosMissao) -> TipoMissao {
     let pede_perfil =
         !filtros.atributos_dominantes.is_empty() || filtros.fit_posicional.is_some() || filtros.referencia.is_some();
     if pede_perfil {
-        TipoMissao::Tatica
-    } else if filtros.idade.max <= IDADE_JOVEM {
-        TipoMissao::Jovens
-    } else {
-        tipo_por_faixas(filtros.overall, filtros.potencial)
+        return TipoMissao::Tatica;
+    }
+    match filtros.nivel_elenco {
+        Some(NivelEquipe::Promessa) => TipoMissao::Jovens,
+        // prontos para jogar no nível do time ou acima: medalhões
+        Some(NivelEquipe::MudaPatamar | NivelEquipe::Titular) => TipoMissao::Medalhoes,
+        _ if filtros.idade.max <= IDADE_JOVEM => TipoMissao::Jovens,
+        _ => tipo_por_faixas(filtros.overall, filtros.potencial),
     }
 }
 
 /// Os filtros "perfeitos" de cada Especialização: o formulário Nova Missão
-/// abre com eles (2026-10-03, pedido do Felipe), e todos dão o tipo de
-/// Missão que combina com o Olheiro (bônus de Qualidade), conferido em
-/// teste. O jogador pode mudar tudo; "Restaurar sugestão" volta a eles.
-/// - Caçador de Jovens: até 21 anos, Potencial ≥ 78, Overall ≤ 72;
-/// - Caçador de Medalhões: Overall ≥ 75, 24 a 31 anos;
-/// - Tático: armadores — Visão e Passe curto entre os maiores atributos;
-/// - Generalista: faixas largas (Overall ≥ 55, 17 a 33 anos).
+/// abre com eles (2026-10-03, pedido do Felipe) e a régua é o padrão da
+/// equipe (`NivelEquipe`): por padrão, quem **muda o patamar** do time na
+/// posição. Os três especialistas dão o tipo de Missão que combina com
+/// eles (bônus de Qualidade), conferido em teste. O jogador pode mudar
+/// tudo; "Restaurar sugestão" volta a eles.
+/// - Caçador de Jovens: até 21 anos, promessa (Potencial passa o titular);
+/// - Caçador de Medalhões: muda patamar, 22 a 31 anos;
+/// - Tático: muda patamar, armadores (Visão e Passe curto entre os maiores);
+/// - Generalista: muda patamar, 17 a 33 anos.
 pub fn filtros_ideais(especializacao: Especializacao) -> FiltrosMissao {
     let faixa = |min, max| FaixaAtributo { min, max };
-    let base = FiltrosMissao::default();
+    let base = FiltrosMissao {
+        overall: faixa(40, 99),
+        potencial: faixa(40, 99),
+        nivel_elenco: Some(NivelEquipe::MudaPatamar),
+        ..FiltrosMissao::default()
+    };
     match especializacao {
         Especializacao::CacadorDeJovens => {
-            FiltrosMissao { overall: faixa(45, 72), potencial: faixa(78, 99), idade: faixa(IDADE_MENOR, IDADE_JOVEM), ..base }
+            FiltrosMissao { idade: faixa(IDADE_MENOR, IDADE_JOVEM), nivel_elenco: Some(NivelEquipe::Promessa), ..base }
         }
-        Especializacao::CacadorDeMedalhoes => {
-            FiltrosMissao { overall: faixa(OVERALL_MEDALHAO, 99), potencial: faixa(75, 99), idade: faixa(24, 31), ..base }
+        Especializacao::CacadorDeMedalhoes => FiltrosMissao { idade: faixa(22, 31), ..base },
+        Especializacao::Tatico => {
+            FiltrosMissao { idade: faixa(18, 30), atributos_dominantes: vec![Atributo::Visao, Atributo::PasseCurto], ..base }
         }
-        Especializacao::Tatico => FiltrosMissao {
-            overall: faixa(60, 99),
-            potencial: faixa(60, 99),
-            idade: faixa(18, 30),
-            atributos_dominantes: vec![Atributo::Visao, Atributo::PasseCurto],
-            ..base
-        },
-        Especializacao::Generalista => FiltrosMissao { overall: faixa(55, 99), potencial: faixa(55, 99), idade: faixa(17, 33), ..base },
+        Especializacao::Generalista => FiltrosMissao { idade: faixa(17, 33), ..base },
     }
 }
 
@@ -995,6 +999,185 @@ pub fn variacao_overall(alvo: PosicaoAlvo, posicao: u8, valor: impl Fn(Atributo)
 pub const LIMIAR_FIT: u8 = 95;
 
 // ---------------------------------------------------------------------
+// Nível em relação ao elenco e atalhos de filtro (2026-10-03)
+// ---------------------------------------------------------------------
+//
+// Pedido do Felipe: o Olheiro procura pelo padrão da equipe. A régua de
+// cada candidato é o **titular do elenco na posição dele** — o maior
+// Overall do elenco com o mesmo perfil de posição (`perfil_da_posicao`;
+// com Fit Posicional, o perfil-alvo). Sem ninguém do elenco nesse perfil,
+// vale a média dos 11 melhores do elenco.
+// - Muda patamar: Overall ≥ titular + `MARGEM_PATAMAR` (o time tem um
+//   atacante 67; um de 71 muda o patamar). É o padrão dos Olheiros.
+// - Nível titular: Overall entre titular − 2 e titular + 2.
+// - Nível banco: Overall entre titular − 8 e titular − 3.
+// - Promessa: Potencial ≥ titular + `MARGEM_PATAMAR` (vai passar o
+//   titular), qualquer Overall.
+
+/// Quanto acima do titular um jogador precisa estar para "mudar o patamar".
+pub const MARGEM_PATAMAR: u8 = 3;
+
+/// Nível pedido em relação ao elenco. No JSON: `"muda_patamar"` etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NivelEquipe {
+    MudaPatamar,
+    Titular,
+    Banco,
+    Promessa,
+}
+
+impl NivelEquipe {
+    pub const TODOS: [NivelEquipe; 4] = [NivelEquipe::MudaPatamar, NivelEquipe::Titular, NivelEquipe::Banco, NivelEquipe::Promessa];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            NivelEquipe::MudaPatamar => "Muda patamar",
+            NivelEquipe::Titular => "Nível titular",
+            NivelEquipe::Banco => "Nível banco",
+            NivelEquipe::Promessa => "Promessa",
+        }
+    }
+
+    /// Explicação com o titular da posição (`titular`).
+    pub fn regra(self, titular: u8) -> String {
+        let t = i16::from(titular);
+        let m = i16::from(MARGEM_PATAMAR);
+        match self {
+            NivelEquipe::MudaPatamar => format!("Overall {} ou mais", t + m),
+            NivelEquipe::Titular => format!("Overall de {} a {}", t - 2, t + 2),
+            NivelEquipe::Banco => format!("Overall de {} a {}", t - 8, t - 3),
+            NivelEquipe::Promessa => format!("Potencial {} ou mais", t + m),
+        }
+    }
+}
+
+/// O jogador está no nível pedido, comparado ao titular da posição?
+pub fn no_nivel(nivel: NivelEquipe, overall: u8, potencial: u8, titular: u8) -> bool {
+    let (ovr, pot, t, m) = (i16::from(overall), i16::from(potencial), i16::from(titular), i16::from(MARGEM_PATAMAR));
+    match nivel {
+        NivelEquipe::MudaPatamar => ovr >= t + m,
+        NivelEquipe::Titular => (t - 2..=t + 2).contains(&ovr),
+        NivelEquipe::Banco => (t - 8..=t - 3).contains(&ovr),
+        NivelEquipe::Promessa => pot >= t + m,
+    }
+}
+
+/// O titular de cada perfil de posição do elenco.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NivelElenco {
+    pub por_perfil: Vec<(Perfil, u8)>,
+    /// Média dos 11 melhores (perfil sem ninguém no elenco).
+    pub geral: u8,
+}
+
+impl NivelElenco {
+    /// `elenco`: (posição, Overall) de cada jogador do técnico.
+    pub fn de(elenco: &[(u8, u8)]) -> NivelElenco {
+        let mut por_perfil: Vec<(Perfil, u8)> = Vec::new();
+        for &(posicao, overall) in elenco {
+            let perfil = perfil_da_posicao(posicao);
+            match por_perfil.iter_mut().find(|(p, _)| *p == perfil) {
+                Some((_, melhor)) => *melhor = (*melhor).max(overall),
+                None => por_perfil.push((perfil, overall)),
+            }
+        }
+        let mut overalls: Vec<u8> = elenco.iter().map(|&(_, o)| o).collect();
+        overalls.sort_unstable_by(|a, b| b.cmp(a));
+        let onze: Vec<u32> = overalls.iter().take(11).map(|&o| u32::from(o)).collect();
+        let geral = if onze.is_empty() { 60 } else { u8::try_from(onze.iter().sum::<u32>() / onze.len() as u32).unwrap_or(60) };
+        NivelElenco { por_perfil, geral }
+    }
+
+    pub fn titular(&self, perfil: Perfil) -> u8 {
+        self.por_perfil.iter().find(|(p, _)| *p == perfil).map_or(self.geral, |&(_, o)| o)
+    }
+}
+
+impl Perfil {
+    /// Nome curto do perfil (resumo dos titulares no formulário).
+    pub fn sigla(self) -> &'static str {
+        match self {
+            Perfil::Goleiro => "GOL",
+            Perfil::Zagueiro => "ZAG",
+            Perfil::Lateral => "LAT",
+            Perfil::Ala => "ALA",
+            Perfil::Volante => "VOL",
+            Perfil::MeioCampista => "MC",
+            Perfil::MeiaAtacante => "MEI",
+            Perfil::MeiaAberto => "MAB",
+            Perfil::Ponta => "PON",
+            Perfil::SegundoAtacante => "SA",
+            Perfil::Centroavante => "ATA",
+        }
+    }
+}
+
+/// Atalhos de filtro: um clique monta uma busca comum. Mantêm a geografia
+/// e o teto de gastos; o resto volta ao padrão antes de aplicar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Atalho {
+    JovensPromessas,
+    MudaPatamar,
+    NivelTitular,
+    NivelBanco,
+    FimDeContrato,
+}
+
+impl Atalho {
+    pub const TODOS: [Atalho; 5] =
+        [Atalho::MudaPatamar, Atalho::JovensPromessas, Atalho::NivelTitular, Atalho::NivelBanco, Atalho::FimDeContrato];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Atalho::JovensPromessas => "Jovens promessas",
+            Atalho::MudaPatamar => "Muda patamar",
+            Atalho::NivelTitular => "Nível titular",
+            Atalho::NivelBanco => "Nível banco",
+            Atalho::FimDeContrato => "Fim de contrato",
+        }
+    }
+
+    pub fn descricao(self) -> &'static str {
+        match self {
+            Atalho::JovensPromessas => "Até 21 anos com potencial para passar o seu titular.",
+            Atalho::MudaPatamar => "Melhores que o seu titular na posição.",
+            Atalho::NivelTitular => "Do nível do seu titular: reposição ou disputa.",
+            Atalho::NivelBanco => "Para completar o elenco, abaixo do titular.",
+            Atalho::FimDeContrato => "Nível titular com contrato acabando: mais baratos.",
+        }
+    }
+
+    /// Os filtros do atalho sobre `atuais` (fica a geografia e o teto).
+    pub fn aplicar(self, atuais: &FiltrosMissao) -> FiltrosMissao {
+        let faixa = |min, max| FaixaAtributo { min, max };
+        let base = FiltrosMissao {
+            overall: faixa(40, 99),
+            potencial: faixa(40, 99),
+            continentes: atuais.continentes.clone(),
+            paises_dos_clubes: atuais.paises_dos_clubes.clone(),
+            ligas: atuais.ligas.clone(),
+            sem_teto: atuais.sem_teto,
+            ..FiltrosMissao::default()
+        };
+        match self {
+            Atalho::JovensPromessas => {
+                FiltrosMissao { idade: faixa(IDADE_MENOR, IDADE_JOVEM), nivel_elenco: Some(NivelEquipe::Promessa), ..base }
+            }
+            Atalho::MudaPatamar => FiltrosMissao { idade: faixa(18, 31), nivel_elenco: Some(NivelEquipe::MudaPatamar), ..base },
+            Atalho::NivelTitular => FiltrosMissao { idade: faixa(18, 33), nivel_elenco: Some(NivelEquipe::Titular), ..base },
+            Atalho::NivelBanco => FiltrosMissao { idade: faixa(17, 33), nivel_elenco: Some(NivelEquipe::Banco), ..base },
+            Atalho::FimDeContrato => FiltrosMissao {
+                idade: faixa(18, 34),
+                contrato: faixa(0, 0),
+                nivel_elenco: Some(NivelEquipe::Titular),
+                ..base
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Similaridade com o Jogador de Referência (Story 3.3)
 // ---------------------------------------------------------------------
 
@@ -1452,11 +1635,10 @@ mod tests {
             assert!(f.overall.valida() && f.potencial.valida() && f.idade.valida() && f.contrato.valida(), "{e:?}");
             assert!(f.idade.min >= IDADE_MENOR && f.idade.max <= IDADE_MAIOR, "{e:?}");
             let tipo = tipo_por_filtros(&f);
-            if e == Especializacao::Generalista {
-                assert_eq!(tipo, TipoMissao::Geral);
-            } else {
+            if e != Especializacao::Generalista {
                 assert!(combina(e, tipo), "{e:?} → {tipo:?}");
             }
+            assert!(f.nivel_elenco.is_some(), "a régua é o padrão da equipe");
         }
         assert!(filtros_ideais(Especializacao::Tatico).atributos_dominantes.len() <= MAX_DOMINANTES);
     }
@@ -1664,5 +1846,40 @@ mod tests {
         assert_eq!(observacao(0.40, 2, 10, false), Observacao::Completa);
         assert_eq!(observacao(0.21, 2, 10, true), Observacao::Completa, "concluída: tudo");
         assert_eq!(observacao(1.0, 9, 10, false), Observacao::Completa, "no prazo: tudo");
+    }
+
+    #[test]
+    fn team_level_compares_with_the_squad_starter_of_that_position() {
+        // elenco: centroavantes 67 e 71, zagueiro 75; ninguém de meia
+        let elenco = NivelElenco::de(&[(25, 67), (24, 71), (5, 75)]);
+        assert_eq!(elenco.titular(Perfil::Centroavante), 71);
+        assert_eq!(elenco.titular(Perfil::Zagueiro), 75);
+        assert_eq!(elenco.titular(Perfil::MeiaAtacante), elenco.geral, "sem ninguém: média do time");
+        assert!(no_nivel(NivelEquipe::MudaPatamar, 74, 74, 71));
+        assert!(!no_nivel(NivelEquipe::MudaPatamar, 73, 80, 71));
+        assert!(no_nivel(NivelEquipe::Titular, 69, 69, 71) && !no_nivel(NivelEquipe::Titular, 74, 74, 71));
+        assert!(no_nivel(NivelEquipe::Banco, 64, 64, 71) && !no_nivel(NivelEquipe::Banco, 69, 69, 71));
+        assert!(no_nivel(NivelEquipe::Promessa, 58, 75, 71) && !no_nivel(NivelEquipe::Promessa, 58, 73, 71));
+        assert_eq!(NivelEquipe::MudaPatamar.regra(71), "Overall 74 ou mais");
+    }
+
+    #[test]
+    fn shortcuts_keep_geography_and_spending_cap_and_set_the_team_level() {
+        let atuais = FiltrosMissao {
+            ligas: vec![13],
+            sem_teto: true,
+            atributos_dominantes: vec![Atributo::Drible],
+            ..FiltrosMissao::default()
+        };
+        for atalho in Atalho::TODOS {
+            let f = atalho.aplicar(&atuais);
+            assert_eq!((f.ligas.clone(), f.sem_teto), (vec![13], true), "{atalho:?}");
+            assert!(f.atributos_dominantes.is_empty(), "o resto volta ao padrão");
+            assert!(f.nivel_elenco.is_some());
+            assert!(!atalho.descricao().contains('!'));
+        }
+        assert_eq!(Atalho::FimDeContrato.aplicar(&atuais).contrato, FaixaAtributo { min: 0, max: 0 });
+        assert_eq!(tipo_por_filtros(&Atalho::JovensPromessas.aplicar(&atuais)), TipoMissao::Jovens);
+        assert_eq!(tipo_por_filtros(&Atalho::MudaPatamar.aplicar(&atuais)), TipoMissao::Medalhoes);
     }
 }

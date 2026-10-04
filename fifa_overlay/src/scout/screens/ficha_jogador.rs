@@ -23,6 +23,7 @@ const LADO_ROSTO: f32 = 112.0;
 const FRACAO_ESQUERDA: f32 = 0.46;
 const LARGURA_VALOR: f32 = 72.0;
 const ALTURA_LEGENDA: f32 = 84.0;
+const ALTURA_LINHA_ATRIBUTO: f32 = 32.0;
 
 pub const ROTULO_COMPARAR: &str = "Comparar com jogador do elenco";
 const NAO_OBSERVADO: &str = "não observado";
@@ -108,10 +109,17 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
 
     let [largura, altura] = ui.content_region_avail();
     let esquerda = (largura * FRACAO_ESQUERDA).max(320.0);
+    let rolagem = state.rolagem();
     ui.child_window("##ficha_bio").size([esquerda, altura]).border(false).flags(super::flags_conteudo()).build(|| {
         cabecalho(ui, fonts, state, &ficha);
         ui.dummy([0.0, theme::ESPACO_3]);
-        lista_de_atributos(ui, fonts, &ficha);
+        com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto_observados(&ficha)));
+        // A lista rola sozinha (mouse ou analógico direito), com o
+        // cabeçalho fixo em cima (2026-10-03, pedido do Felipe).
+        ui.child_window("##lista_atributos").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
+            super::rolar_com_analogico(ui, rolagem);
+            lista_de_atributos(ui, fonts, &ficha);
+        });
     });
     ui.same_line_with_spacing(0.0, theme::ESPACO_4);
     ui.child_window("##ficha_radar").size([0.0, altura]).border(false).build(|| {
@@ -166,9 +174,20 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, ficha: &FichaAb
     let [w_ovr, h_ovr] = texto_em(ui, mono, &dl, [x, y], theme::TEXT_PRIMARY, &format!("OVR {}", formatar_faixa(j.overall)));
     texto_em(ui, mono, &dl, [x + w_ovr + theme::ESPACO_3, y], theme::FIELD_GREEN, &format!("POT {}", formatar_faixa(j.potencial)));
     y += h_ovr;
-    if let Some(nome) = &perfil.referencia {
+    if let (Some(nome), true) = (&perfil.referencia, j.atributos_observados()) {
         let texto = format!("Similaridade com {nome}: {}", texto_percentual(j.similaridade, perfil.aproximado));
         y += texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::ACCENT_PRIMARY, &texto)[1];
+    }
+    // Mercado, contrato e o titular do elenco na posição.
+    y += theme::ESPACO_1;
+    y += texto_em(ui, fonts.map(|f| f.body), &dl, [x, y], theme::TEXT_PRIMARY, &super::relatorio::texto_mercado(j))[1];
+    let hoje = state.data_da_carreira();
+    let contrato = format!("Contrato: {}", super::relatorio::formatar_contrato(j.contrato_ate, hoje));
+    let cor = if super::relatorio::contrato_a_vencer(j.contrato_ate, hoje) { theme::WARNING } else { theme::TEXT_SECONDARY };
+    y += texto_em(ui, fonts.map(|f| f.body), &dl, [x, y], cor, &contrato)[1];
+    if let Some(titular) = super::relatorio::texto_titular(j) {
+        let texto = format!("Comparado ao {titular}");
+        y += texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::TEXT_SECONDARY, &texto)[1];
     }
     drop(dl);
     let altura = (y - min[1]).max(LADO_ROSTO);
@@ -183,7 +202,10 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, ficha: &FichaAb
 /// a mais com o valor do jogador do elenco (inclusive onde o Olheiro não
 /// observou).
 fn lista_de_atributos(ui: &Ui, fonts: Option<&Fonts>, ficha: &FichaAberta) {
-    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto_observados(ficha)));
+    if !ficha.jogador.atributos_observados() {
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_DISABLED, super::relatorio::MSG_EM_OBSERVACAO));
+        return;
+    }
     let comparando = ficha.comparacao.as_ref();
     let colunas = if comparando.is_some() { 3 } else { 2 };
     let flags = TableFlags::ROW_BG | TableFlags::BORDERS_INNER_H | TableFlags::SIZING_FIXED_FIT | TableFlags::NO_SAVED_SETTINGS;
@@ -209,27 +231,29 @@ fn lista_de_atributos(ui: &Ui, fonts: Option<&Fonts>, ficha: &FichaAberta) {
         let _cor = ui.push_style_color(StyleColor::Text, theme::TEXT_SECONDARY);
         ui.table_headers_row();
     });
-    let mono = fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body));
     let linhas: Vec<Atributo> = if comparando.is_some() {
         radar::eixos(&ficha.jogador, None).into_iter().map(|e| e.atributo).collect()
     } else {
         Atributo::TODOS.into_iter().filter(|a| ficha.jogador.atributo(*a).is_some()).collect()
     };
+    // Letras maiores que no resto da Ficha (2026-10-03, pedido do Felipe:
+    // a lista era difícil de ler): nome em Inter, valor em Oswald.
+    let grande = fonts.map(|f| f.heading);
     for a in linhas {
-        ui.table_next_row();
+        ui.table_next_row_with_height(imgui::TableRowFlags::empty(), ALTURA_LINHA_ATRIBUTO);
         ui.table_set_column_index(0);
         let valor = ficha.jogador.atributo(a);
         let cor_nome = if valor.is_some() { theme::TEXT_PRIMARY } else { theme::TEXT_DISABLED };
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(cor_nome, a.nome()));
         ui.table_set_column_index(1);
         match valor {
-            Some(f) => com_fonte(ui, mono, || ui.text_colored(theme::ACCENT_PRIMARY, formatar_faixa(f))),
-            None => com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_DISABLED, "—")),
+            Some(f) => com_fonte(ui, grande, || ui.text_colored(theme::ACCENT_PRIMARY, formatar_faixa(f))),
+            None => com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_DISABLED, "—")),
         }
         if let Some(c) = comparando {
             ui.table_set_column_index(2);
             let texto = c.atributo(a).map_or("—".to_string(), |v| v.to_string());
-            com_fonte(ui, mono, || ui.text_colored(theme::FIELD_GREEN, texto));
+            com_fonte(ui, grande, || ui.text_colored(theme::FIELD_GREEN, texto));
         }
     }
 }
@@ -295,6 +319,7 @@ mod tests {
             ritmo_defesa: None,
             estrelas_drible: None,
             pe_fraco: None,
+            titular_elenco: None,
         };
         assert_eq!(linha_bio(&j), "22 anos · MEI · Pé esquerdo");
         j.pe = None;

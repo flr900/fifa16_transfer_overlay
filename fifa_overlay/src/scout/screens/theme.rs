@@ -180,18 +180,21 @@ pub fn carregar_fontes(ctx: &mut Context) -> FontSlots {
         atlas.add_font(&[source]);
         atlas.fonts().len().saturating_sub(1)
     };
-    let body = adicionar(fonte(INTER, 17.0));
-    let meta = adicionar(fonte(INTER, 14.0));
-    let heading = adicionar(fonte(OSWALD_MEDIUM, 21.0));
-    let display = adicionar(fonte(OSWALD_SEMIBOLD, 30.0));
-    let badge = adicionar(fonte(OSWALD_SEMIBOLD, 13.0));
+    // Tamanhos aumentados em 2026-10-01 na branch `claude/relatorio-ficha`
+    // (pedido do Felipe: legibilidade a 2560×1080, sentado longe da tela):
+    // ~+12%; trazidos para cá em 2026-10-03.
+    let body = adicionar(fonte(INTER, 19.0));
+    let meta = adicionar(fonte(INTER, 16.0));
+    let heading = adicionar(fonte(OSWALD_MEDIUM, 23.0));
+    let display = adicionar(fonte(OSWALD_SEMIBOLD, 34.0));
+    let badge = adicionar(fonte(OSWALD_SEMIBOLD, 14.0));
 
     // O ImGui guarda o ponteiro dos dados da fonte enquanto o atlas
     // existir; o vazamento (uma vez, ~400 KB) dá a eles vida `'static`.
     let mono = match std::fs::read(CONSOLAS) {
         Ok(bytes) => {
             let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-            Some(adicionar(fonte(bytes, 16.0)))
+            Some(adicionar(fonte(bytes, 18.0)))
         }
         Err(err) => {
             tracing::warn!("[scout::theme] Consolas indisponível ({err}); colunas numéricas usam Inter.");

@@ -163,9 +163,45 @@ pub fn relatorio_vazio(missao: &Missao, hoje: Date) -> Relatorio {
     }
 }
 
+/// Titulares do elenco do técnico (régua do `NivelEquipe`).
+pub fn nivel_do_elenco(pool: &PlayerPool) -> quality::NivelElenco {
+    let elenco: Vec<(u8, u8)> = pool
+        .jogadores
+        .iter()
+        .filter(|j| j.clube_id.map(i64::from) == Some(pool.clube_usuario))
+        .map(|j| (j.posicao, j.overall))
+        .collect();
+    quality::NivelElenco::de(&elenco)
+}
+
+/// Perfil de posição com que o jogador é comparado ao elenco: o alvo do
+/// Fit Posicional, se houver; senão o da posição dele.
+fn perfil_comparado(missao: &Missao, jogador: &PlayerRaw) -> quality::Perfil {
+    missao.filtros.fit_posicional.map_or_else(|| quality::perfil_da_posicao(jogador.posicao), |alvo| alvo.perfil())
+}
+
+/// Valor estimado do jogador pelos números reais (teto de gastos).
+pub fn valor_real(jogador: &PlayerRaw, hoje: Date) -> i64 {
+    let goleiro = save_repo::funcao_da_posicao(jogador.posicao) == save_repo::Funcao::Goleiro;
+    quality::valor_estimado(jogador.overall, jogador.potencial, jogador.idade(hoje), goleiro)
+}
+
 /// O jogador passa nos filtros da Missão (todos combinados com E)? `hoje`
-/// é a data da carreira (idade e anos de contrato).
+/// é a data da carreira (idade e anos de contrato). Calcula a régua do
+/// elenco a cada chamada: na busca, use `passa_nos_filtros_com`.
+#[cfg(test)]
 pub fn passa_nos_filtros(missao: &Missao, pool: &PlayerPool, jogador: &PlayerRaw, hoje: Date) -> bool {
+    passa_nos_filtros_com(missao, pool, jogador, hoje, &nivel_do_elenco(pool))
+}
+
+/// `passa_nos_filtros` com a régua do elenco já calculada.
+pub fn passa_nos_filtros_com(
+    missao: &Missao,
+    pool: &PlayerPool,
+    jogador: &PlayerRaw,
+    hoje: Date,
+    elenco: &quality::NivelElenco,
+) -> bool {
     let filtros = &missao.filtros;
     let no_mercado = !jogador.resto_do_mundo
         && jogador.clube_id.is_some()
@@ -181,6 +217,10 @@ pub fn passa_nos_filtros(missao: &Missao, pool: &PlayerPool, jogador: &PlayerRaw
         && (filtros.ritmo_defesa.is_empty() || filtros.ritmo_defesa.contains(&jogador.ritmo_defesa))
         && (filtros.estrelas_drible.min..=filtros.estrelas_drible.max).contains(&jogador.estrelas_drible)
         && filtros.pe.is_none_or(|pe| do_pe(jogador, pe))
+        && filtros.teto_valor.is_none_or(|teto| valor_real(jogador, hoje) <= teto)
+        && filtros.nivel_elenco.is_none_or(|nivel| {
+            quality::no_nivel(nivel, jogador.overall, jogador.potencial, elenco.titular(perfil_comparado(missao, jogador)))
+        })
         && do_pais(&filtros.paises, pool, jogador)
         && da_geografia(filtros, pool, jogador)
         && filtros.fit_posicional.is_none_or(|alvo| serve_no_alvo(jogador, alvo))
@@ -292,10 +332,11 @@ pub fn escolher_jogadores(
 ) -> Vec<JogadorEncontrado> {
     let id = missao.id.as_u128();
     let qualidade = missao.estimativa.qualidade;
+    let elenco = nivel_do_elenco(pool);
     let mut candidatos: Vec<(u32, &PlayerRaw)> = pool
         .jogadores
         .iter()
-        .filter(|j| !excluir.contains(&j.player_id) && passa_nos_filtros(missao, pool, j, hoje))
+        .filter(|j| !excluir.contains(&j.player_id) && passa_nos_filtros_com(missao, pool, j, hoje, &elenco))
         .map(|j| {
             let relevancia = quality::relevancia(missao.tipo, j.overall, j.potencial, &notas_de_perfil(missao, j));
             (quality::nota_de_escolha(relevancia, qualidade, quality::semente(id, j.player_id, 0)), j)
@@ -303,7 +344,15 @@ pub fn escolher_jogadores(
         .collect();
     // maior nota primeiro; empate pelo id (ordem estável e determinística)
     candidatos.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.player_id.cmp(&b.1.player_id)));
-    candidatos.into_iter().take(quantos).map(|(_, j)| revelar(missao, pool, hoje, j)).collect()
+    candidatos
+        .into_iter()
+        .take(quantos)
+        .map(|(_, j)| {
+            let mut encontrado = revelar(missao, pool, hoje, j);
+            encontrado.titular_elenco = Some(elenco.titular(perfil_comparado(missao, j)));
+            encontrado
+        })
+        .collect()
 }
 
 /// O que o Relatório mostra de um jogador: faixas de Overall/Potencial e
@@ -347,6 +396,7 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         ritmo_defesa: Some(jogador.ritmo_defesa),
         estrelas_drible: Some(jogador.estrelas_drible),
         pe_fraco: Some(jogador.pe_fraco),
+        titular_elenco: None,
     };
     // Similaridade e fit "pelo que o Olheiro viu" (nunca o valor real).
     let visto = |a: Atributo| encontrado.valor_visto(a);
@@ -367,7 +417,7 @@ pub mod tests {
     use super::*;
     use crate::save_repo::jogadores::TOTAL_ATRIBUTOS;
     use crate::save_repo::{Confederacao, Nacao};
-    use crate::scout::state::{FaixaAtributo, StatusMissao};
+    use crate::scout::state::{FaixaAtributo, NivelEquipe, StatusMissao};
 
     /// Jogador sintético com todos os atributos em `nivel`.
     pub fn jogador(player_id: u32, overall: u8, potencial: u8, posicao: u8) -> PlayerRaw {
@@ -772,5 +822,42 @@ pub mod tests {
         m.filtros.fit_posicional = Some(PosicaoAlvo::LateralDireito);
         let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j, HOJE)).map(|j| j.player_id).collect();
         assert_eq!(ids, vec![4], "LE, ALE e zagueiro ficam de fora; o volante pode virar lateral");
+    }
+
+    #[test]
+    fn the_spending_cap_and_the_team_level_filter_by_default() {
+        // elenco do técnico (clube 241): centroavante 71
+        let mut meu = jogador(1, 71, 71, 25);
+        meu.clube_id = Some(241);
+        meu.nascimento = Date(19980101);
+        let craque = {
+            let mut j = jogador(2, 90, 92, 25);
+            j.nascimento = Date(20000101);
+            j
+        };
+        let reforco = {
+            let mut j = jogador(3, 74, 76, 25);
+            j.nascimento = Date(20000101);
+            j
+        };
+        let reserva = {
+            let mut j = jogador(4, 66, 68, 25);
+            j.nascimento = Date(20000101);
+            j
+        };
+        let p = pool(vec![meu, craque, reforco, reserva]);
+        let mut m = missao_com((40, 99), (40, 99));
+        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j, HOJE)).map(|j| j.player_id).collect() };
+        m.filtros.nivel_elenco = Some(NivelEquipe::MudaPatamar);
+        assert_eq!(ids(&m), vec![2, 3], "74+ muda o patamar de um time com titular 71");
+        // orçamento de 15 M: o craque (≈ 100 M) fica de fora
+        m.filtros.teto_valor = Some(15_000_000);
+        assert_eq!(ids(&m), vec![3]);
+        m.filtros.nivel_elenco = Some(NivelEquipe::Banco);
+        assert_eq!(ids(&m), vec![4]);
+        // e o Relatório guarda o titular usado na comparação
+        m.estimativa.qualidade = crate::scout::state::Qualidade::Alta;
+        let lista = escolher_jogadores(&m, &p, HOJE, &HashSet::new(), 5);
+        assert_eq!(lista.first().and_then(|j| j.titular_elenco), Some(71));
     }
 }

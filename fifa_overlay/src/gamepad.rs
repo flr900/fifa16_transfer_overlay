@@ -74,6 +74,9 @@ pub struct EstadoControle {
     pub ly: i16,
     pub lt: u8,
     pub rt: u8,
+    /// Analógico direito: rola a tela do Scout (2026-10-03).
+    pub rx: i16,
+    pub ry: i16,
 }
 
 impl EstadoControle {
@@ -84,6 +87,8 @@ impl EstadoControle {
             ly: gamepad.sThumbLY,
             lt: gamepad.bLeftTrigger,
             rt: gamepad.bRightTrigger,
+            rx: gamepad.sThumbRX,
+            ry: gamepad.sThumbRY,
         }
     }
 
@@ -345,6 +350,27 @@ pub fn eventos_imgui(estado: Option<EstadoControle>) -> Vec<(Key, bool, f32)> {
     eventos
 }
 
+/// Zona morta do analógico direito (valor do SDK).
+const ZONA_MORTA_DIREITO: i32 = 8689;
+/// Pixels por frame com o analógico direito no fim do curso.
+const ROLAGEM_MAXIMA: f32 = 26.0;
+
+/// Pixels a rolar neste frame pelo analógico direito (positivo = para
+/// baixo): curva quadrática depois da zona morta, para o começo do curso
+/// rolar devagar e dar para ler.
+pub fn rolagem_do_analogico(ry: i16) -> f32 {
+    let v = normalizar_eixo(ry, ZONA_MORTA_DIREITO);
+    if v <= 0.0 {
+        return 0.0;
+    }
+    let pixels = v * v * ROLAGEM_MAXIMA;
+    if ry > 0 {
+        -pixels
+    } else {
+        pixels
+    }
+}
+
 /// Quanto o analógico precisa inclinar (0..1, depois da zona morta) para
 /// valer como uma direção do D-pad na navegação.
 const LIMIAR_ANALOGICO_NAV: f32 = 0.5;
@@ -396,7 +422,7 @@ mod tests {
 
     #[test]
     fn buttons_and_stick_become_imgui_gamepad_keys() {
-        let estado = EstadoControle { botoes: botao::A | botao::DPAD_BAIXO | botao::RB, lx: -32767, ly: 32767, lt: 0, rt: 255 };
+        let estado = EstadoControle { botoes: botao::A | botao::DPAD_BAIXO | botao::RB, lx: -32767, ly: 32767, lt: 0, rt: 255, rx: 0, ry: 0 };
         let eventos = eventos_imgui(Some(estado));
         assert_eq!(evento(&eventos, Key::GamepadFaceDown), (true, 1.0));
         assert_eq!(evento(&eventos, Key::GamepadDpadDown), (true, 1.0));

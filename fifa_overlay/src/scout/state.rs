@@ -43,7 +43,7 @@ use uuid::Uuid;
 use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, RitmoTrabalho};
-pub use super::quality::PosicaoAlvo;
+pub use super::quality::{Atalho, NivelEquipe, PosicaoAlvo};
 
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::Densidade;
@@ -326,6 +326,18 @@ pub struct FiltrosMissao {
     /// Pé preferido; `None` = qualquer.
     #[serde(default)]
     pub pe: Option<FiltroPe>,
+    /// Nível pedido em relação ao titular do elenco na posição (padrão:
+    /// "muda patamar"; ver `quality::NivelEquipe`).
+    #[serde(default)]
+    pub nivel_elenco: Option<NivelEquipe>,
+    /// "Sem teto de gastos": a busca ignora o orçamento.
+    #[serde(default)]
+    pub sem_teto: bool,
+    /// Teto do valor estimado dos jogadores, fixado na confirmação (o
+    /// orçamento depois de pagar a Missão). `None` = sem teto (ou Missão de
+    /// antes de 2026-10-03).
+    #[serde(default)]
+    pub teto_valor: Option<i64>,
     /// Posição-alvo: só entram jogadores de OUTRA posição nativa cujo perfil
     /// serve nela (Story 3.4).
     #[serde(default)]
@@ -375,6 +387,9 @@ impl Default for FiltrosMissao {
             ritmo_defesa: Vec::new(),
             estrelas_drible: estrelas_padrao(),
             pe: None,
+            nivel_elenco: None,
+            sem_teto: false,
+            teto_valor: None,
             fit_posicional: None,
             referencia: None,
         }
@@ -503,6 +518,9 @@ pub struct PreviaMissao {
     pub orcamento_atual: i32,
     pub data_atual: Date,
     pub bloqueio: Option<BloqueioMissao>,
+    /// Teto de gastos que a Missão vai usar (orçamento depois de pagá-la);
+    /// `None` com "Sem teto de gastos".
+    pub teto: Option<i64>,
 }
 
 impl PreviaMissao {
@@ -745,6 +763,10 @@ pub struct JogadorEncontrado {
     pub estrelas_drible: Option<u8>,
     #[serde(default)]
     pub pe_fraco: Option<u8>,
+    /// Overall do titular do elenco na posição com que ele foi comparado
+    /// (2026-10-03).
+    #[serde(default)]
+    pub titular_elenco: Option<u8>,
 }
 
 impl JogadorEncontrado {
@@ -982,6 +1004,12 @@ pub struct ScoutState {
     tarefa_ligas: AsyncTask<(String, Arc<Vec<Liga>>)>,
     /// Nível aberto da árvore do filtro geográfico.
     foco_geografico: FocoGeografico,
+    /// LB/RB (ou clique na aba) com a Nova Missão aberta: a aba para onde
+    /// ir, esperando o jogador confirmar que descarta o rascunho.
+    troca_de_aba_pendente: Option<Aba>,
+    /// Pixels a rolar neste frame pelo analógico direito (positivo = para
+    /// baixo).
+    rolagem: f32,
 }
 
 /// Nível aberto no filtro geográfico: a lista de continentes (o filtro
@@ -1036,6 +1064,8 @@ impl ScoutState {
             comparacao: None,
             tarefa_ligas: AsyncTask::new(),
             foco_geografico: FocoGeografico::Continentes,
+            troca_de_aba_pendente: None,
+            rolagem: 0.0,
         }
     }
 
@@ -1087,6 +1117,7 @@ impl ScoutState {
         self.cancelar_nova_missao();
         self.fechar_relatorio();
         self.vendo_arquivados = false;
+        self.troca_de_aba_pendente = None;
     }
 
     // -----------------------------------------------------------------
@@ -1700,12 +1731,66 @@ impl ScoutState {
         }
     }
 
+    /// Nível em relação ao elenco (`None` = qualquer).
+    pub fn definir_nivel_da_missao(&mut self, nivel: Option<NivelEquipe>) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.nivel_elenco = nivel;
+            r.erro = None;
+        }
+    }
+
+    /// "Sem teto de gastos".
+    pub fn definir_sem_teto_da_missao(&mut self, sem_teto: bool) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.sem_teto = sem_teto;
+            r.erro = None;
+        }
+    }
+
+    /// Atalho de filtro (mantém a geografia e o teto).
+    pub fn aplicar_atalho_da_missao(&mut self, atalho: Atalho) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros = atalho.aplicar(&r.filtros);
+            r.erro = None;
+        }
+    }
+
+    /// Titulares do elenco por perfil de posição (resumo do formulário);
+    /// `None` enquanto o elenco carrega.
+    pub fn nivel_do_elenco(&self) -> Option<quality::NivelElenco> {
+        match self.listar_elenco_atual() {
+            Carga::Pronto(elenco) => {
+                let pares: Vec<(u8, u8)> = elenco.iter().map(|j| (j.posicao, j.overall)).collect();
+                Some(quality::NivelElenco::de(&pares))
+            }
+            _ => None,
+        }
+    }
+
     /// Pé preferido do filtro (`None` = qualquer).
     pub fn definir_pe_da_missao(&mut self, pe: Option<FiltroPe>) {
         if let Some(r) = self.rascunho_missao.as_mut() {
             r.filtros.pe = pe;
             r.erro = None;
         }
+    }
+
+    /// Aba esperando confirmação para descartar a Nova Missão.
+    pub fn troca_de_aba_pendente(&self) -> Option<Aba> {
+        self.troca_de_aba_pendente
+    }
+
+    pub fn definir_troca_de_aba_pendente(&mut self, aba: Option<Aba>) {
+        self.troca_de_aba_pendente = aba;
+    }
+
+    /// Rolagem do analógico direito neste frame (ver `Scout::frame`).
+    pub fn rolagem(&self) -> f32 {
+        self.rolagem
+    }
+
+    pub fn definir_rolagem(&mut self, pixels: f32) {
+        self.rolagem = pixels;
     }
 
     /// Onde a árvore do filtro geográfico está aberta.
@@ -1839,7 +1924,10 @@ impl ScoutState {
                 .filter(|e| orcamento_atual < e.custo)
                 .map(|e| BloqueioMissao::OrcamentoInsuficiente { faltam: e.custo.saturating_sub(orcamento_atual) })
         };
+        let custo = estimativa.map_or(0, |e| e.custo);
+        let teto = (!rascunho.filtros.sem_teto).then(|| i64::from(orcamento_atual) - i64::from(custo));
         Some(PreviaMissao {
+            teto,
             combina: escolhido.as_ref().is_some_and(|o| quality::combina(o.especializacao, tipo)),
             rascunho,
             olheiros,
@@ -1872,7 +1960,7 @@ impl ScoutState {
             status: StatusMissao::Pendente,
             criada_em: previa.data_atual,
             prazo_estimado: prazo,
-            filtros: previa.rascunho.filtros.clone(),
+            filtros: FiltrosMissao { teto_valor: previa.teto, ..previa.rascunho.filtros.clone() },
             modo_busca: previa.rascunho.modo,
             tipo: previa.tipo,
             amplitude: previa.amplitude,
@@ -2299,22 +2387,9 @@ impl ScoutState {
         &self.minifaces
     }
 
-    /// Visão dos Relatórios salva para a carreira (Tabular por padrão).
-    pub fn densidade(&self) -> Densidade {
-        self.estado_ativo().map_or(Densidade::Tabular, |e| e.ler(|d| d.ui_prefs.densidade))
-    }
-
-    /// O jogador trocou Tabular/Cards: persiste em `ui_prefs` (AD-7).
-    pub fn definir_densidade(&mut self, densidade: Densidade) {
-        let Some(estado) = self.estado_ativo() else {
-            return;
-        };
-        if estado.ler(|d| d.ui_prefs.densidade) == densidade {
-            return;
-        }
-        if let Err(err) = estado.mutar(|d| d.ui_prefs.densidade = densidade) {
-            tracing::warn!("[scout::state] Visão dos Relatórios não foi salva: {err:?}");
-        }
+    /// Data da carreira usada nas telas (a da abertura do painel).
+    pub fn data_da_carreira(&self) -> Option<Date> {
+        self.data_progresso
     }
 
     pub fn vendo_arquivados(&self) -> bool {
@@ -3283,7 +3358,7 @@ mod tests {
 
         // tirar a cara de "jovens" perde o bônus; "Restaurar sugestão" volta
         st.ajustar_faixa_da_missao(CampoFaixa::IdadeMax, 10);
-        st.ajustar_faixa_da_missao(CampoFaixa::PotencialMin, -30);
+        st.definir_nivel_da_missao(None);
         let geral = st.previa_missao().expect("formulário aberto");
         assert_eq!(geral.tipo, quality::TipoMissao::Geral);
         assert!(!geral.combina);
@@ -3696,19 +3771,6 @@ mod tests {
         // id que não existe não abre nada
         st.abrir_relatorio(Uuid::new_v4());
         assert_eq!(st.relatorio_aberto(), None);
-    }
-
-    #[test]
-    fn report_density_is_saved_per_career() {
-        let pasta = PastaTemporaria::nova();
-        let o = olheiro(Especializacao::Generalista, Tier::Junior);
-        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &o);
-        st.ao_abrir_painel();
-        assert_eq!(st.densidade(), Densidade::Tabular);
-        st.definir_densidade(Densidade::Cards);
-        assert_eq!(st.densidade(), Densidade::Cards);
-        let relido = EstadoPersistido::carregar(Some(&pasta.0), ID_A).ler(|d| d.ui_prefs.densidade);
-        assert_eq!(relido, Densidade::Cards);
     }
 
     #[test]

@@ -218,6 +218,7 @@ mod tests {
             ritmo_defesa: None,
             estrelas_drible: None,
             pe_fraco: None,
+            titular_elenco: None,
         }
     }
 

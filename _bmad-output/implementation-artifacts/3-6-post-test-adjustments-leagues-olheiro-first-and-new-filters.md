@@ -61,6 +61,17 @@ Requests: work-rate filter (attack and defence: high/medium/low), dribble stars,
 - **Geographic screen in levels:** continents (quick filter: "Inteiro" + "Países e ligas ›"), then a continent's countries ("Inteiro" + "Ligas ›", plus country-less leagues), then a country's leagues. Fixed columns, everything vertically centred. B goes up one level.
 - **Glyphs:** `‹ ›` and `≈` were missing from the font atlas (rendered as "?").
 
+## Third round (Felipe, 2026-10-03, build `3.7-v1`)
+
+Requests: remove the Relatório Tabular view; bring back estimated transfer value, wage and contracts ("they disappeared"); predefined filters; searches should respect the budget by default (a scout for XV de Piracicaba must not bring Mbappé) unless a "no spending cap" checkbox is ticked; Olheiro defaults based on the team's level ("muda patamar": a 71 striker changes the level of a team whose striker is 67), kept as the default; Ficha attribute list bigger and scrollable with the right stick; LB/RB switch tabs from any screen, warning before dropping a Missão being configured.
+
+- **Ported from `claude/relatorio-ficha`** (a parallel Story 3.1 Felipe tested on 2026-10-01, never merged): estimated value and wage (`quality::valor_estimado` / `salario_estimado`; neither is in the save nor readable from memory for every player — the save only has the user's own squad contracts), contract year shown as time left ("1 ano 4 meses", highlighted at ≤ 6 months), observation in stages in partial Relatórios (market → wage → attributes), and the Scout rolling back to the save date when an older save is loaded (`Olheiro.contratado_em`, `Missao.renovacoes`, `TipoAviso::VoltouNoTempo`). The wage curve was recalibrated on the real contracts of Felipe's squad (70 ≈ 20 mil, 80 ≈ 120 mil, 87 ≈ 240 mil, 90 ≈ 300 mil per week). Its +12% font sizes came too. Its Ficha and Tabular view were not ported.
+- **Relatório:** Cards only (bigger card: face, age/position/nation + Fit badge, club, OVR/POT/SIM, value and wage, contract, comparison with the squad starter, key attributes or "em observação").
+- **Team level** (`quality::NivelEquipe`): Muda patamar (≥ starter + 3), Nível titular (starter ± 2), Nível banco (starter − 8 to − 3), Promessa (Potencial ≥ starter + 3). The starter is the best squad Overall in the candidate's position profile (the Fit target if any; squad average of the top 11 when nobody plays there). Default in every Olheiro's ideal filters (Caçador de Jovens: Promessa). The form shows the ruler with the user's starters.
+- **Spending cap:** default on; the cap is the budget after paying the Missão, fixed at confirmation (`FiltrosMissao.teto_valor`), compared with the estimated value from real numbers. "[ ] Sem teto de gastos" turns it off. Older Missões have no cap.
+- **Shortcuts** (`quality::Atalho`): Muda patamar, Jovens promessas, Nível titular, Nível banco, Fim de contrato (contract ends this season + starter level). They keep geography and the cap; the rest goes back to default.
+- **Controls:** right stick scrolls every list (`gamepad::rolagem_do_analogico`, `screens::rolar_com_analogico`); LB/RB and tab clicks work from any screen; with the Nova Missão open, a "Sair da Nova Missão?" dialog asks first (B = keep editing).
+
 ## Dev Agent Record
 
 ### Agent Model Used
@@ -71,3 +82,4 @@ claude-opus-5-5
 
 - 2026-10-03: post-test adjustments implemented (build `3.6-v1`).
 - 2026-10-03: second round (build `3.6-v2`).
+- 2026-10-03: third round (build `3.7-v1`), with the port from `claude/relatorio-ficha`.

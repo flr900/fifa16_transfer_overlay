@@ -9,10 +9,12 @@
 //!   dentro de `render()`, com detecção de borda. Segurar a tecla alterna o
 //!   painel UMA vez, só na transição solta→pressionada.
 //!
-//! Controle (Story 1.6, revisto em 2026-10-01): o mesmo vale para o combo
-//! `COMBO_PAINEL`. Com o painel aberto, só LB/RB trocam de aba (numa aba
-//! sem tela satélite); B volta uma tela (fecha o modal; na raiz, fecha o
-//! painel); D-pad/analógico (inclusive ←/→) e A são a navegação do
+//! Controle (Story 1.6, revisto em 2026-10-01 e 2026-10-03): o mesmo vale
+//! para o combo `COMBO_PAINEL`. Com o painel aberto, só LB/RB trocam de
+//! aba — de qualquer tela; com a Nova Missão aberta, o jogador confirma
+//! antes que o rascunho será descartado (`pedir_troca_de_aba`); o
+//! analógico direito rola a tela; B volta uma tela (fecha o modal; na
+//! raiz, fecha o painel); D-pad/analógico (inclusive ←/→) e A são a navegação do
 //! próprio ImGui (`gamepad::para_navegacao`). A barra de abas não recebe
 //! foco do controle; ao abrir o painel, trocar de aba ou de tela, o foco
 //! vai para o primeiro item da tela (`Navigation::tomar_foco_pendente`). Enquanto o painel está aberto, e depois de fechar até
@@ -292,6 +294,9 @@ impl Scout {
     pub fn frame(&mut self, ui: &Ui, fonts: Option<&Fonts>, controle: Option<EstadoControle>) {
         let alternou = self.atualizar_atalho(tecla_pressionada(ATALHO_PAINEL));
         self.aplicar_controle(controle.unwrap_or_default(), alternou);
+        let ry = controle.map_or(0, |c| c.ry);
+        let rolagem = if self.painel_aberto { crate::gamepad::rolagem_do_analogico(ry) } else { 0.0 };
+        self.state.definir_rolagem(rolagem);
         self.state.tick();
         self.aplicar_aba_restaurada();
         if self.painel_aberto {
@@ -310,15 +315,22 @@ impl Scout {
         if comandos.alternar_painel && !ja_alternou {
             self.alternar_painel();
         } else if self.painel_aberto {
-            let na_raiz = self.nav.profundidade() == 1;
-            if na_raiz && (comandos.aba_anterior || comandos.proxima_aba) {
-                let passo = if comandos.proxima_aba { 1 } else { -1 };
-                let aba = self.nav.aba_ativa().vizinha(passo);
-                self.nav.trocar_aba(aba);
-                self.state.definir_aba_ativa(aba);
-            }
-            if comandos.voltar {
-                self.voltar();
+            if self.state.troca_de_aba_pendente().is_some() {
+                // aviso "Sair da Nova Missão?" aberto: B continua editando;
+                // A é dos botões do aviso (ImGui)
+                if comandos.voltar {
+                    self.state.definir_troca_de_aba_pendente(None);
+                    self.nav.pedir_foco();
+                }
+            } else {
+                if comandos.aba_anterior || comandos.proxima_aba {
+                    let passo = if comandos.proxima_aba { 1 } else { -1 };
+                    let aba = self.nav.aba_ativa().vizinha(passo);
+                    pedir_troca_de_aba(&mut self.nav, &mut self.state, aba);
+                }
+                if comandos.voltar {
+                    self.voltar();
+                }
             }
         }
 
@@ -375,6 +387,29 @@ impl Scout {
             }
         }
     }
+}
+
+/// Troca de aba pedida por LB/RB ou pela barra de abas, de qualquer tela.
+/// Com a Nova Missão aberta (filtros ainda não confirmados), só marca a
+/// troca como pendente: o painel pergunta se o jogador quer descartar o
+/// rascunho. Senão, troca já.
+pub fn pedir_troca_de_aba(nav: &mut Navigation, state: &mut ScoutState, aba: Aba) {
+    if nav.contem(Satelite::NovaMissao) {
+        state.definir_troca_de_aba_pendente(Some(aba));
+        return;
+    }
+    trocar_aba_agora(nav, state, aba);
+}
+
+/// Troca de aba descartando o que estava aberto (contratação, rascunho de
+/// Missão, Relatório e Ficha).
+pub fn trocar_aba_agora(nav: &mut Navigation, state: &mut ScoutState, aba: Aba) {
+    state.definir_troca_de_aba_pendente(None);
+    state.cancelar_contratacao();
+    state.cancelar_nova_missao();
+    state.fechar_relatorio();
+    nav.trocar_aba(aba);
+    state.definir_aba_ativa(aba);
 }
 
 /// Estado físico da tecla agora (bit mais alto de `GetAsyncKeyState`).
@@ -571,7 +606,40 @@ mod tests {
     }
 
     #[test]
-    fn lb_rb_switch_tabs_with_wraparound_only_at_the_root() {
+    fn lb_rb_switch_tabs_from_any_screen_but_ask_before_dropping_a_new_missao() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.nav.trocar_aba(Aba::Relatorios);
+        scout.nav.push(Satelite::Relatorio);
+        scout.nav.push(Satelite::FichaJogador);
+        scout.aplicar_controle(controle(botao::RB), false);
+        scout.aplicar_controle(controle(0), false);
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Sonar), "saiu da Ficha");
+        assert_eq!(scout.nav.profundidade(), 1);
+
+        // com a Nova Missão aberta: pergunta antes
+        scout.nav.trocar_aba(Aba::Missoes);
+        scout.nav.push(Satelite::EscolherOlheiro);
+        scout.nav.push(Satelite::NovaMissao);
+        scout.aplicar_controle(controle(botao::LB), false);
+        scout.aplicar_controle(controle(0), false);
+        assert_eq!(scout.state.troca_de_aba_pendente(), Some(Aba::Olheiros));
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Satelite(Satelite::NovaMissao), "ainda no formulário");
+        // B: continua editando
+        scout.aplicar_controle(controle(botao::B), false);
+        scout.aplicar_controle(controle(0), false);
+        assert_eq!(scout.state.troca_de_aba_pendente(), None);
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Satelite(Satelite::NovaMissao));
+        // confirmou o aviso: troca
+        scout.aplicar_controle(controle(botao::LB), false);
+        trocar_aba_agora(&mut scout.nav, &mut scout.state, Aba::Olheiros);
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Olheiros));
+        assert_eq!(scout.state.troca_de_aba_pendente(), None);
+    }
+
+    #[test]
+    fn lb_rb_switch_tabs_with_wraparound() {
         let mut scout = Scout::new();
         scout.aplicar_controle(controle(COMBO_PAINEL), false);
         scout.aplicar_controle(controle(0), false);
@@ -583,12 +651,12 @@ mod tests {
         scout.aplicar_controle(controle(botao::LB), false);
         assert_eq!(scout.nav.aba_ativa(), Aba::Sonar, "dá a volta");
 
-        // com uma tela satélite aberta, LB/RB não trocam de aba
+        // com uma tela satélite aberta, LB/RB também trocam (2026-10-03)
         scout.aplicar_controle(controle(0), false);
         scout.nav.push(Satelite::FichaJogador);
         scout.aplicar_controle(controle(botao::RB), false);
-        assert_eq!(scout.nav.aba_ativa(), Aba::Sonar);
-        assert_eq!(scout.nav.profundidade(), 2);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
+        assert_eq!(scout.nav.profundidade(), 1);
     }
 
     #[test]

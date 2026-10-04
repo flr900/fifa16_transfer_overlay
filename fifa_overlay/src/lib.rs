@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "3.6-v2 — work rate, dribles, pé, posições corrigidas, Completa rende mais, árvore geográfica";
+const BUILD_TAG: &str = "3.7-v1 — Cards só, valor/salário/contrato, teto de gastos, muda patamar, atalhos, LB/RB em qualquer tela, analógico direito rola";
 
 /// Arquivo que pede para a DLL se descarregar sem fechar o jogo
 /// (script `recarregar_dev.ps1` da pasta `fifa_overlay`, só para
