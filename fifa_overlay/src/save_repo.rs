@@ -1099,8 +1099,8 @@ fn write_budget_at(
     Ok(relido)
 }
 
-/// `dqXv.wagebudget` VIVO (vizinho do orçamento na mesma struct).
-#[allow(dead_code)] // API do repositório; ainda sem tela que mostre
+/// `dqXv.wagebudget` VIVO (vizinho do orçamento na mesma struct): a folha
+/// salarial semanal disponível — o limite de salário "do clube" da busca.
 pub fn read_wage_budget() -> Result<i32, SaveRepoError> {
     with_live(|live| live_finances(live, &ProcessMemory).map(|(_, wage)| wage))
 }

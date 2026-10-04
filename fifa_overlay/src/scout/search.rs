@@ -42,6 +42,9 @@ pub struct CareerSnapshot {
     /// `save_repo::read_saved_date`): o Scout desfaz o que foi feito
     /// depois dela ao ativar a carreira.
     pub data_do_save: Date,
+    /// Folha salarial semanal disponível (`dqXv.wagebudget` vivo); `None`
+    /// se não deu para ler (o limite de salário "do clube" fica sem teto).
+    pub folha_salarial: Option<i32>,
 }
 
 /// De onde vem o estado da carreira. Em produção é o `save_repo`; nos
@@ -113,6 +116,7 @@ impl CareerSource for SaveRepoSource {
                 .to_string(),
             id_save: identidade.hash(),
             data_do_save: save_repo::read_saved_date()?,
+            folha_salarial: save_repo::read_wage_budget().ok(),
         })
     }
 }
@@ -218,6 +222,8 @@ pub fn passa_nos_filtros_com(
         && (filtros.estrelas_drible.min..=filtros.estrelas_drible.max).contains(&jogador.estrelas_drible)
         && filtros.pe.is_none_or(|pe| do_pe(jogador, pe))
         && filtros.teto_valor.is_none_or(|teto| valor_real(jogador, hoje) <= teto)
+        && filtros.teto_salario.is_none_or(|teto| quality::salario_estimado(jogador.overall) <= teto)
+        && (filtros.posicoes.is_empty() || filtros.posicoes.contains(&quality::perfil_da_posicao(jogador.posicao)))
         && filtros.nivel_elenco.is_none_or(|nivel| {
             quality::no_nivel(nivel, jogador.overall, jogador.potencial, elenco.titular(perfil_comparado(missao, jogador)))
         })
@@ -859,5 +865,16 @@ pub mod tests {
         m.estimativa.qualidade = crate::scout::state::Qualidade::Alta;
         let lista = escolher_jogadores(&m, &p, HOJE, &HashSet::new(), 5);
         assert_eq!(lista.first().and_then(|j| j.titular_elenco), Some(71));
+    }
+
+    #[test]
+    fn wage_cap_and_position_groups_filter_too() {
+        let p = pool(vec![jogador(1, 88, 88, 25), jogador(2, 70, 72, 25), jogador(3, 70, 72, 5)]);
+        let mut m = missao_com((40, 99), (40, 99));
+        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j, HOJE)).map(|j| j.player_id).collect() };
+        m.filtros.teto_salario = Some(165_000);
+        assert_eq!(ids(&m), vec![2, 3], "Overall 88 pede mais que a folha");
+        m.filtros.posicoes = vec![crate::scout::state::Perfil::Centroavante];
+        assert_eq!(ids(&m), vec![2]);
     }
 }

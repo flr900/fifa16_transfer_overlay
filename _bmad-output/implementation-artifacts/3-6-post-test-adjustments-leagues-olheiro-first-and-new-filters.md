@@ -72,6 +72,14 @@ Requests: remove the Relatório Tabular view; bring back estimated transfer valu
 - **Shortcuts** (`quality::Atalho`): Muda patamar, Jovens promessas, Nível titular, Nível banco, Fim de contrato (contract ends this season + starter level). They keep geography and the cap; the rest goes back to default.
 - **Controls:** right stick scrolls every list (`gamepad::rolagem_do_analogico`, `screens::rolar_com_analogico`); LB/RB and tab clicks work from any screen; with the Nova Missão open, a "Sair da Nova Missão?" dialog asks first (B = keep editing).
 
+## Fourth round (Felipe, 2026-10-03, build `3.7-v2`)
+
+Requests: after moving the focus to the quick filters the gamepad could not get back to the top; the filter screen was too cluttered — prioritise geography, position, level, budget (fee limit, spending cap, contract length), search mode, and a "details" option with the rest.
+
+- **Form in sections:** Olheiro + Atalhos at the top, then **Onde** (geography), **Posição** (new filter: 11 position groups, multi-select, none = all; `FiltrosMissao.posicoes`), **Nível** (team level), **Orçamento** (max transfer value, max weekly wage, contract left), **Busca** (mode and duration on one line), and **Mostrar detalhes** (closed by default, with a one-line summary of what is on): age, Overall, Potencial, dominant attributes, work rate, dribbles, foot, Fit Posicional, Jogador de Referência.
+- **Budget limits** (`state::Limite`: do clube / até X / sem limite) for value and wage. Value "do clube" = budget after paying the Missão; wage "do clube" = the live weekly wage budget (`dqXv.wagebudget`, `save_repo::read_wage_budget`, now in `CareerSnapshot.folha_salarial`). −/+ move on a 1-2-5 scale. Both are fixed at confirmation (`teto_valor`, `teto_salario`); the search compares the estimated value and wage from real numbers.
+- **Focus back to the top:** the first item ("Restaurar sugestão") scrolls the form to the top when focused; the shortcut descriptions moved from a focus tooltip to the line below the buttons.
+
 ## Dev Agent Record
 
 ### Agent Model Used
@@ -83,3 +91,4 @@ claude-opus-5-5
 - 2026-10-03: post-test adjustments implemented (build `3.6-v1`).
 - 2026-10-03: second round (build `3.6-v2`).
 - 2026-10-03: third round (build `3.7-v1`), with the port from `claude/relatorio-ficha`.
+- 2026-10-03: fourth round (build `3.7-v2`): form in sections, position filter, wage cap.

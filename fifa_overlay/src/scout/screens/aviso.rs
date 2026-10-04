@@ -132,6 +132,7 @@ mod tests {
             tecnico: "Senhor Manager".to_string(),
             id_save: String::new(),
             data_do_save: Date(20260701),
+            folha_salarial: None,
         });
         assert_eq!(textos(&pronta).1, "Senhor Manager · 01/07/2026 · F10 abre o painel.");
         assert_eq!(textos(&TipoAviso::Injetado).0, "Central de Scout ativa");

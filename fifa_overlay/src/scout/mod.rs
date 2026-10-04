@@ -521,6 +521,7 @@ mod tests {
                 tecnico: "Senhor Manager".to_string(),
                 id_save: "ab".repeat(32),
                 data_do_save: crate::save_repo::Date(20260703),
+                folha_salarial: None,
             })
         }
     }

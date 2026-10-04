@@ -43,7 +43,7 @@ use uuid::Uuid;
 use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, RitmoTrabalho};
-pub use super::quality::{Atalho, NivelEquipe, PosicaoAlvo};
+pub use super::quality::{Atalho, NivelEquipe, Perfil, PosicaoAlvo};
 
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::Densidade;
@@ -330,14 +330,25 @@ pub struct FiltrosMissao {
     /// "muda patamar"; ver `quality::NivelEquipe`).
     #[serde(default)]
     pub nivel_elenco: Option<NivelEquipe>,
-    /// "Sem teto de gastos": a busca ignora o orçamento.
+    /// Posições procuradas (grupos de posição nativa); vazio = todas.
     #[serde(default)]
-    pub sem_teto: bool,
-    /// Teto do valor estimado dos jogadores, fixado na confirmação (o
-    /// orçamento depois de pagar a Missão). `None` = sem teto (ou Missão de
-    /// antes de 2026-10-03).
+    pub posicoes: Vec<Perfil>,
+    /// Limite do valor de transferência: o orçamento do clube (padrão), um
+    /// valor escolhido ou sem limite.
+    #[serde(default)]
+    pub limite_valor: Limite,
+    /// Limite do salário semanal: a folha disponível do clube (padrão), um
+    /// valor escolhido ou sem limite.
+    #[serde(default)]
+    pub limite_salario: Limite,
+    /// Teto do valor estimado dos jogadores, fixado na confirmação a partir
+    /// de `limite_valor`. `None` = sem teto (ou Missão antiga).
     #[serde(default)]
     pub teto_valor: Option<i64>,
+    /// Teto do salário semanal estimado, fixado na confirmação a partir de
+    /// `limite_salario`. `None` = sem teto.
+    #[serde(default)]
+    pub teto_salario: Option<i64>,
     /// Posição-alvo: só entram jogadores de OUTRA posição nativa cujo perfil
     /// serve nela (Story 3.4).
     #[serde(default)]
@@ -388,10 +399,37 @@ impl Default for FiltrosMissao {
             estrelas_drible: estrelas_padrao(),
             pe: None,
             nivel_elenco: None,
-            sem_teto: false,
+            posicoes: Vec::new(),
+            limite_valor: Limite::DoClube,
+            limite_salario: Limite::DoClube,
             teto_valor: None,
+            teto_salario: None,
             fit_posicional: None,
             referencia: None,
+        }
+    }
+}
+
+/// Limite de dinheiro de um filtro de orçamento (2026-10-03). No JSON:
+/// `"do_clube"`, `{"ate": 15000000}`, `"sem_limite"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Limite {
+    /// O que o clube tem: o orçamento depois de pagar a Missão (valor) ou a
+    /// folha salarial disponível (salário).
+    #[default]
+    DoClube,
+    Ate(i64),
+    SemLimite,
+}
+
+impl Limite {
+    /// O teto efetivo, dado o que o clube tem (`None` = sem teto).
+    pub fn teto(self, do_clube: Option<i64>) -> Option<i64> {
+        match self {
+            Limite::DoClube => do_clube,
+            Limite::Ate(v) => Some(v),
+            Limite::SemLimite => None,
         }
     }
 }
@@ -518,9 +556,13 @@ pub struct PreviaMissao {
     pub orcamento_atual: i32,
     pub data_atual: Date,
     pub bloqueio: Option<BloqueioMissao>,
-    /// Teto de gastos que a Missão vai usar (orçamento depois de pagá-la);
-    /// `None` com "Sem teto de gastos".
+    /// Orçamento depois de pagar a Missão (o limite de valor "do clube").
+    pub orcamento_apos_missao: Option<i64>,
+    /// Folha salarial semanal disponível (o limite de salário "do clube").
+    pub folha_disponivel: Option<i64>,
+    /// Tetos que a Missão vai usar (`None` = sem limite).
     pub teto: Option<i64>,
+    pub teto_salario: Option<i64>,
 }
 
 impl PreviaMissao {
@@ -1010,6 +1052,8 @@ pub struct ScoutState {
     /// Pixels a rolar neste frame pelo analógico direito (positivo = para
     /// baixo).
     rolagem: f32,
+    /// "Mostrar detalhes" do formulário Nova Missão (fechado ao abrir).
+    detalhes_da_missao: bool,
 }
 
 /// Nível aberto no filtro geográfico: a lista de continentes (o filtro
@@ -1066,6 +1110,7 @@ impl ScoutState {
             foco_geografico: FocoGeografico::Continentes,
             troca_de_aba_pendente: None,
             rolagem: 0.0,
+            detalhes_da_missao: false,
         }
     }
 
@@ -1534,6 +1579,7 @@ impl ScoutState {
         else {
             return;
         };
+        self.detalhes_da_missao = false;
         self.rascunho_missao = Some(RascunhoMissao {
             olheiro_id: Some(olheiro_id),
             filtros: quality::filtros_ideais(contratado.olheiro.especializacao),
@@ -1739,11 +1785,55 @@ impl ScoutState {
         }
     }
 
-    /// "Sem teto de gastos".
-    pub fn definir_sem_teto_da_missao(&mut self, sem_teto: bool) {
+    /// Limite de orçamento (`salario`: o de salário; senão o de valor).
+    pub fn definir_limite_da_missao(&mut self, salario: bool, limite: Limite) {
         if let Some(r) = self.rascunho_missao.as_mut() {
-            r.filtros.sem_teto = sem_teto;
+            if salario {
+                r.filtros.limite_salario = limite;
+            } else {
+                r.filtros.limite_valor = limite;
+            }
             r.erro = None;
+        }
+    }
+
+    /// − / + do limite: um degrau da escala 1-2-5 a partir do teto atual
+    /// (ou do que o clube tem, se estava sem limite).
+    pub fn ajustar_limite_da_missao(&mut self, salario: bool, direcao: i32) {
+        let Some(previa) = self.previa_missao() else {
+            return;
+        };
+        let (limite, do_clube) = if salario {
+            (previa.rascunho.filtros.limite_salario, previa.folha_disponivel)
+        } else {
+            (previa.rascunho.filtros.limite_valor, previa.orcamento_apos_missao)
+        };
+        let atual = limite.teto(do_clube).or(do_clube).unwrap_or(1_000_000);
+        self.definir_limite_da_missao(salario, Limite::Ate(quality::degrau_dinheiro(atual, direcao)));
+    }
+
+    /// Posição entra/sai do filtro (vazio = todas).
+    pub fn alternar_posicao_da_missao(&mut self, perfil: Perfil) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            let lista = &mut r.filtros.posicoes;
+            match lista.iter().position(|p| *p == perfil) {
+                Some(i) => {
+                    lista.remove(i);
+                }
+                None => {
+                    lista.push(perfil);
+                    lista.sort();
+                }
+            }
+            r.erro = None;
+        }
+    }
+
+    /// Folha salarial semanal disponível do clube (`dqXv.wagebudget` vivo).
+    pub fn folha_salarial(&self) -> Option<i32> {
+        match &self.status {
+            CarreiraStatus::Pronta(c) => c.folha_salarial,
+            _ => None,
         }
     }
 
@@ -1782,6 +1872,15 @@ impl ScoutState {
 
     pub fn definir_troca_de_aba_pendente(&mut self, aba: Option<Aba>) {
         self.troca_de_aba_pendente = aba;
+    }
+
+    /// "Mostrar detalhes" do formulário Nova Missão.
+    pub fn detalhes_da_missao_abertos(&self) -> bool {
+        self.detalhes_da_missao
+    }
+
+    pub fn definir_detalhes_da_missao_abertos(&mut self, abertos: bool) {
+        self.detalhes_da_missao = abertos;
     }
 
     /// Rolagem do analógico direito neste frame (ver `Scout::frame`).
@@ -1925,9 +2024,13 @@ impl ScoutState {
                 .map(|e| BloqueioMissao::OrcamentoInsuficiente { faltam: e.custo.saturating_sub(orcamento_atual) })
         };
         let custo = estimativa.map_or(0, |e| e.custo);
-        let teto = (!rascunho.filtros.sem_teto).then(|| i64::from(orcamento_atual) - i64::from(custo));
+        let orcamento_apos_missao = Some(i64::from(orcamento_atual) - i64::from(custo));
+        let folha_disponivel = self.folha_salarial().map(i64::from);
         Some(PreviaMissao {
-            teto,
+            teto: rascunho.filtros.limite_valor.teto(orcamento_apos_missao),
+            teto_salario: rascunho.filtros.limite_salario.teto(folha_disponivel),
+            orcamento_apos_missao,
+            folha_disponivel,
             combina: escolhido.as_ref().is_some_and(|o| quality::combina(o.especializacao, tipo)),
             rascunho,
             olheiros,
@@ -1960,7 +2063,7 @@ impl ScoutState {
             status: StatusMissao::Pendente,
             criada_em: previa.data_atual,
             prazo_estimado: prazo,
-            filtros: FiltrosMissao { teto_valor: previa.teto, ..previa.rascunho.filtros.clone() },
+            filtros: FiltrosMissao { teto_valor: previa.teto, teto_salario: previa.teto_salario, ..previa.rascunho.filtros.clone() },
             modo_busca: previa.rascunho.modo,
             tipo: previa.tipo,
             amplitude: previa.amplitude,
@@ -2760,6 +2863,7 @@ mod tests {
             tecnico: "Senhor Manager".to_string(),
             id_save: ID_A.to_string(),
             data_do_save: Date(20260703),
+            folha_salarial: Some(165_000),
         }
     }
 

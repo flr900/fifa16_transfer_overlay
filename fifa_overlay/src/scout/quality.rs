@@ -736,8 +736,10 @@ impl PosicaoAlvo {
     }
 }
 
-/// Perfil ideal de uma função em campo (o que `PERFIS` pesa).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Perfil ideal de uma função em campo (o que `PERFIS` pesa). Também é o
+/// grupo do filtro de Posição (2026-10-03). No JSON: `"zagueiro"` etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Perfil {
     Goleiro,
     Zagueiro,
@@ -1014,6 +1016,24 @@ pub const LIMIAR_FIT: u8 = 95;
 // - Promessa: Potencial ≥ titular + `MARGEM_PATAMAR` (vai passar o
 //   titular), qualquer Overall.
 
+/// Um degrau a mais (`direcao` > 0) ou a menos na escala de dinheiro dos
+/// limites de orçamento: 1-2-5 (10 mil, 20 mil, 50 mil, 100 mil… 1 bi).
+/// Um valor fora da escala vai para o degrau seguinte na direção pedida.
+pub fn degrau_dinheiro(valor: i64, direcao: i32) -> i64 {
+    let mut escala = Vec::new();
+    let mut base: i64 = 10_000;
+    while base <= 1_000_000_000 {
+        escala.extend([base, base * 2, base * 5]);
+        base *= 10;
+    }
+    escala.retain(|&d| d <= 1_000_000_000);
+    if direcao > 0 {
+        escala.iter().copied().find(|&d| d > valor).unwrap_or(1_000_000_000)
+    } else {
+        escala.iter().rev().copied().find(|&d| d < valor).unwrap_or(10_000)
+    }
+}
+
 /// Quanto acima do titular um jogador precisa estar para "mudar o patamar".
 pub const MARGEM_PATAMAR: u8 = 3;
 
@@ -1095,6 +1115,37 @@ impl NivelElenco {
 }
 
 impl Perfil {
+    /// Os grupos do filtro de Posição, da defesa para o ataque.
+    pub const TODOS: [Perfil; 11] = [
+        Perfil::Goleiro,
+        Perfil::Zagueiro,
+        Perfil::Lateral,
+        Perfil::Ala,
+        Perfil::Volante,
+        Perfil::MeioCampista,
+        Perfil::MeiaAtacante,
+        Perfil::MeiaAberto,
+        Perfil::Ponta,
+        Perfil::SegundoAtacante,
+        Perfil::Centroavante,
+    ];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Perfil::Goleiro => "Goleiro",
+            Perfil::Zagueiro => "Zagueiro",
+            Perfil::Lateral => "Lateral (direito ou esquerdo)",
+            Perfil::Ala => "Ala (direito ou esquerdo)",
+            Perfil::Volante => "Volante",
+            Perfil::MeioCampista => "Meio-campista",
+            Perfil::MeiaAtacante => "Meia-atacante",
+            Perfil::MeiaAberto => "Meia aberto (direita ou esquerda)",
+            Perfil::Ponta => "Ponta (direita ou esquerda)",
+            Perfil::SegundoAtacante => "Segundo atacante",
+            Perfil::Centroavante => "Centroavante",
+        }
+    }
+
     /// Nome curto do perfil (resumo dos titulares no formulário).
     pub fn sigla(self) -> &'static str {
         match self {
@@ -1113,8 +1164,8 @@ impl Perfil {
     }
 }
 
-/// Atalhos de filtro: um clique monta uma busca comum. Mantêm a geografia
-/// e o teto de gastos; o resto volta ao padrão antes de aplicar.
+/// Atalhos de filtro: um clique monta uma busca comum. Mantêm a geografia,
+/// as posições e o orçamento; o resto volta ao padrão antes de aplicar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Atalho {
     JovensPromessas,
@@ -1157,7 +1208,9 @@ impl Atalho {
             continentes: atuais.continentes.clone(),
             paises_dos_clubes: atuais.paises_dos_clubes.clone(),
             ligas: atuais.ligas.clone(),
-            sem_teto: atuais.sem_teto,
+            posicoes: atuais.posicoes.clone(),
+            limite_valor: atuais.limite_valor,
+            limite_salario: atuais.limite_salario,
             ..FiltrosMissao::default()
         };
         match self {
@@ -1865,15 +1918,17 @@ mod tests {
 
     #[test]
     fn shortcuts_keep_geography_and_spending_cap_and_set_the_team_level() {
+        use crate::scout::state::Limite;
         let atuais = FiltrosMissao {
             ligas: vec![13],
-            sem_teto: true,
+            posicoes: vec![Perfil::Centroavante],
+            limite_valor: Limite::SemLimite,
             atributos_dominantes: vec![Atributo::Drible],
             ..FiltrosMissao::default()
         };
         for atalho in Atalho::TODOS {
             let f = atalho.aplicar(&atuais);
-            assert_eq!((f.ligas.clone(), f.sem_teto), (vec![13], true), "{atalho:?}");
+            assert_eq!((f.ligas.clone(), f.limite_valor, f.posicoes.clone()), (vec![13], Limite::SemLimite, vec![Perfil::Centroavante]), "{atalho:?}");
             assert!(f.atributos_dominantes.is_empty(), "o resto volta ao padrão");
             assert!(f.nivel_elenco.is_some());
             assert!(!atalho.descricao().contains('!'));
@@ -1881,5 +1936,15 @@ mod tests {
         assert_eq!(Atalho::FimDeContrato.aplicar(&atuais).contrato, FaixaAtributo { min: 0, max: 0 });
         assert_eq!(tipo_por_filtros(&Atalho::JovensPromessas.aplicar(&atuais)), TipoMissao::Jovens);
         assert_eq!(tipo_por_filtros(&Atalho::MudaPatamar.aplicar(&atuais)), TipoMissao::Medalhoes);
+    }
+
+    #[test]
+    fn money_limits_move_on_a_1_2_5_scale() {
+        assert_eq!(degrau_dinheiro(15_000_000, 1), 20_000_000);
+        assert_eq!(degrau_dinheiro(15_000_000, -1), 10_000_000);
+        assert_eq!(degrau_dinheiro(20_000_000, 1), 50_000_000);
+        assert_eq!(degrau_dinheiro(10_000, -1), 10_000, "não passa do mínimo");
+        assert_eq!(degrau_dinheiro(1_000_000_000, 1), 1_000_000_000, "nem do máximo");
+        assert_eq!(Perfil::TODOS.len(), 11);
     }
 }
