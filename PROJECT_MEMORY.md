@@ -1457,6 +1457,24 @@ Stories 3.1 a 3.5 implementadas de uma vez, em paralelo com o teste do
   fit) é recalculado só com as faixas reveladas e leva "≈" abaixo da
   Qualidade Alta.
 
+### Ajustes pós-teste (mesma sessão, build `3.6-v1`)
+
+Pedidos do Felipe depois de testar: filtro geográfico por **onde o
+jogador joga** (continente → país → liga, numa tela só), Nova Missão
+começando pelo Olheiro (com filtros ideais por Especialização), aba
+Olheiros com Cards/Tabular, filtros de idade e de contrato, atributos
+dominantes múltiplos. Ver a Story 3.6.
+
+- **Ligas no save do FIFA Friends:** 79 em `onMQ`; "países" especiais no
+  `countryid`: 75 seleções, 210 passes livres, 211 "Rest of World" (ligas
+  "Clubes da UEFA/Concacaf/AFC/CAF-OFC", sem país), 216 creation zone,
+  156/217/220/221/223/224 = federações estaduais brasileiras (valem como
+  Brasil). Nenhum time está em duas ligas.
+- **Textos em Latin-1:** nomes de times e ligas do banco do FIFA Friends
+  não são UTF-8 ("São Caetano" aparecia "S�o Caetano").
+- **Contrato:** `CZUM.contractvaliduntil` (`qvmK`) é o ano; no save, quase
+  tudo entre 2036 e 2040 (carreira em 2035).
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —

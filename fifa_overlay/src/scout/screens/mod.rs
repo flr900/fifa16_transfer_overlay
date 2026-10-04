@@ -8,6 +8,7 @@
 pub mod aviso;
 mod componentes;
 mod confirmacao_contratacao;
+mod escolher_olheiro;
 mod missoes;
 mod campo_atributo;
 mod campo_fit;
@@ -25,7 +26,7 @@ pub mod theme;
 
 use imgui::{Condition, FontId, StyleColor, StyleVar, Ui, WindowFlags};
 
-use super::state::{CarreiraStatus, Especializacao, ScoutState, Tier};
+use super::state::{CarreiraStatus, DestinoOlheiro, Especializacao, ScoutState, Tier};
 use super::{Aba, ContextoSeletor, Navigation, Satelite, ScoutScreen};
 use crate::save_repo::Date;
 use theme::Fonts;
@@ -53,6 +54,7 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     // A Confirmação de Contratação some se a contratação deixou de valer
     // (ex.: carreira saiu de "pronta" com o modal aberto).
     let mut confirmando = nav.tela_atual() == ScoutScreen::Satelite(Satelite::ConfirmacaoContratacao);
+    // Por baixo do modal aparece a tela de onde ele veio (as ofertas).
     if confirmando && state.previa_contratacao().is_none() {
         state.cancelar_contratacao();
         nav.pop();
@@ -102,7 +104,8 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             // na tela; com "Localizando…" o pedido espera).
             let com_conteudo = matches!(state.status(), CarreiraStatus::Pronta(_) | CarreiraStatus::ErroLeitura);
             let focar = !confirmando && com_conteudo && nav.tomar_foco_pendente();
-            pedido = conteudo(ui, fonts, nav.aba_ativa(), nav.tela_atual(), state, focar);
+            let tela = if confirmando { nav.tela_abaixo() } else { nav.tela_atual() };
+            pedido = conteudo(ui, fonts, nav.aba_ativa(), tela, state, focar);
             drop(desabilitado);
             if confirmando {
                 let canto = ui.window_pos();
@@ -120,14 +123,47 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             state.preparar_contratacao(especializacao, tier);
             nav.push(Satelite::ConfirmacaoContratacao);
         }
-        Some(Pedido::AbrirNovaMissao) => {
-            state.abrir_nova_missao();
-            nav.push(Satelite::NovaMissao);
+        Some(Pedido::EscolherOlheiro) => {
+            nav.push(Satelite::EscolherOlheiro);
+        }
+        Some(Pedido::AbrirNovaMissao(olheiro)) => {
+            state.abrir_nova_missao(olheiro);
+            if state.tem_nova_missao() {
+                nav.push(Satelite::NovaMissao);
+            }
         }
         Some(Pedido::FecharNovaMissao) => {
             state.cancelar_nova_missao();
             nav.reset_para_aba();
         }
+        Some(Pedido::MissaoEncomendada) => {
+            // a Missão nova aparece na aba Missões
+            state.cancelar_nova_missao();
+            nav.trocar_aba(Aba::Missoes);
+            state.definir_aba_ativa(Aba::Missoes);
+        }
+        Some(Pedido::AbrirContratacao) => {
+            nav.push(Satelite::ContratarOlheiro);
+        }
+        Some(Pedido::AtivarOlheiro(id)) => match state.destino_do_olheiro(id) {
+            Some(DestinoOlheiro::NovaMissao(olheiro)) => {
+                state.abrir_nova_missao(olheiro);
+                if state.tem_nova_missao() {
+                    nav.push(Satelite::NovaMissao);
+                }
+            }
+            Some(DestinoOlheiro::Relatorio(relatorio)) => {
+                state.abrir_relatorio(relatorio);
+                if state.relatorio_aberto().is_some() {
+                    nav.push(Satelite::Relatorio);
+                }
+            }
+            Some(DestinoOlheiro::Missoes) => {
+                nav.trocar_aba(Aba::Missoes);
+                state.definir_aba_ativa(Aba::Missoes);
+            }
+            None => {}
+        },
         Some(Pedido::AbrirCampo(satelite)) => {
             nav.push(satelite);
         }
@@ -161,7 +197,8 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     if confirmando {
         match confirmacao_contratacao::render(ui, fonts, state) {
             confirmacao_contratacao::Acao::Nenhuma => {}
-            confirmacao_contratacao::Acao::Contratou => nav.pop(),
+            // contratado: volta à lista de Olheiros, com o novo nela
+            confirmacao_contratacao::Acao::Contratou => nav.reset_para_aba(),
             confirmacao_contratacao::Acao::Cancelou => {
                 state.cancelar_contratacao();
                 nav.pop();
@@ -286,9 +323,18 @@ fn botoes_das_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: 
 /// O que o conteúdo pediu para a navegação neste frame.
 enum Pedido {
     Contratar(Especializacao, Tier),
-    AbrirNovaMissao,
-    /// Confirmou ou cancelou o formulário: volta para a aba.
+    /// "Contratar Olheiro" na aba Olheiros: abre as ofertas.
+    AbrirContratacao,
+    /// Clique num Olheiro contratado (ver `DestinoOlheiro`).
+    AtivarOlheiro(uuid::Uuid),
+    /// "Nova Missão" na aba Missões: passo 1, escolher o Olheiro.
+    EscolherOlheiro,
+    /// Abre o formulário com este Olheiro.
+    AbrirNovaMissao(uuid::Uuid),
+    /// Cancelou o formulário: volta para a aba.
     FecharNovaMissao,
+    /// Confirmou: vai para a aba Missões.
+    MissaoEncomendada,
     AbrirRelatorio(uuid::Uuid),
     FecharRelatorio,
     /// Ficha de um jogador do Relatório aberto (Story 3.1).
@@ -355,7 +401,22 @@ fn conteudo_da_tela(
             match nova_missao::render(ui, fonts, state) {
                 nova_missao::Acao::Nenhuma => {}
                 nova_missao::Acao::AbrirCampo(satelite) => *pedido = Some(Pedido::AbrirCampo(satelite)),
-                nova_missao::Acao::Confirmou | nova_missao::Acao::Cancelou => *pedido = Some(Pedido::FecharNovaMissao),
+                nova_missao::Acao::Confirmou => *pedido = Some(Pedido::MissaoEncomendada),
+                nova_missao::Acao::Cancelou => *pedido = Some(Pedido::FecharNovaMissao),
+            }
+        }
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::EscolherOlheiro) => {
+            match escolher_olheiro::render(ui, fonts, state) {
+                escolher_olheiro::Acao::Voltar => *pedido = Some(Pedido::FecharCampo),
+                escolher_olheiro::Acao::Escolheu(id) => *pedido = Some(Pedido::AbrirNovaMissao(id)),
+                escolher_olheiro::Acao::Nenhuma => {}
+            }
+        }
+        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::ContratarOlheiro) => {
+            match olheiros::render_contratacao(ui, fonts, state) {
+                olheiros::AcaoContratacao::Voltar => *pedido = Some(Pedido::FecharCampo),
+                olheiros::AcaoContratacao::Contratar(e, t) => *pedido = Some(Pedido::Contratar(e, t)),
+                olheiros::AcaoContratacao::Nenhuma => {}
             }
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::SelecaoGeografica) => {
@@ -397,10 +458,14 @@ fn conteudo_da_tela(
         }
         CarreiraStatus::Pronta(_) => match aba {
             Aba::Olheiros => {
-                *pedido = olheiros::render(ui, fonts, state).map(|(e, t)| Pedido::Contratar(e, t));
+                *pedido = match olheiros::render(ui, fonts, state) {
+                    olheiros::Acao::AbrirContratacao => Some(Pedido::AbrirContratacao),
+                    olheiros::Acao::Ativar(id) => Some(Pedido::AtivarOlheiro(id)),
+                    olheiros::Acao::Nenhuma => None,
+                };
             }
             Aba::Missoes => match missoes::render(ui, fonts, state, true) {
-                missoes::Acao::NovaMissao => *pedido = Some(Pedido::AbrirNovaMissao),
+                missoes::Acao::NovaMissao => *pedido = Some(Pedido::EscolherOlheiro),
                 missoes::Acao::AbrirRelatorio(id) => *pedido = Some(Pedido::AbrirRelatorio(id)),
                 missoes::Acao::Nenhuma => {}
             },

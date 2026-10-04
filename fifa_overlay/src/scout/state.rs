@@ -42,7 +42,7 @@ use uuid::Uuid;
 
 use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
-pub use crate::save_repo::{Atributo, Confederacao, Funcao, Nacao, Pe};
+pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe};
 pub use super::quality::PosicaoAlvo;
 
 use super::minifaces::{Minifaces, Rosto};
@@ -193,6 +193,23 @@ pub struct OlheiroContratado {
     pub olheiro: Olheiro,
     /// Tem Missão ainda não concluída (AD-8): "Em Missão" em vez de "Disponível".
     pub em_missao: bool,
+    /// A Missão em andamento, se houver.
+    pub missao: Option<Missao>,
+    /// Relatório da Missão em andamento (existe depois da primeira busca).
+    pub relatorio_atual: Option<Uuid>,
+    /// Relatórios que este Olheiro já entregou (inclui o atual).
+    pub relatorios: usize,
+}
+
+/// Para onde vai o clique num Olheiro contratado (aba Olheiros).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinoOlheiro {
+    /// Livre: abre a Nova Missão com ele.
+    NovaMissao(Uuid),
+    /// Em Missão: abre o Relatório dela.
+    Relatorio(Uuid),
+    /// Em Missão sem Relatório ainda: a aba Missões mostra o andamento.
+    Missoes,
 }
 
 /// Contratação em andamento: o usuário clicou "Contratar" e o modal de
@@ -259,19 +276,38 @@ impl FaixaAtributo {
 
 /// Filtros de uma Missão. A Story 2.2 traz Overall e Potencial; a 2.8, o
 /// atributo dominante; a 2.9, a geografia; o Épico 3, Fit Posicional e
-/// Jogador de Referência — cada um com `#[serde(default)]`.
+/// Jogador de Referência; os ajustes de 2026-10-03, idade, contrato,
+/// geografia por liga e vários atributos dominantes — cada um com
+/// `#[serde(default)]`, para os arquivos já gravados continuarem válidos.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FiltrosMissao {
     pub overall: FaixaAtributo,
     pub potencial: FaixaAtributo,
-    /// "O melhor driblador": só entram jogadores que têm este atributo
-    /// entre os seus `quality::TOP_DOMINANTE` maiores (Story 2.8).
-    #[serde(default)]
-    pub atributo_dominante: Option<Atributo>,
-    /// Países escolhidos no mapa (`Crbb.nationid`; `search::NACAO_OUTROS` =
-    /// quadro "Outros"). Vazio = todos os países (Story 2.9).
+    /// Idade (anos completos na data da carreira).
+    #[serde(default = "idade_padrao")]
+    pub idade: FaixaAtributo,
+    /// Anos de contrato que faltam: 0 = termina nesta temporada;
+    /// `quality::CONTRATO_MAIOR` = isso ou mais.
+    #[serde(default = "contrato_padrao")]
+    pub contrato: FaixaAtributo,
+    /// "Rápido e driblador": até `quality::MAX_DOMINANTES` atributos, todos
+    /// entre os maiores do jogador (ver `quality::top_para`). Arquivos de
+    /// antes guardavam UM, em `atributo_dominante` (Story 2.8).
+    #[serde(default, alias = "atributo_dominante", deserialize_with = "um_ou_varios")]
+    pub atributos_dominantes: Vec<Atributo>,
+    /// Legado (Story 2.9): nacionalidades escolhidas no mapa antigo. A tela
+    /// não mexe mais nele; Missões antigas continuam filtrando por ele.
     #[serde(default)]
     pub paises: Vec<u16>,
+    /// Onde o jogador joga (2026-10-03): continentes inteiros, países (das
+    /// ligas) e ligas. Um jogador passa se a liga do clube dele está em
+    /// qualquer um. Tudo vazio = o mundo todo.
+    #[serde(default)]
+    pub continentes: Vec<Confederacao>,
+    #[serde(default)]
+    pub paises_dos_clubes: Vec<u16>,
+    #[serde(default)]
+    pub ligas: Vec<u32>,
     /// Posição-alvo: só entram jogadores de OUTRA posição nativa cujo perfil
     /// serve nela (Story 3.4).
     #[serde(default)]
@@ -304,17 +340,55 @@ impl JogadorReferencia {
 }
 
 impl Default for FiltrosMissao {
-    /// Faixas amplas: o formulário abre sem restringir quase nada.
+    /// Faixas amplas: sem restringir quase nada (o formulário abre com os
+    /// filtros ideais do Olheiro, `quality::filtros_ideais`).
     fn default() -> Self {
         FiltrosMissao {
             overall: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
             potencial: FaixaAtributo { min: 50, max: FaixaAtributo::MAIOR },
-            atributo_dominante: None,
+            idade: idade_padrao(),
+            contrato: contrato_padrao(),
+            atributos_dominantes: Vec::new(),
             paises: Vec::new(),
+            continentes: Vec::new(),
+            paises_dos_clubes: Vec::new(),
+            ligas: Vec::new(),
             fit_posicional: None,
             referencia: None,
         }
     }
+}
+
+impl FiltrosMissao {
+    /// Algum filtro de onde o jogador joga?
+    pub fn tem_geografia(&self) -> bool {
+        !(self.continentes.is_empty() && self.paises_dos_clubes.is_empty() && self.ligas.is_empty())
+    }
+}
+
+fn idade_padrao() -> FaixaAtributo {
+    FaixaAtributo { min: quality::IDADE_MENOR, max: quality::IDADE_MAIOR }
+}
+
+fn contrato_padrao() -> FaixaAtributo {
+    FaixaAtributo { min: 0, max: quality::CONTRATO_MAIOR }
+}
+
+/// `atributo_dominante` antigo (um ou nenhum) ou a lista nova.
+fn um_ou_varios<'de, D>(deserializer: D) -> Result<Vec<Atributo>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum UmOuVarios {
+        Varios(Vec<Atributo>),
+        Um(Option<Atributo>),
+    }
+    Ok(match UmOuVarios::deserialize(deserializer)? {
+        UmOuVarios::Varios(lista) => lista,
+        UmOuVarios::Um(um) => um.into_iter().collect(),
+    })
 }
 
 /// Qual ponta de qual faixa um botão − / + do formulário mexe.
@@ -324,6 +398,21 @@ pub enum CampoFaixa {
     OverallMax,
     PotencialMin,
     PotencialMax,
+    IdadeMin,
+    IdadeMax,
+    ContratoMin,
+    ContratoMax,
+}
+
+impl CampoFaixa {
+    /// Menor e maior valor que esta faixa aceita.
+    pub fn limites(self) -> (u8, u8) {
+        match self {
+            CampoFaixa::IdadeMin | CampoFaixa::IdadeMax => (quality::IDADE_MENOR, quality::IDADE_MAIOR),
+            CampoFaixa::ContratoMin | CampoFaixa::ContratoMax => (0, quality::CONTRATO_MAIOR),
+            _ => (FaixaAtributo::MENOR, FaixaAtributo::MAIOR),
+        }
+    }
 }
 
 /// Formulário Nova Missão aberto (Story 2.2): o que o jogador escolheu até
@@ -619,14 +708,17 @@ impl JogadorElenco {
     }
 }
 
-/// O elenco como as telas o recebem (`listar_elenco_atual`).
+/// Algo lido do save em background, como as telas o recebem.
 #[derive(Debug, Clone, PartialEq)]
-pub enum EstadoElenco {
+pub enum Carga<T> {
     Carregando,
-    Pronto(Arc<Vec<JogadorElenco>>),
+    Pronto(T),
     /// Não deu para ler o save: a tela mostra o erro com "Tentar novamente".
     Erro,
 }
+
+/// O elenco como as telas o recebem (`listar_elenco_atual`).
+pub type EstadoElenco = Carga<Arc<Vec<JogadorElenco>>>;
 
 /// A Ficha de Jogador aberta (Story 3.1): o jogador do Relatório e, se
 /// escolhido, o jogador do elenco sobreposto no Radar (Story 3.2).
@@ -776,6 +868,9 @@ pub struct ScoutState {
     ficha: Option<u32>,
     /// Jogador do elenco sobreposto no Radar da Ficha (Story 3.2).
     comparacao: Option<u32>,
+    /// Ligas com clubes da carreira (filtro geográfico), lidas em
+    /// background e marcadas com a carreira dona.
+    tarefa_ligas: AsyncTask<(String, Arc<Vec<Liga>>)>,
 }
 
 impl ScoutState {
@@ -818,6 +913,7 @@ impl ScoutState {
             tarefa_elenco: AsyncTask::new(),
             ficha: None,
             comparacao: None,
+            tarefa_ligas: AsyncTask::new(),
         }
     }
 
@@ -1120,15 +1216,52 @@ impl ScoutState {
             dados
                 .olheiros
                 .iter()
-                .map(|olheiro| OlheiroContratado {
-                    olheiro: olheiro.clone(),
-                    em_missao: dados
+                .map(|olheiro| {
+                    let missao = dados
                         .missoes
                         .iter()
-                        .any(|m| m.olheiro_id == olheiro.id && m.status != StatusMissao::Concluida),
+                        .rev()
+                        .find(|m| m.olheiro_id == olheiro.id && m.status != StatusMissao::Concluida)
+                        .cloned();
+                    let relatorio_atual =
+                        missao.as_ref().and_then(|m| dados.relatorios.iter().find(|r| r.missao_id == m.id)).map(|r| r.id);
+                    let relatorios = dados
+                        .relatorios
+                        .iter()
+                        .filter(|r| dados.missoes.iter().any(|m| m.id == r.missao_id && m.olheiro_id == olheiro.id))
+                        .count();
+                    OlheiroContratado { olheiro: olheiro.clone(), em_missao: missao.is_some(), missao, relatorio_atual, relatorios }
                 })
                 .collect()
         })
+    }
+
+    /// Clique num Olheiro contratado: livre → Nova Missão com ele; em
+    /// Missão → o Relatório dela (ou a aba Missões, se ainda não há).
+    pub fn destino_do_olheiro(&self, id: Uuid) -> Option<DestinoOlheiro> {
+        let contratado = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == id)?;
+        Some(match (contratado.em_missao, contratado.relatorio_atual) {
+            (false, _) => DestinoOlheiro::NovaMissao(id),
+            (true, Some(relatorio)) => DestinoOlheiro::Relatorio(relatorio),
+            (true, None) => DestinoOlheiro::Missoes,
+        })
+    }
+
+    /// Visão da aba Olheiros salva para a carreira (Cards por padrão).
+    pub fn densidade_olheiros(&self) -> Densidade {
+        self.estado_ativo().map_or(Densidade::Cards, |e| e.ler(|d| d.ui_prefs.densidade_olheiros))
+    }
+
+    pub fn definir_densidade_olheiros(&mut self, densidade: Densidade) {
+        let Some(estado) = self.estado_ativo() else {
+            return;
+        };
+        if estado.ler(|d| d.ui_prefs.densidade_olheiros) == densidade {
+            return;
+        }
+        if let Err(err) = estado.mutar(|d| d.ui_prefs.densidade_olheiros = densidade) {
+            tracing::warn!("[scout::state] Visão dos Olheiros não foi salva: {err:?}");
+        }
     }
 
     /// "Contratar" clicado: abre a confirmação para essa combinação.
@@ -1234,17 +1367,34 @@ impl ScoutState {
     // Nova Missão (Story 2.2)
     // -----------------------------------------------------------------
 
-    /// "Nova Missão": abre o formulário com o primeiro Olheiro disponível
-    /// já escolhido e faixas amplas.
-    pub fn abrir_nova_missao(&mut self) {
-        let olheiro_id = self.olheiros_contratados().into_iter().find(|c| !c.em_missao).map(|c| c.olheiro.id);
+    /// Nova Missão com o Olheiro já escolhido (passo 1 da tela, ou clique
+    /// nele na aba Olheiros): o formulário abre com os filtros ideais da
+    /// Especialização dele (`quality::filtros_ideais`). Olheiro em Missão
+    /// ou inexistente: nada abre.
+    pub fn abrir_nova_missao(&mut self, olheiro_id: Uuid) {
+        let Some(contratado) = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == olheiro_id && !c.em_missao)
+        else {
+            return;
+        };
         self.rascunho_missao = Some(RascunhoMissao {
-            olheiro_id,
-            filtros: FiltrosMissao::default(),
+            olheiro_id: Some(olheiro_id),
+            filtros: quality::filtros_ideais(contratado.olheiro.especializacao),
             modo: ModoBusca::Rapida,
             continua: false,
             erro: None,
         });
+    }
+
+    /// Volta os filtros do formulário aos ideais do Olheiro escolhido.
+    pub fn restaurar_filtros_ideais(&mut self) {
+        let especializacao = self.previa_missao().and_then(|p| {
+            let id = p.rascunho.olheiro_id?;
+            p.olheiros.into_iter().find(|c| c.olheiro.id == id).map(|c| c.olheiro.especializacao)
+        });
+        if let (Some(e), Some(r)) = (especializacao, self.rascunho_missao.as_mut()) {
+            r.filtros = quality::filtros_ideais(e);
+            r.erro = None;
+        }
     }
 
     pub fn cancelar_nova_missao(&mut self) {
@@ -1255,16 +1405,7 @@ impl ScoutState {
         self.rascunho_missao.is_some()
     }
 
-    /// Escolhe o Olheiro (só os disponíveis; um "Em Missão" é ignorado).
-    pub fn escolher_olheiro_da_missao(&mut self, id: Uuid) {
-        let disponivel = self.olheiros_contratados().iter().any(|c| c.olheiro.id == id && !c.em_missao);
-        if let (true, Some(r)) = (disponivel, self.rascunho_missao.as_mut()) {
-            r.olheiro_id = Some(id);
-            r.erro = None;
-        }
-    }
-
-    /// Botões − / + das faixas (sempre dentro de 1–99).
+    /// Botões − / + das faixas (sempre dentro dos limites do campo).
     pub fn ajustar_faixa_da_missao(&mut self, campo: CampoFaixa, delta: i32) {
         let Some(r) = self.rascunho_missao.as_mut() else {
             return;
@@ -1274,14 +1415,22 @@ impl ScoutState {
             CampoFaixa::OverallMax => &mut r.filtros.overall.max,
             CampoFaixa::PotencialMin => &mut r.filtros.potencial.min,
             CampoFaixa::PotencialMax => &mut r.filtros.potencial.max,
+            CampoFaixa::IdadeMin => &mut r.filtros.idade.min,
+            CampoFaixa::IdadeMax => &mut r.filtros.idade.max,
+            CampoFaixa::ContratoMin => &mut r.filtros.contrato.min,
+            CampoFaixa::ContratoMax => &mut r.filtros.contrato.max,
         };
-        let novo = (i32::from(*valor) + delta).clamp(i32::from(FaixaAtributo::MENOR), i32::from(FaixaAtributo::MAIOR));
+        let (menor, maior) = campo.limites();
+        let novo = (i32::from(*valor) + delta).clamp(i32::from(menor), i32::from(maior));
         *valor = u8::try_from(novo).unwrap_or(*valor);
         r.erro = None;
     }
 
     /// Nações do mapa, ou `None` enquanto carregam (a primeira chamada
-    /// dispara a leitura em background; uma falha é tentada de novo).
+    /// dispara a leitura em background; uma falha é tentada de novo). O
+    /// filtro geográfico passou a usar as ligas (`listar_ligas`); o
+    /// cartograma de nações fica para o Sonar (Épico 4).
+    #[allow(dead_code)] // Sonar (Épico 4)
     pub fn nacoes(&self) -> Option<Arc<Vec<Nacao>>> {
         match self.tarefa_nacoes.poll() {
             TaskState::Done(nacoes) => Some(nacoes),
@@ -1294,52 +1443,146 @@ impl ScoutState {
         }
     }
 
-    /// Amplitude da seleção de países (sem as nações ainda carregadas,
-    /// conta só o número de países).
-    fn amplitude_dos_paises(&self, paises: &[u16]) -> quality::AmplitudeGeografica {
-        let nacoes = match self.tarefa_nacoes.poll() {
-            TaskState::Done(nacoes) => nacoes,
+    /// Ligas com clubes da carreira pronta (filtro geográfico). A primeira
+    /// chamada dispara a leitura em background (lê o `DATA`).
+    pub fn listar_ligas(&self) -> Carga<Arc<Vec<Liga>>> {
+        let Some(id_save) = self.save_ativo.clone() else {
+            return Carga::Erro;
+        };
+        match self.tarefa_ligas.poll() {
+            TaskState::Done((dono, ligas)) if dono == id_save => Carga::Pronto(ligas),
+            TaskState::Running => Carga::Carregando,
+            TaskState::Failed(_) => Carga::Erro,
+            TaskState::Idle | TaskState::Done(_) => {
+                self.tarefa_ligas.reset();
+                let fonte = Arc::clone(&self.fonte);
+                self.tarefa_ligas.start(move || Ok((id_save, Arc::new(fonte.read_leagues()?))));
+                Carga::Carregando
+            }
+        }
+    }
+
+    /// "Tentar novamente" do filtro geográfico.
+    pub fn reler_ligas(&mut self) {
+        self.tarefa_ligas.reset();
+    }
+
+    fn ligas_carregadas(&self) -> Arc<Vec<Liga>> {
+        match self.listar_ligas() {
+            Carga::Pronto(ligas) => ligas,
             _ => Arc::new(Vec::new()),
+        }
+    }
+
+    /// Amplitude da geografia escolhida (a liga sem dados carregados conta
+    /// como "um lugar à parte").
+    fn amplitude_da_geografia(&self, filtros: &FiltrosMissao) -> quality::AmplitudeGeografica {
+        let ligas = self.ligas_carregadas();
+        let continente_do_pais = |id: u16| {
+            ligas.iter().find(|l| l.pais == Some(id)).map_or(Confederacao::Outras, |l| l.continente)
         };
-        let conf = |id: &u16| nacoes.iter().find(|n| n.id == *id).map_or(Confederacao::Outras, |n| n.confederacao);
-        let selecao: Vec<Confederacao> = paises.iter().map(conf).collect();
-        let total_da = |c: Confederacao| {
-            if nacoes.is_empty() {
-                usize::MAX
+        let escopos: Vec<quality::EscopoGeografico> = filtros
+            .continentes
+            .iter()
+            .map(|&c| quality::EscopoGeografico::Continente(c))
+            .chain(filtros.paises_dos_clubes.iter().map(|&p| quality::EscopoGeografico::Pais(continente_do_pais(p), p)))
+            .chain(filtros.ligas.iter().map(|&id| match ligas.iter().find(|l| l.id == id) {
+                Some(l) => quality::EscopoGeografico::Liga { continente: l.continente, pais: l.pais, liga: id },
+                None => quality::EscopoGeografico::Liga { continente: Confederacao::Outras, pais: None, liga: id },
+            }))
+            .collect();
+        quality::amplitude_da_geografia(&escopos)
+    }
+
+    /// Continente inteiro entra/sai. Entrar tira os países e ligas dele já
+    /// escolhidos (o continente já os inclui).
+    pub fn alternar_continente_da_missao(&mut self, continente: Confederacao) {
+        let ligas = self.ligas_carregadas();
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            let f = &mut r.filtros;
+            if let Some(i) = f.continentes.iter().position(|c| *c == continente) {
+                f.continentes.remove(i);
             } else {
-                nacoes.iter().filter(|n| n.confederacao == c).count()
+                f.continentes.push(continente);
+                let do_continente = |l: &&Liga| l.continente == continente;
+                f.paises_dos_clubes.retain(|p| !ligas.iter().filter(do_continente).any(|l| l.pais == Some(*p)));
+                f.ligas.retain(|id| !ligas.iter().filter(do_continente).any(|l| l.id == *id));
             }
+            r.erro = None;
+        }
+    }
+
+    /// País (todas as ligas dele) entra/sai. Já incluído pelo continente:
+    /// nada muda. Entrar tira as ligas dele já escolhidas.
+    pub fn alternar_pais_do_clube_da_missao(&mut self, pais: u16) {
+        let ligas = self.ligas_carregadas();
+        let continente = ligas.iter().find(|l| l.pais == Some(pais)).map(|l| l.continente);
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            let f = &mut r.filtros;
+            if continente.is_some_and(|c| f.continentes.contains(&c)) {
+                return;
+            }
+            if let Some(i) = f.paises_dos_clubes.iter().position(|p| *p == pais) {
+                f.paises_dos_clubes.remove(i);
+            } else {
+                f.paises_dos_clubes.push(pais);
+                f.ligas.retain(|id| !ligas.iter().any(|l| l.id == *id && l.pais == Some(pais)));
+            }
+            r.erro = None;
+        }
+    }
+
+    /// Liga entra/sai. Já incluída pelo país ou continente: nada muda.
+    pub fn alternar_liga_da_missao(&mut self, liga: u32) {
+        let ligas = self.ligas_carregadas();
+        let Some(dados) = ligas.iter().find(|l| l.id == liga) else {
+            return;
         };
-        quality::amplitude_da_selecao(&selecao, total_da)
-    }
-
-    /// Clique num país do mapa: entra ou sai da seleção (cumulativo, sem
-    /// tecla modificadora — Story 2.9).
-    pub fn alternar_pais_da_missao(&mut self, id: u16) {
         if let Some(r) = self.rascunho_missao.as_mut() {
-            match r.filtros.paises.iter().position(|p| *p == id) {
+            let f = &mut r.filtros;
+            let incluida = f.continentes.contains(&dados.continente) || dados.pais.is_some_and(|p| f.paises_dos_clubes.contains(&p));
+            if incluida {
+                return;
+            }
+            match f.ligas.iter().position(|id| *id == liga) {
                 Some(i) => {
-                    r.filtros.paises.remove(i);
+                    f.ligas.remove(i);
                 }
-                None => r.filtros.paises.push(id),
+                None => f.ligas.push(liga),
             }
             r.erro = None;
         }
     }
 
-    /// "Limpar": volta a todos os países.
-    pub fn limpar_paises_da_missao(&mut self) {
+    /// "Limpar": volta ao mundo todo.
+    pub fn limpar_geografia_da_missao(&mut self) {
         if let Some(r) = self.rascunho_missao.as_mut() {
-            r.filtros.paises.clear();
+            r.filtros.continentes.clear();
+            r.filtros.paises_dos_clubes.clear();
+            r.filtros.ligas.clear();
             r.erro = None;
         }
     }
 
-    /// Atributo dominante escolhido no painel de campo (Story 2.8);
-    /// `None` = sem esse filtro.
-    pub fn definir_atributo_da_missao(&mut self, atributo: Option<Atributo>) {
+    /// Atributo dominante entra/sai (até `quality::MAX_DOMINANTES`).
+    pub fn alternar_atributo_da_missao(&mut self, atributo: Atributo) {
         if let Some(r) = self.rascunho_missao.as_mut() {
-            r.filtros.atributo_dominante = atributo;
+            let lista = &mut r.filtros.atributos_dominantes;
+            match lista.iter().position(|a| *a == atributo) {
+                Some(i) => {
+                    lista.remove(i);
+                }
+                None if lista.len() < quality::MAX_DOMINANTES => lista.push(atributo),
+                None => return,
+            }
+            r.erro = None;
+        }
+    }
+
+    /// "Qualquer um": sem atributos dominantes.
+    pub fn limpar_atributos_da_missao(&mut self) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.atributos_dominantes.clear();
             r.erro = None;
         }
     }
@@ -1395,7 +1638,7 @@ impl ScoutState {
             .and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && !c.em_missao))
             .map(|c| c.olheiro.clone());
         let tipo = quality::tipo_por_filtros(&rascunho.filtros);
-        let amplitude = self.amplitude_dos_paises(&rascunho.filtros.paises);
+        let amplitude = self.amplitude_da_geografia(&rascunho.filtros);
         let estimativa = escolhido.as_ref().map(|o| {
             quality::estimar_missao(&quality::PedidoMissao {
                 tier: o.tier,
@@ -1411,6 +1654,10 @@ impl ScoutState {
             Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::OverallMin })
         } else if !rascunho.filtros.potencial.valida() {
             Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::PotencialMin })
+        } else if !rascunho.filtros.idade.valida() {
+            Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::IdadeMin })
+        } else if !rascunho.filtros.contrato.valida() {
+            Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::ContratoMin })
         } else {
             estimativa
                 .filter(|e| orcamento_atual < e.custo)
@@ -2584,13 +2831,19 @@ mod tests {
             .expect("carreira ativa")
             .expect("gravou");
 
+        type Resumo = (Uuid, bool, Option<StatusMissao>, Option<Uuid>, usize);
+        let lista = st.olheiros_contratados();
+        let resumo: Vec<Resumo> =
+            lista.iter().map(|c| (c.olheiro.id, c.em_missao, c.missao.as_ref().map(|m| m.status), c.relatorio_atual, c.relatorios)).collect();
         assert_eq!(
-            st.olheiros_contratados(),
-            vec![
-                OlheiroContratado { olheiro: ocupado, em_missao: true },
-                OlheiroContratado { olheiro: livre, em_missao: false },
-            ]
+            resumo,
+            vec![(ocupado.id, true, Some(StatusMissao::Pendente), None, 0), (livre.id, false, None, None, 0)],
+            "o ocupado traz a Missão em andamento; o livre, nenhuma"
         );
+        // clique: livre → Nova Missão com ele; ocupado sem Relatório → aba Missões
+        assert_eq!(st.destino_do_olheiro(livre.id), Some(DestinoOlheiro::NovaMissao(livre.id)));
+        assert_eq!(st.destino_do_olheiro(ocupado.id), Some(DestinoOlheiro::Missoes));
+        assert_eq!(st.destino_do_olheiro(Uuid::new_v4()), None);
     }
 
     #[test]
@@ -2724,44 +2977,53 @@ mod tests {
     }
 
     #[test]
-    fn new_missao_form_picks_the_first_available_olheiro_and_estimates_live() {
+    fn new_missao_form_opens_with_the_chosen_olheiro_and_his_ideal_filters() {
         let pasta = PastaTemporaria::nova();
         let ocupado = olheiro(Especializacao::Tatico, Tier::Elite);
         let livre = olheiro(Especializacao::CacadorDeJovens, Tier::Elite);
         let missoes = vec![Missao::de_teste(ocupado.id, StatusMissao::Pendente)];
         let (mut st, _) = estado_com_olheiros(63_999_988, 0, vec![ocupado.clone(), livre.clone()], missoes, &pasta);
 
-        st.abrir_nova_missao();
+        st.abrir_nova_missao(ocupado.id);
+        assert!(!st.tem_nova_missao(), "Olheiro em Missão não abre o formulário");
+        st.abrir_nova_missao(livre.id);
         let previa = st.previa_missao().expect("formulário aberto");
-        assert_eq!(previa.rascunho.olheiro_id, Some(livre.id), "o ocupado é pulado");
-        assert_eq!(previa.olheiros.len(), 2, "o ocupado aparece, apagado");
-        assert_eq!(previa.tipo, quality::TipoMissao::Geral);
+        assert_eq!(previa.rascunho.olheiro_id, Some(livre.id));
+        assert_eq!(previa.rascunho.filtros, quality::filtros_ideais(Especializacao::CacadorDeJovens));
+        assert_eq!(previa.tipo, quality::TipoMissao::Jovens, "os filtros ideais já combinam");
+        assert!(previa.combina);
         assert_eq!(previa.bloqueio, None);
         let antes = previa.estimativa.expect("estimativa");
 
-        // escolher o ocupado é ignorado
-        st.escolher_olheiro_da_missao(ocupado.id);
-        assert_eq!(st.previa_missao().and_then(|p| p.rascunho.olheiro_id), Some(livre.id));
-
-        // faixas de jovens + Completa: combina e a Qualidade sobe
+        // Completa: revela mais
         st.definir_modo_da_missao(ModoBusca::Completa);
-        st.ajustar_faixa_da_missao(CampoFaixa::OverallMax, -29); // 99 -> 70
-        st.ajustar_faixa_da_missao(CampoFaixa::PotencialMin, 30); // 50 -> 80
         let previa = st.previa_missao().expect("formulário aberto");
-        assert_eq!(previa.tipo, quality::TipoMissao::Jovens);
-        assert!(previa.combina);
-        let depois = previa.estimativa.expect("estimativa");
-        assert!(depois.qualidade > antes.qualidade);
-        assert_eq!(depois.qualidade, Qualidade::Alta);
-        assert_eq!(previa.prazo(), Some(Date(20260703).mais_dias(depois.duracao_dias)));
+        let completa = previa.estimativa.expect("estimativa");
+        assert!(completa.atributos_revelados > antes.atributos_revelados);
+        assert_eq!(completa.qualidade, Qualidade::Alta);
+        assert_eq!(previa.prazo(), Some(Date(20260703).mais_dias(completa.duracao_dias)));
+
+        // tirar a cara de "jovens" perde o bônus; "Restaurar sugestão" volta
+        st.ajustar_faixa_da_missao(CampoFaixa::IdadeMax, 10);
+        st.ajustar_faixa_da_missao(CampoFaixa::PotencialMin, -30);
+        let geral = st.previa_missao().expect("formulário aberto");
+        assert_eq!(geral.tipo, quality::TipoMissao::Geral);
+        assert!(!geral.combina);
+        st.restaurar_filtros_ideais();
+        assert_eq!(st.previa_missao().map(|p| p.tipo), Some(quality::TipoMissao::Jovens));
     }
 
     #[test]
     fn ranges_are_clamped_and_an_inverted_range_blocks_confirmation() {
         let pasta = PastaTemporaria::nova();
-        let (mut st, escritas) =
-            estado_com_olheiros(63_999_988, 0, vec![olheiro(Especializacao::Generalista, Tier::Junior)], vec![], &pasta);
-        st.abrir_nova_missao();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, escritas) = estado_com_olheiros(63_999_988, 0, vec![o.clone()], vec![], &pasta);
+        st.abrir_nova_missao(o.id);
+        st.ajustar_faixa_da_missao(CampoFaixa::IdadeMin, -100);
+        st.ajustar_faixa_da_missao(CampoFaixa::IdadeMax, 100);
+        st.ajustar_faixa_da_missao(CampoFaixa::ContratoMax, 10);
+        let f = st.previa_missao().map(|p| p.rascunho.filtros).expect("aberto");
+        assert_eq!((f.idade.min, f.idade.max, f.contrato.max), (quality::IDADE_MENOR, quality::IDADE_MAIOR, quality::CONTRATO_MAIOR));
         st.ajustar_faixa_da_missao(CampoFaixa::OverallMax, 50);
         assert_eq!(st.previa_missao().map(|p| p.rascunho.filtros.overall.max), Some(99), "não passa de 99");
         st.ajustar_faixa_da_missao(CampoFaixa::OverallMin, -100);
@@ -2779,10 +3041,9 @@ mod tests {
     fn without_an_available_olheiro_confirmation_is_blocked() {
         let pasta = PastaTemporaria::nova();
         let (mut st, _) = estado_com_olheiros(63_999_988, 0, vec![], vec![], &pasta);
-        st.abrir_nova_missao();
-        let previa = st.previa_missao().expect("aberto");
-        assert_eq!(previa.bloqueio, Some(BloqueioMissao::SemOlheiroDisponivel));
-        assert_eq!(previa.estimativa, None);
+        st.abrir_nova_missao(Uuid::new_v4());
+        assert!(!st.tem_nova_missao(), "sem Olheiro, não há formulário");
+        assert_eq!(st.previa_missao(), None);
         assert!(!st.confirmar_nova_missao());
     }
 
@@ -2791,7 +3052,7 @@ mod tests {
         let pasta = PastaTemporaria::nova();
         let o = olheiro(Especializacao::Generalista, Tier::Junior);
         let (mut st, escritas) = estado_com_olheiros(63_999_988, 63_849_988, vec![o.clone()], vec![], &pasta);
-        st.abrir_nova_missao();
+        st.abrir_nova_missao(o.id);
         let estimativa = st.previa_missao().and_then(|p| p.estimativa).expect("estimativa");
         assert_eq!(estimativa.custo, 450_000, "Júnior, Rápida, mundo");
 
@@ -2818,17 +3079,17 @@ mod tests {
         assert_eq!(json["missoes"][0]["modo_busca"], "rapida");
         assert_eq!(json["missoes"][0]["estimativa"]["custo"], 450_000);
 
-        // um segundo formulário já não tem Olheiro disponível
-        st.abrir_nova_missao();
-        assert_eq!(st.previa_missao().and_then(|p| p.bloqueio), Some(BloqueioMissao::SemOlheiroDisponivel));
+        // o mesmo Olheiro, agora em Missão, não abre outro formulário
+        st.abrir_nova_missao(o.id);
+        assert!(!st.tem_nova_missao());
     }
 
     #[test]
     fn insufficient_budget_blocks_with_the_exact_shortfall() {
         let pasta = PastaTemporaria::nova();
-        let (mut st, escritas) =
-            estado_com_olheiros(100_000, 100_000, vec![olheiro(Especializacao::Generalista, Tier::Junior)], vec![], &pasta);
-        st.abrir_nova_missao();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, escritas) = estado_com_olheiros(100_000, 100_000, vec![o.clone()], vec![], &pasta);
+        st.abrir_nova_missao(o.id);
         assert_eq!(
             st.previa_missao().and_then(|p| p.bloqueio),
             Some(BloqueioMissao::OrcamentoInsuficiente { faltam: 350_000 })
@@ -2844,8 +3105,9 @@ mod tests {
         let (st, _) = estado_contratacao(63_999_988, 63_999_988, Some(pasta.0.clone()), vec![Err(SaveRepoError::ProcessoInacessivel)]);
         let mut st = st;
         let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let id = o.id;
         st.estado_ativo().map(|e| e.mutar(move |d| d.olheiros = vec![o])).expect("ativa").expect("gravou");
-        st.abrir_nova_missao();
+        st.abrir_nova_missao(id);
         assert!(!st.confirmar_nova_missao());
         assert_eq!(st.previa_missao().and_then(|p| p.rascunho.erro), Some(ErroCompra::EscritaFalhou));
         assert!(st.missoes().is_empty());
@@ -3202,32 +3464,91 @@ mod tests {
         assert!(!st.restaurar_relatorio(id), "já está na lista principal");
     }
 
+    /// Espera as ligas carregarem em background.
+    fn esperar_ligas(st: &ScoutState) -> Arc<Vec<Liga>> {
+        let inicio = Instant::now();
+        loop {
+            match st.listar_ligas() {
+                Carga::Pronto(ligas) => return ligas,
+                Carga::Erro => panic!("ligas falsas falharam"),
+                Carga::Carregando => {
+                    assert!(inicio.elapsed() < Duration::from_secs(5), "ligas falsas travaram");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+    }
+
     #[test]
-    fn choosing_countries_changes_breadth_and_the_estimate_live() {
+    fn choosing_leagues_countries_and_continents_changes_breadth_and_the_estimate_live() {
         let pasta = PastaTemporaria::nova();
         let o = olheiro(Especializacao::Generalista, Tier::Junior);
         let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &o);
         st.ao_abrir_painel();
-        // nações carregam em background
-        let inicio = Instant::now();
-        while st.nacoes().is_none() {
-            assert!(inicio.elapsed() < Duration::from_secs(5));
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        st.abrir_nova_missao();
+        assert_eq!(esperar_ligas(&st).len(), 4, "ligas do pool de teste");
+        st.abrir_nova_missao(o.id);
         let mundo = st.previa_missao().expect("formulário");
         assert_eq!(mundo.amplitude, quality::AmplitudeGeografica::Mundo);
-        st.alternar_pais_da_missao(54);
+
+        st.alternar_liga_da_missao(13); // Premier League (England)
         let pais = st.previa_missao().expect("formulário");
         assert_eq!(pais.amplitude, quality::AmplitudeGeografica::Pais);
         let (m, p) = (mundo.estimativa.expect("estimativa"), pais.estimativa.expect("estimativa"));
         assert!(p.precisao_mais_menos < m.precisao_mais_menos, "mais estreito = mais preciso");
-        st.alternar_pais_da_missao(52);
-        assert_eq!(st.previa_missao().map(|x| x.amplitude), Some(quality::AmplitudeGeografica::Continente), "os 2 da América do Sul do teste");
-        st.alternar_pais_da_missao(54);
-        assert_eq!(st.previa_missao().map(|x| x.rascunho.filtros.paises), Some(vec![52]), "clicar de novo tira");
-        st.limpar_paises_da_missao();
+        st.alternar_pais_do_clube_da_missao(45); // Spain inteira
+        assert_eq!(st.previa_missao().map(|x| x.amplitude), Some(quality::AmplitudeGeografica::VariosPaises));
+
+        // o país inteiro engole a liga dele; liga incluída não sai sozinha
+        st.alternar_pais_do_clube_da_missao(14);
+        let f = st.previa_missao().map(|x| x.rascunho.filtros).expect("formulário");
+        assert_eq!((f.paises_dos_clubes.clone(), f.ligas.clone()), (vec![45, 14], vec![]));
+        st.alternar_liga_da_missao(13);
+        assert_eq!(st.previa_missao().map(|x| x.rascunho.filtros.ligas), Some(vec![]), "incluída pelo país: nada muda");
+
+        // o continente engole os países dele
+        st.alternar_continente_da_missao(Confederacao::Europa);
+        let f = st.previa_missao().map(|x| x.rascunho.filtros).expect("formulário");
+        assert_eq!((f.continentes.clone(), f.paises_dos_clubes.clone()), (vec![Confederacao::Europa], vec![]));
+        assert_eq!(st.previa_missao().map(|x| x.amplitude), Some(quality::AmplitudeGeografica::Continente));
+        st.alternar_pais_do_clube_da_missao(54); // Brazil: outro continente
         assert_eq!(st.previa_missao().map(|x| x.amplitude), Some(quality::AmplitudeGeografica::Mundo));
+        st.limpar_geografia_da_missao();
+        let f = st.previa_missao().map(|x| x.rascunho.filtros).expect("formulário");
+        assert!(!f.tem_geografia());
+    }
+
+    #[test]
+    fn up_to_three_dominant_attributes_toggle_on_and_off() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, Vec::new(), &o);
+        st.ao_abrir_painel();
+        st.abrir_nova_missao(o.id);
+        for a in [Atributo::Velocidade, Atributo::Drible, Atributo::Finalizacao, Atributo::Forca] {
+            st.alternar_atributo_da_missao(a);
+        }
+        let lista = st.previa_missao().map(|p| p.rascunho.filtros.atributos_dominantes).expect("formulário");
+        assert_eq!(lista, vec![Atributo::Velocidade, Atributo::Drible, Atributo::Finalizacao], "o 4º não entra");
+        assert_eq!(st.previa_missao().map(|p| p.tipo), Some(quality::TipoMissao::Tatica));
+        st.alternar_atributo_da_missao(Atributo::Drible);
+        assert_eq!(
+            st.previa_missao().map(|p| p.rascunho.filtros.atributos_dominantes),
+            Some(vec![Atributo::Velocidade, Atributo::Finalizacao])
+        );
+        st.limpar_atributos_da_missao();
+        assert_eq!(st.previa_missao().map(|p| p.rascunho.filtros.atributos_dominantes), Some(vec![]));
+    }
+
+    #[test]
+    fn missions_saved_with_one_dominant_attribute_still_load() {
+        let antigo = r#"{"overall":{"min":50,"max":99},"potencial":{"min":50,"max":99},"atributo_dominante":"drible"}"#;
+        let f: FiltrosMissao = serde_json::from_str(antigo).expect("filtro antigo");
+        assert_eq!(f.atributos_dominantes, vec![Atributo::Drible]);
+        assert_eq!((f.idade, f.contrato), (FiltrosMissao::default().idade, FiltrosMissao::default().contrato));
+        let nulo = r#"{"overall":{"min":50,"max":99},"potencial":{"min":50,"max":99},"atributo_dominante":null}"#;
+        assert!(serde_json::from_str::<FiltrosMissao>(nulo).expect("nulo").atributos_dominantes.is_empty());
+        let json = serde_json::to_string(&f).expect("serializa");
+        assert!(json.contains("\"atributos_dominantes\":[\"drible\"]"), "{json}");
     }
 
     // -----------------------------------------------------------------
@@ -3464,7 +3785,9 @@ mod tests {
         let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![], &o);
         trocar_jogadores(&busca, Ok(pool_com_elenco()));
         st.ao_abrir_painel();
-        st.abrir_nova_missao();
+        st.abrir_nova_missao(o.id);
+        // o Tático já abre com atributos dominantes; sem eles, Missão Geral
+        st.limpar_atributos_da_missao();
         let antes = st.previa_missao().expect("formulário");
         assert_ne!(antes.tipo, quality::TipoMissao::Tatica);
         elenco_pronto(&st);
@@ -3480,6 +3803,9 @@ mod tests {
         // fora do elenco: ignorado; "Nenhum" tira
         st.definir_referencia_da_missao(Some(999));
         assert_eq!(st.previa_missao().and_then(|p| p.rascunho.filtros.referencia).map(|r| r.player_id), Some(2));
+        st.definir_referencia_da_missao(None);
+        assert_eq!(st.previa_missao().and_then(|p| p.rascunho.filtros.referencia), None);
+        st.definir_referencia_da_missao(Some(2));
 
         assert!(st.confirmar_nova_missao());
         let salva = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("Missão salva");
@@ -3488,10 +3814,6 @@ mod tests {
         assert_eq!(salva.filtros.referencia.map(|r| r.player_id), Some(2));
         let relida = EstadoPersistido::carregar(Some(&pasta.0), ID_A).ler(|d| d.missoes.first().cloned());
         assert_eq!(relida.and_then(|m| m.filtros.referencia).map(|r| r.nome), Some("Jogador 2".to_string()));
-
-        st.abrir_nova_missao();
-        st.definir_referencia_da_missao(None);
-        assert_eq!(st.previa_missao().and_then(|p| p.rascunho.filtros.referencia), None);
     }
 
     #[test]

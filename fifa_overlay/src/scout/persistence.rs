@@ -84,11 +84,13 @@ pub struct UiPrefs {
     pub aba_ativa: Aba,
     /// Visão dos Relatórios (Story 2.6). No JSON: `"tabular"` / `"cards"`.
     pub densidade: Densidade,
+    /// Visão da aba Olheiros (2026-10-03); Cards por padrão.
+    pub densidade_olheiros: Densidade,
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        UiPrefs { aba_ativa: Aba::Olheiros, densidade: Densidade::Tabular }
+        UiPrefs { aba_ativa: Aba::Olheiros, densidade: Densidade::Tabular, densidade_olheiros: Densidade::Cards }
     }
 }
 
@@ -359,7 +361,7 @@ pub(crate) mod tests {
                 "olheiros": [],
                 "missoes": [],
                 "relatorios": [],
-                "ui_prefs": { "aba_ativa": "olheiros", "densidade": "tabular" }
+                "ui_prefs": { "aba_ativa": "olheiros", "densidade": "tabular", "densidade_olheiros": "cards" }
             })
         );
     }

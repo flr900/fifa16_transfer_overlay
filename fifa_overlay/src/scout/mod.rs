@@ -101,6 +101,10 @@ impl Aba {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Satelite {
     ConfirmacaoContratacao,
+    /// As 12 ofertas de Olheiro (aba Olheiros → "Contratar Olheiro").
+    ContratarOlheiro,
+    /// Nova Missão, passo 1: escolher o Olheiro (2026-10-03).
+    EscolherOlheiro,
     NovaMissao,
     SelecaoGeografica,
     /// Ficha de um jogador do Relatório aberto (Story 3.1).
@@ -173,6 +177,12 @@ impl Navigation {
     /// Tela no topo da pilha (a que está visível).
     pub fn tela_atual(&self) -> ScoutScreen {
         self.stack.last().copied().unwrap_or(ScoutScreen::Aba(Aba::Olheiros))
+    }
+
+    /// Tela logo abaixo do topo (a que aparece por baixo de um modal).
+    pub fn tela_abaixo(&self) -> ScoutScreen {
+        let n = self.stack.len();
+        self.stack.get(n.saturating_sub(2)).copied().unwrap_or(ScoutScreen::Aba(self.aba_ativa()))
     }
 
     #[allow(dead_code)]
@@ -597,19 +607,20 @@ mod tests {
     }
 
     #[test]
-    fn b_on_the_new_missao_form_goes_back_without_saving() {
+    fn b_on_the_new_missao_form_goes_back_to_the_olheiro_step_without_saving() {
         let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
         scout.aplicar_controle(controle(COMBO_PAINEL), false);
         scout.aplicar_controle(controle(0), false);
         scout.state.tick();
-        scout.state.abrir_nova_missao();
+        scout.nav.trocar_aba(Aba::Missoes);
+        scout.nav.push(Satelite::EscolherOlheiro);
         scout.nav.push(Satelite::NovaMissao);
-        assert!(scout.state.tem_nova_missao());
 
         scout.aplicar_controle(controle(botao::B), false);
-        assert!(scout.painel_aberto(), "B volta para a aba, não fecha o painel");
-        assert_eq!(scout.nav.profundidade(), 1);
+        assert!(scout.painel_aberto(), "B volta uma tela, não fecha o painel");
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Satelite(Satelite::EscolherOlheiro));
         assert!(!scout.state.tem_nova_missao());
+        assert_eq!(scout.nav.tela_abaixo(), ScoutScreen::Aba(Aba::Missoes));
     }
 
     #[test]

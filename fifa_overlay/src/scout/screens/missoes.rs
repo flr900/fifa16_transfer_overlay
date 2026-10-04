@@ -190,8 +190,8 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) -> bool {
         nome_status(missao.status, linha.progresso),
         formatar_data(missao.prazo_estimado)
     );
-    if let Some(a) = missao.filtros.atributo_dominante {
-        detalhe.push_str(&format!(" · foco em {}", a.nome()));
+    if !missao.filtros.atributos_dominantes.is_empty() {
+        detalhe.push_str(&format!(" · foco em {}", super::nova_missao::texto_atributos(&missao.filtros.atributos_dominantes)));
     }
     if let Some(alvo) = missao.filtros.fit_posicional {
         detalhe.push_str(&format!(" · fit em {}", alvo.sigla()));

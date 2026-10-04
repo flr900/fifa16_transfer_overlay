@@ -164,8 +164,8 @@ pub fn detalhe(item: &RelatorioNaLista) -> String {
     }
     if let Some(m) = &item.missao {
         partes.push(super::missoes::nome_modo(m.modo_busca).to_string());
-        if let Some(a) = m.filtros.atributo_dominante {
-            partes.push(format!("foco em {}", a.nome()));
+        if !m.filtros.atributos_dominantes.is_empty() {
+            partes.push(format!("foco em {}", super::nova_missao::texto_atributos(&m.filtros.atributos_dominantes)));
         }
         if let Some(alvo) = m.filtros.fit_posicional {
             partes.push(format!("fit em {}", alvo.nome()));

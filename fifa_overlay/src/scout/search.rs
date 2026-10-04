@@ -19,9 +19,9 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::quality;
-use super::state::{Atributo, AtributoRevelado, JogadorEncontrado, JogadorReferencia, Missao, PosicaoAlvo, Relatorio};
+use super::state::{Atributo, AtributoRevelado, FiltrosMissao, JogadorEncontrado, JogadorReferencia, Missao, PosicaoAlvo, Relatorio};
 use crate::async_task::AsyncTask;
-use crate::save_repo::{self, Date, Nacao, PlayerPool, PlayerRaw, SaveRepoError};
+use crate::save_repo::{self, Date, Liga, Nacao, PlayerPool, PlayerRaw, SaveRepoError};
 
 /// Id do quadro "Outros" do mapa: nações dos jogadores que não existem na
 /// tabela de nações (nunca somem em silêncio — Story 2.9).
@@ -59,6 +59,10 @@ pub trait CareerSource: Send + Sync {
     fn read_squad_players(&self) -> Result<PlayerPool, SaveRepoError> {
         Ok(self.read_all_players()?.elenco())
     }
+    /// Ligas com clubes, para o filtro geográfico (lê o save: `AsyncTask`).
+    fn read_leagues(&self) -> Result<Vec<Liga>, SaveRepoError> {
+        Ok(self.read_all_players()?.ligas)
+    }
 }
 
 /// Fonte real: o `save_repo` da Story 1.1.
@@ -87,6 +91,10 @@ impl CareerSource for SaveRepoSource {
 
     fn read_squad_players(&self) -> Result<PlayerPool, SaveRepoError> {
         save_repo::read_squad_players()
+    }
+
+    fn read_leagues(&self) -> Result<Vec<Liga>, SaveRepoError> {
+        save_repo::read_leagues()
     }
 
     fn read_snapshot(&self) -> Result<CareerSnapshot, SaveRepoError> {
@@ -148,17 +156,22 @@ pub fn relatorio_vazio(missao: &Missao, hoje: Date) -> Relatorio {
     }
 }
 
-/// O jogador passa nos filtros da Missão (todos combinados com E)?
-pub fn passa_nos_filtros(missao: &Missao, pool: &PlayerPool, jogador: &PlayerRaw) -> bool {
+/// O jogador passa nos filtros da Missão (todos combinados com E)? `hoje`
+/// é a data da carreira (idade e anos de contrato).
+pub fn passa_nos_filtros(missao: &Missao, pool: &PlayerPool, jogador: &PlayerRaw, hoje: Date) -> bool {
     let filtros = &missao.filtros;
     let no_mercado = !jogador.resto_do_mundo
         && jogador.clube_id.is_some()
         && jogador.clube_id.map(i64::from) != Some(pool.clube_usuario);
+    let contrato = anos_de_contrato(jogador.contrato_ate, hoje);
     no_mercado
         && (filtros.overall.min..=filtros.overall.max).contains(&jogador.overall)
         && (filtros.potencial.min..=filtros.potencial.max).contains(&jogador.potencial)
-        && filtros.atributo_dominante.is_none_or(|a| tem_dominante(jogador, a))
+        && (filtros.idade.min..=filtros.idade.max).contains(&jogador.idade(hoje))
+        && (filtros.contrato.min..=filtros.contrato.max).contains(&contrato)
+        && tem_dominantes(jogador, &filtros.atributos_dominantes)
         && do_pais(&filtros.paises, pool, jogador)
+        && da_geografia(filtros, pool, jogador)
         && filtros.fit_posicional.is_none_or(|alvo| serve_no_alvo(jogador, alvo))
         && filtros.referencia.as_ref().is_none_or(|r| similaridade_real(jogador, r).is_some_and(|s| s >= quality::LIMIAR_SIMILARIDADE))
 }
@@ -183,7 +196,11 @@ pub fn similaridade_real(jogador: &PlayerRaw, referencia: &JogadorReferencia) ->
 /// Notas dos critérios de perfil pedidos na Missão, para a relevância.
 fn notas_de_perfil(missao: &Missao, jogador: &PlayerRaw) -> Vec<u8> {
     let filtros = &missao.filtros;
-    let dominante = filtros.atributo_dominante.map(|a| jogador.atributo(a));
+    // vários atributos dominantes contam como UM critério: a média deles
+    let dominante = (!filtros.atributos_dominantes.is_empty()).then(|| {
+        let soma: u32 = filtros.atributos_dominantes.iter().map(|&a| u32::from(jogador.atributo(a))).sum();
+        u8::try_from(soma / filtros.atributos_dominantes.len() as u32).unwrap_or(u8::MAX)
+    });
     let similar = filtros.referencia.as_ref().and_then(|r| similaridade_real(jogador, r));
     let no_alvo = filtros
         .fit_posicional
@@ -192,8 +209,34 @@ fn notas_de_perfil(missao: &Missao, jogador: &PlayerRaw) -> Vec<u8> {
     [dominante, similar, no_alvo].into_iter().flatten().collect()
 }
 
-/// Filtro geográfico (Story 2.9): lista vazia = todos os países; "Outros"
-/// pega as nações que não estão no mapa.
+/// Anos de contrato que faltam em `hoje`: contratos terminam no fim da
+/// temporada (30/06), então a temporada que vai de julho a junho termina em
+/// `ano + 1` a partir de julho. 0 = termina nesta temporada; nunca passa de
+/// `quality::CONTRATO_MAIOR` ("isso ou mais").
+pub fn anos_de_contrato(contrato_ate: u16, hoje: Date) -> u8 {
+    let fim_da_temporada = if hoje.month() >= 7 { hoje.year() + 1 } else { hoje.year() };
+    let anos = (i32::from(contrato_ate) - fim_da_temporada).clamp(0, i32::from(quality::CONTRATO_MAIOR));
+    u8::try_from(anos).unwrap_or(0)
+}
+
+/// Onde o jogador joga (2026-10-03): sem nada escolhido, qualquer lugar;
+/// senão a liga do clube dele precisa estar numa liga, país ou continente
+/// escolhido. Jogador sem liga conhecida só passa sem esse filtro.
+pub fn da_geografia(filtros: &FiltrosMissao, pool: &PlayerPool, jogador: &PlayerRaw) -> bool {
+    if !filtros.tem_geografia() {
+        return true;
+    }
+    let Some(liga) = jogador.liga_id.and_then(|id| pool.ligas.iter().find(|l| l.id == id)) else {
+        return false;
+    };
+    filtros.ligas.contains(&liga.id)
+        || liga.pais.is_some_and(|p| filtros.paises_dos_clubes.contains(&p))
+        || filtros.continentes.contains(&liga.continente)
+}
+
+/// Filtro legado de nacionalidade (Story 2.9; a tela não o usa mais):
+/// lista vazia = todos os países; "Outros" pega as nações que não estão no
+/// mapa.
 pub fn do_pais(paises: &[u16], pool: &PlayerPool, jogador: &PlayerRaw) -> bool {
     if paises.is_empty() || paises.contains(&jogador.nacionalidade) {
         return true;
@@ -201,13 +244,19 @@ pub fn do_pais(paises: &[u16], pool: &PlayerPool, jogador: &PlayerRaw) -> bool {
     paises.contains(&NACAO_OUTROS) && !pool.nacoes.iter().any(|n| n.id == jogador.nacionalidade)
 }
 
-/// O atributo está entre os maiores do jogador (Story 2.8)? Conta só os
-/// atributos da função dele: os de goleiro só para goleiros.
-pub fn tem_dominante(jogador: &PlayerRaw, atributo: Atributo) -> bool {
+/// Todos os atributos pedidos estão entre os maiores do jogador (Story
+/// 2.8; vários desde 2026-10-03, ver `quality::top_para`)? Conta só os
+/// atributos da função dele: os de goleiro só para goleiros. Nenhum
+/// pedido = passa.
+pub fn tem_dominantes(jogador: &PlayerRaw, atributos: &[Atributo]) -> bool {
+    if atributos.is_empty() {
+        return true;
+    }
     let goleiro = save_repo::funcao_da_posicao(jogador.posicao) == save_repo::Funcao::Goleiro;
     let valores: Vec<(Atributo, u8)> =
         Atributo::TODOS.iter().filter(|a| goleiro || !a.goleiro()).map(|&a| (a, jogador.atributo(a))).collect();
-    quality::eh_dominante(&valores, atributo)
+    let top = quality::top_para(atributos.len());
+    atributos.iter().all(|&a| quality::eh_dominante(&valores, a, top))
 }
 
 /// Escolhe até `quantos` candidatos (fora de `excluir`) e revela cada um
@@ -224,7 +273,7 @@ pub fn escolher_jogadores(
     let mut candidatos: Vec<(u32, &PlayerRaw)> = pool
         .jogadores
         .iter()
-        .filter(|j| !excluir.contains(&j.player_id) && passa_nos_filtros(missao, pool, j))
+        .filter(|j| !excluir.contains(&j.player_id) && passa_nos_filtros(missao, pool, j, hoje))
         .map(|j| {
             let relevancia = quality::relevancia(missao.tipo, j.overall, j.potencial, &notas_de_perfil(missao, j));
             (quality::nota_de_escolha(relevancia, qualidade, quality::semente(id, j.player_id, 0)), j)
@@ -243,7 +292,7 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
     let precisao = missao.estimativa.precisao_mais_menos;
     let funcao = save_repo::funcao_da_posicao(jogador.posicao);
     let filtros = &missao.filtros;
-    let atributos = quality::ordem_de_observacao(funcao, filtros.atributo_dominante, filtros.fit_posicional)
+    let atributos = quality::ordem_de_observacao(funcao, &filtros.atributos_dominantes, filtros.fit_posicional)
         .into_iter()
         .take(usize::from(missao.estimativa.atributos_revelados))
         .map(|atributo| {
@@ -304,6 +353,8 @@ pub mod tests {
             clube: "Clube".to_string(),
             resto_do_mundo: false,
             pe: crate::save_repo::Pe::Direito,
+            liga_id: Some(13),
+            contrato_ate: 2028,
         }
     }
 
@@ -315,8 +366,21 @@ pub mod tests {
                 Nacao { id: 54, nome: "Brazil".to_string(), iso: "BR".to_string(), confederacao: Confederacao::AmericaDoSul },
             ],
             clube_usuario: 241,
+            ligas: vec![
+                liga(13, Some(14), Confederacao::Europa),
+                liga(53, Some(45), Confederacao::Europa),
+                liga(7, Some(54), Confederacao::AmericaDoSul),
+                liga(77, None, Confederacao::Europa),
+            ],
         }
     }
+
+    pub fn liga(id: u32, pais: Option<u16>, continente: Confederacao) -> Liga {
+        Liga { id, nome: format!("Liga {id}"), pais, pais_nome: String::new(), continente, nivel: 1, clubes: 20 }
+    }
+
+    /// Data de carreira dos testes (o `jogador` sintético nasceu em 2010).
+    const HOJE: Date = Date(20260801);
 
     fn missao_com(overall: (u8, u8), potencial: (u8, u8)) -> Missao {
         let mut m = Missao::de_teste(Uuid::new_v4(), StatusMissao::EmExecucao);
@@ -335,7 +399,7 @@ pub mod tests {
         sem_clube.clube_id = None;
         let p = pool(vec![meu, generico, sem_clube, jogador(4, 70, 80, 24), jogador(5, 69, 80, 24), jogador(6, 70, 90, 24)]);
         let m = missao_com((70, 75), (75, 85));
-        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j)).map(|j| j.player_id).collect();
+        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j, HOJE)).map(|j| j.player_id).collect();
         assert_eq!(ids, vec![4]);
     }
 
@@ -395,8 +459,8 @@ pub mod tests {
         defensor.atributos[Atributo::Drible.indice()] = 40;
         let p = pool(vec![driblador(1, 80, 70), driblador(2, 92, 72), driblador(3, 95, 60), defensor]);
         let mut m = missao_com((65, 80), (50, 99));
-        m.filtros.atributo_dominante = Some(Atributo::Drible);
-        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j)).map(|j| j.player_id).collect();
+        m.filtros.atributos_dominantes = vec![Atributo::Drible];
+        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j, HOJE)).map(|j| j.player_id).collect();
         assert_eq!(ids, vec![1, 2], "o 3 sai pelo Overall, o 9 não dribla");
         m.estimativa.qualidade = crate::scout::state::Qualidade::Alta;
         let lista = escolher_jogadores(&m, &p, Date(20260801), &HashSet::new(), 2);
@@ -412,7 +476,7 @@ pub mod tests {
         sem_mapa.nacionalidade = 999;
         let p = pool(vec![jogador(1, 70, 75, 24), argentino, sem_mapa]);
         let mut m = missao_com((50, 99), (50, 99));
-        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j)).map(|j| j.player_id).collect() };
+        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j, HOJE)).map(|j| j.player_id).collect() };
         assert_eq!(ids(&m), vec![1, 2, 3], "nenhum país = todos");
         m.filtros.paises = vec![54];
         assert_eq!(ids(&m), vec![1]);
@@ -445,11 +509,11 @@ pub mod tests {
         let p = pool(vec![meia(1, 80), meia(2, 40), volante_nato]);
         let mut m = missao_com((50, 99), (50, 99));
         m.filtros.fit_posicional = Some(PosicaoAlvo::Volante);
-        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j)).map(|j| j.player_id).collect();
+        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j, HOJE)).map(|j| j.player_id).collect();
         assert_eq!(ids, vec![1], "o 2 não defende; o 3 já é volante");
         // combina (E) com as faixas
         m.filtros.overall = FaixaAtributo { min: 80, max: 99 };
-        assert!(p.jogadores.iter().all(|j| !passa_nos_filtros(&m, &p, j)));
+        assert!(p.jogadores.iter().all(|j| !passa_nos_filtros(&m, &p, j, HOJE)));
     }
 
     #[test]
@@ -467,7 +531,7 @@ pub mod tests {
         let mut m = missao_com((50, 99), (50, 99));
         m.filtros.referencia = Some(referencia.clone());
         m.filtros.fit_posicional = Some(PosicaoAlvo::Volante);
-        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j)).map(|j| j.player_id).collect();
+        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j, HOJE)).map(|j| j.player_id).collect();
         assert_eq!(ids, vec![1], "referência E fit, juntos");
         assert_eq!(similaridade_real(&p.jogadores[0], &referencia), Some(100));
 
@@ -498,7 +562,7 @@ pub mod tests {
             let mut c: Vec<(u8, u32)> = p
                 .jogadores
                 .iter()
-                .filter(|j| passa_nos_filtros(&m, &p, j))
+                .filter(|j| passa_nos_filtros(&m, &p, j, HOJE))
                 .map(|j| (quality::relevancia(m.tipo, j.overall, j.potencial, &notas_de_perfil(&m, j)), j.player_id))
                 .collect();
             c.sort_by(|a, b| b.cmp(a));
@@ -542,5 +606,90 @@ pub mod tests {
             let passam = notas.iter().filter(|(s, _)| *s >= quality::LIMIAR_SIMILARIDADE).count();
             eprintln!("{nome}: {passam} passam (≥{}); top 5 {:?}", quality::LIMIAR_SIMILARIDADE, notas.iter().take(5).collect::<Vec<_>>());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Ajustes de 2026-10-03: idade, contrato, geografia por liga, vários
+    // atributos dominantes
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn age_and_contract_ranges_filter_on_the_career_date() {
+        let mut novo = jogador(1, 70, 75, 24);
+        novo.nascimento = Date(20080101); // 18 anos em 01/08/2026
+        let mut veterano = jogador(2, 70, 75, 24);
+        veterano.nascimento = Date(19940101); // 32
+        veterano.contrato_ate = 2027; // termina nesta temporada (26/27)
+        let p = pool(vec![novo, veterano]);
+        let mut m = missao_com((50, 99), (50, 99));
+        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j, HOJE)).map(|j| j.player_id).collect() };
+        assert_eq!(ids(&m), vec![1, 2], "padrão não restringe");
+        m.filtros.idade = FaixaAtributo { min: 15, max: 21 };
+        assert_eq!(ids(&m), vec![1]);
+        m.filtros.idade = FaixaAtributo { min: 15, max: 45 };
+        m.filtros.contrato = FaixaAtributo { min: 0, max: 0 };
+        assert_eq!(ids(&m), vec![2], "só quem fica livre no fim da temporada");
+    }
+
+    #[test]
+    fn contract_years_count_from_the_end_of_the_current_season() {
+        assert_eq!(anos_de_contrato(2027, Date(20260801)), 0, "temporada 26/27");
+        assert_eq!(anos_de_contrato(2027, Date(20270301)), 0);
+        assert_eq!(anos_de_contrato(2028, Date(20260801)), 1);
+        assert_eq!(anos_de_contrato(2026, Date(20260801)), 0, "vencido conta como 0");
+        assert_eq!(anos_de_contrato(2040, Date(20260801)), quality::CONTRATO_MAIOR, "5 ou mais");
+    }
+
+    #[test]
+    fn geography_matches_league_country_or_continent_of_the_club() {
+        let mut ingles = jogador(1, 70, 75, 24);
+        ingles.liga_id = Some(13);
+        let mut espanhol = jogador(2, 70, 75, 24);
+        espanhol.liga_id = Some(53);
+        let mut brasileiro = jogador(3, 70, 75, 24);
+        brasileiro.liga_id = Some(7);
+        let mut sem_liga = jogador(4, 70, 75, 24);
+        sem_liga.liga_id = None;
+        let mut da_uefa = jogador(5, 70, 75, 24);
+        da_uefa.liga_id = Some(77);
+        let p = pool(vec![ingles, espanhol, brasileiro, sem_liga, da_uefa]);
+        let mut m = missao_com((50, 99), (50, 99));
+        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j, HOJE)).map(|j| j.player_id).collect() };
+        assert_eq!(ids(&m), vec![1, 2, 3, 4, 5], "sem geografia = todos");
+        m.filtros.ligas = vec![13];
+        assert_eq!(ids(&m), vec![1]);
+        m.filtros.paises_dos_clubes = vec![54];
+        assert_eq!(ids(&m), vec![1, 3], "liga OU país");
+        m.filtros = FiltrosMissao { continentes: vec![Confederacao::Europa], ..m.filtros.clone() };
+        m.filtros.ligas.clear();
+        m.filtros.paises_dos_clubes.clear();
+        assert_eq!(ids(&m), vec![1, 2, 5], "continente inclui clubes da UEFA");
+    }
+
+    #[test]
+    fn several_dominant_attributes_must_all_be_near_the_top() {
+        let rapido_driblador = {
+            let mut j = jogador(1, 75, 78, 24);
+            j.atributos = [50; TOTAL_ATRIBUTOS];
+            j.atributos[Atributo::Velocidade.indice()] = 90;
+            j.atributos[Atributo::Aceleracao.indice()] = 89;
+            j.atributos[Atributo::Finalizacao.indice()] = 88;
+            j.atributos[Atributo::Drible.indice()] = 87; // 4º maior
+            j
+        };
+        let p = pool(vec![rapido_driblador]);
+        let mut m = missao_com((50, 99), (50, 99));
+        m.filtros.atributos_dominantes = vec![Atributo::Drible];
+        assert!(!passa_nos_filtros(&m, &p, &p.jogadores[0], HOJE), "sozinho, top 3");
+        m.filtros.atributos_dominantes = vec![Atributo::Velocidade, Atributo::Drible];
+        assert!(passa_nos_filtros(&m, &p, &p.jogadores[0], HOJE), "dois pedidos, top 4");
+        m.filtros.atributos_dominantes = vec![Atributo::Velocidade, Atributo::Marcacao];
+        assert!(!passa_nos_filtros(&m, &p, &p.jogadores[0], HOJE), "todos precisam passar");
+        // os pedidos são observados primeiro
+        m.estimativa.qualidade = crate::scout::state::Qualidade::Alta;
+        m.filtros.atributos_dominantes = vec![Atributo::Velocidade, Atributo::Drible];
+        let lista = escolher_jogadores(&m, &p, HOJE, &HashSet::new(), 1);
+        let primeiros: Vec<Atributo> = lista[0].atributos.iter().take(2).map(|a| a.atributo).collect();
+        assert_eq!(primeiros, [Atributo::Velocidade, Atributo::Drible]);
     }
 }

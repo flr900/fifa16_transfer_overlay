@@ -61,14 +61,6 @@ pub fn textos(aviso: &TipoAviso) -> (String, String, [f32; 4]) {
     }
 }
 
-/// "1 país selecionado" / "3 países selecionados".
-pub fn texto_paises(n: usize) -> String {
-    match n {
-        1 => "1 país selecionado".to_string(),
-        n => format!("{n} países selecionados"),
-    }
-}
-
 /// "1 jogador" / "12 jogadores" / "nenhum jogador".
 pub fn texto_jogadores(n: usize) -> String {
     match n {

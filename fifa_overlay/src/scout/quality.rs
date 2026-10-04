@@ -105,7 +105,7 @@ impl TipoMissao {
     pub const TODOS: [TipoMissao; 4] = [TipoMissao::Jovens, TipoMissao::Medalhoes, TipoMissao::Tatica, TipoMissao::Geral];
 }
 
-/// Amplitude do filtro geográfico (Story 2.9, `amplitude_da_selecao`).
+/// Amplitude do filtro geográfico (`amplitude_da_geografia`).
 /// Em ordem: `Pais < VariosPaises < Continente < Mundo`.
 /// No JSON: `"pais"`, `"varios_paises"`, `"continente"`, `"mundo"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -298,17 +298,58 @@ pub fn tipo_por_faixas(overall: FaixaAtributo, potencial: FaixaAtributo) -> Tipo
     }
 }
 
-/// Tipo da Missão a partir de todos os filtros: pedir um perfil — um
-/// atributo dominante ("o melhor driblador", Story 2.8), um Fit Posicional
-/// (3.4) ou um Jogador de Referência (3.3) — é uma Missão **Tática**, a
-/// especialidade do Tático; sem nenhum deles, valem as faixas.
+/// Idades que o formulário aceita (anos completos na data da carreira).
+pub const IDADE_MENOR: u8 = 15;
+pub const IDADE_MAIOR: u8 = 45;
+/// Idade máxima até a qual a Missão é de "jovens".
+pub const IDADE_JOVEM: u8 = 21;
+/// Anos de contrato restantes que o formulário aceita: 0 = termina nesta
+/// temporada; este valor = "isso ou mais".
+pub const CONTRATO_MAIOR: u8 = 5;
+
+/// Tipo da Missão a partir de todos os filtros: pedir um perfil —
+/// atributos dominantes ("o melhor driblador", Story 2.8), um Fit
+/// Posicional (3.4) ou um Jogador de Referência (3.3) — é uma Missão
+/// **Tática**, a especialidade do Tático; idade máxima até `IDADE_JOVEM` é
+/// uma Missão de **Jovens**; senão, valem as faixas.
 pub fn tipo_por_filtros(filtros: &FiltrosMissao) -> TipoMissao {
     let pede_perfil =
-        filtros.atributo_dominante.is_some() || filtros.fit_posicional.is_some() || filtros.referencia.is_some();
+        !filtros.atributos_dominantes.is_empty() || filtros.fit_posicional.is_some() || filtros.referencia.is_some();
     if pede_perfil {
         TipoMissao::Tatica
+    } else if filtros.idade.max <= IDADE_JOVEM {
+        TipoMissao::Jovens
     } else {
         tipo_por_faixas(filtros.overall, filtros.potencial)
+    }
+}
+
+/// Os filtros "perfeitos" de cada Especialização: o formulário Nova Missão
+/// abre com eles (2026-10-03, pedido do Felipe), e todos dão o tipo de
+/// Missão que combina com o Olheiro (bônus de Qualidade), conferido em
+/// teste. O jogador pode mudar tudo; "Restaurar sugestão" volta a eles.
+/// - Caçador de Jovens: até 21 anos, Potencial ≥ 78, Overall ≤ 72;
+/// - Caçador de Medalhões: Overall ≥ 75, 24 a 31 anos;
+/// - Tático: armadores — Visão e Passe curto entre os maiores atributos;
+/// - Generalista: faixas largas (Overall ≥ 55, 17 a 33 anos).
+pub fn filtros_ideais(especializacao: Especializacao) -> FiltrosMissao {
+    let faixa = |min, max| FaixaAtributo { min, max };
+    let base = FiltrosMissao::default();
+    match especializacao {
+        Especializacao::CacadorDeJovens => {
+            FiltrosMissao { overall: faixa(45, 72), potencial: faixa(78, 99), idade: faixa(IDADE_MENOR, IDADE_JOVEM), ..base }
+        }
+        Especializacao::CacadorDeMedalhoes => {
+            FiltrosMissao { overall: faixa(OVERALL_MEDALHAO, 99), potencial: faixa(75, 99), idade: faixa(24, 31), ..base }
+        }
+        Especializacao::Tatico => FiltrosMissao {
+            overall: faixa(60, 99),
+            potencial: faixa(60, 99),
+            idade: faixa(18, 30),
+            atributos_dominantes: vec![Atributo::Visao, Atributo::PasseCurto],
+            ..base
+        },
+        Especializacao::Generalista => FiltrosMissao { overall: faixa(55, 99), potencial: faixa(55, 99), idade: faixa(17, 33), ..base },
     }
 }
 
@@ -317,37 +358,76 @@ pub fn tipo_por_filtros(filtros: &FiltrosMissao) -> TipoMissao {
 /// raro demais (muitos jogadores têm Velocidade ou Força no topo).
 pub const TOP_DOMINANTE: usize = 3;
 
+/// Quantos atributos dominantes uma Missão pode pedir juntos.
+pub const MAX_DOMINANTES: usize = 3;
+
+/// Com `pedidos` atributos dominantes, cada um precisa estar entre os
+/// `TOP_DOMINANTE + pedidos − 1` maiores: dois pedidos → top 4; três → top
+/// 5 (senão três atributos "todos no top 3" quase nunca acontece).
+pub fn top_para(pedidos: usize) -> usize {
+    TOP_DOMINANTE + pedidos.saturating_sub(1)
+}
+
 /// `valores`: os atributos do jogador que contam para a função dele (os de
-/// goleiro só para goleiros). Verdadeiro se `alvo` está no top
-/// `TOP_DOMINANTE` (empates incluídos).
-pub fn eh_dominante(valores: &[(Atributo, u8)], alvo: Atributo) -> bool {
+/// goleiro só para goleiros). Verdadeiro se `alvo` está entre os `top`
+/// maiores (empates incluídos).
+pub fn eh_dominante(valores: &[(Atributo, u8)], alvo: Atributo, top: usize) -> bool {
     let Some(&(_, valor_alvo)) = valores.iter().find(|(a, _)| *a == alvo) else {
         return false;
     };
     let maiores = valores.iter().filter(|(_, v)| *v > valor_alvo).count();
-    maiores < TOP_DOMINANTE
+    maiores < top
 }
 
-/// Amplitude de uma seleção de países (Story 2.9). `selecao`: a
-/// confederação de cada país escolhido; `total_da`: quantos países a
-/// confederação tem no mapa.
-/// - nenhum país = todos os países → `Mundo`;
-/// - um país → `Pais`;
-/// - vários, todos do mesmo continente: o continente inteiro → `Continente`,
-///   senão `VariosPaises`;
-/// - países de mais de um continente → `Mundo`.
-pub fn amplitude_da_selecao(selecao: &[Confederacao], total_da: impl Fn(Confederacao) -> usize) -> AmplitudeGeografica {
-    match selecao {
-        [] => AmplitudeGeografica::Mundo,
-        [_] => AmplitudeGeografica::Pais,
-        [primeira, resto @ ..] if resto.iter().all(|c| c == primeira) => {
-            if selecao.len() >= total_da(*primeira) {
-                AmplitudeGeografica::Continente
-            } else {
-                AmplitudeGeografica::VariosPaises
-            }
+/// Um item escolhido no filtro geográfico (onde o jogador joga).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscopoGeografico {
+    Continente(Confederacao),
+    Pais(Confederacao, u16),
+    /// `pais` é `None` nas ligas sem país ("Clubes da UEFA").
+    Liga { continente: Confederacao, pais: Option<u16>, liga: u32 },
+}
+
+impl EscopoGeografico {
+    fn continente(self) -> Confederacao {
+        match self {
+            EscopoGeografico::Continente(c) | EscopoGeografico::Pais(c, _) => c,
+            EscopoGeografico::Liga { continente, .. } => continente,
         }
-        _ => AmplitudeGeografica::Mundo,
+    }
+}
+
+/// Amplitude da geografia escolhida (2026-10-03):
+/// - nada escolhido = o mundo todo → `Mundo`;
+/// - mais de um continente envolvido → `Mundo`;
+/// - um continente inteiro (e só coisas dele) → `Continente`;
+/// - um país só (inteiro ou ligas dele) → `Pais`;
+/// - vários países do mesmo continente → `VariosPaises`.
+///
+/// Uma liga sem país conta como um lugar à parte.
+pub fn amplitude_da_geografia(escopos: &[EscopoGeografico]) -> AmplitudeGeografica {
+    if escopos.is_empty() {
+        return AmplitudeGeografica::Mundo;
+    }
+    let continentes: std::collections::BTreeSet<Confederacao> = escopos.iter().map(|e| e.continente()).collect();
+    if continentes.len() > 1 {
+        return AmplitudeGeografica::Mundo;
+    }
+    if escopos.iter().any(|e| matches!(e, EscopoGeografico::Continente(_))) {
+        return AmplitudeGeografica::Continente;
+    }
+    let lugares: std::collections::BTreeSet<(Option<u16>, Option<u32>)> = escopos
+        .iter()
+        .map(|e| match *e {
+            EscopoGeografico::Pais(_, p) | EscopoGeografico::Liga { pais: Some(p), .. } => (Some(p), None),
+            EscopoGeografico::Liga { pais: None, liga, .. } => (None, Some(liga)),
+            EscopoGeografico::Continente(_) => (None, None),
+        })
+        .collect();
+    if lugares.len() == 1 {
+        AmplitudeGeografica::Pais
+    } else {
+        AmplitudeGeografica::VariosPaises
     }
 }
 
@@ -841,7 +921,7 @@ pub fn similaridade(
 /// 2.8) é sempre o primeiro; com Fit Posicional (3.4), vêm logo depois os
 /// atributos que mais pesam no perfil-alvo, para a força do fit ser
 /// calculada sobre o que importa.
-pub fn ordem_de_observacao(funcao: Funcao, dominante: Option<Atributo>, alvo: Option<PosicaoAlvo>) -> Vec<Atributo> {
+pub fn ordem_de_observacao(funcao: Funcao, dominantes: &[Atributo], alvo: Option<PosicaoAlvo>) -> Vec<Atributo> {
     use Atributo::*;
     let prioridade: &[Atributo] = match funcao {
         Funcao::Goleiro => &[GkReflexos, GkMergulho, GkColocacao, GkManejo, GkReposicao, Reacao, Impulsao, Forca],
@@ -854,9 +934,9 @@ pub fn ordem_de_observacao(funcao: Funcao, dominante: Option<Atributo>, alvo: Op
     do_alvo.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let do_alvo: Vec<Atributo> = do_alvo.into_iter().map(|(a, _)| a).collect();
     let mut ordem: Vec<Atributo> = Vec::with_capacity(Atributo::TODOS.len());
-    for &a in dominante.iter().chain(&do_alvo).chain(prioridade).chain(Atributo::TODOS.iter()) {
+    for &a in dominantes.iter().chain(&do_alvo).chain(prioridade).chain(Atributo::TODOS.iter()) {
         // Atributos de goleiro só entram na observação de goleiros.
-        if (a.goleiro() && !goleiro && Some(a) != dominante) || ordem.contains(&a) {
+        if (a.goleiro() && !goleiro && !dominantes.contains(&a)) || ordem.contains(&a) {
             continue;
         }
         ordem.push(a);
@@ -1156,14 +1236,14 @@ mod tests {
 
     #[test]
     fn observation_order_starts_with_the_role_and_the_dominant_attribute() {
-        let atacante = ordem_de_observacao(Funcao::Atacante, None, None);
+        let atacante = ordem_de_observacao(Funcao::Atacante, &[], None);
         assert_eq!(atacante.first(), Some(&Atributo::Finalizacao));
         assert_eq!(atacante.len(), 28, "sem atributos de goleiro");
         assert!(atacante.iter().all(|a| !a.goleiro()));
-        let goleiro = ordem_de_observacao(Funcao::Goleiro, None, None);
+        let goleiro = ordem_de_observacao(Funcao::Goleiro, &[], None);
         assert_eq!(goleiro.len(), 33);
         assert!(goleiro.iter().take(5).all(|a| a.goleiro()));
-        let drible = ordem_de_observacao(Funcao::Defensor, Some(Atributo::Drible), None);
+        let drible = ordem_de_observacao(Funcao::Defensor, &[Atributo::Drible], None);
         assert_eq!(drible.first(), Some(&Atributo::Drible));
         let mut sem_repetir = drible.clone();
         sem_repetir.sort_unstable();
@@ -1191,27 +1271,61 @@ mod tests {
         let faixa = |min, max| FaixaAtributo { min, max };
         let mut filtros = FiltrosMissao { overall: faixa(50, 70), potencial: faixa(80, 99), ..FiltrosMissao::default() };
         assert_eq!(tipo_por_filtros(&filtros), TipoMissao::Jovens);
-        filtros.atributo_dominante = Some(Atributo::Drible);
+        filtros.atributos_dominantes = vec![Atributo::Drible];
         assert_eq!(tipo_por_filtros(&filtros), TipoMissao::Tatica);
         assert!(combina(Especializacao::Tatico, TipoMissao::Tatica));
         let valores = [(Atributo::Velocidade, 90), (Atributo::Drible, 88), (Atributo::Forca, 88), (Atributo::Finalizacao, 85), (Atributo::Marcacao, 40)];
-        assert!(eh_dominante(&valores, Atributo::Velocidade));
-        assert!(eh_dominante(&valores, Atributo::Drible));
-        assert!(eh_dominante(&valores, Atributo::Forca), "empate conta");
-        assert!(!eh_dominante(&valores, Atributo::Finalizacao), "4º maior");
-        assert!(!eh_dominante(&valores, Atributo::Marcacao));
-        assert!(!eh_dominante(&valores, Atributo::GkReflexos), "fora da função");
+        let top = top_para(1);
+        assert!(eh_dominante(&valores, Atributo::Velocidade, top));
+        assert!(eh_dominante(&valores, Atributo::Drible, top));
+        assert!(eh_dominante(&valores, Atributo::Forca, top), "empate conta");
+        assert!(!eh_dominante(&valores, Atributo::Finalizacao, top), "4º maior");
+        assert!(eh_dominante(&valores, Atributo::Finalizacao, top_para(2)), "com dois pedidos, top 4");
+        assert!(!eh_dominante(&valores, Atributo::Marcacao, top));
+        assert!(!eh_dominante(&valores, Atributo::GkReflexos, top), "fora da função");
     }
 
     #[test]
-    fn breadth_comes_from_the_selected_countries() {
-        let total = |c| if c == Confederacao::AmericaDoSul { 3 } else { 50 };
+    fn breadth_comes_from_continents_countries_and_leagues() {
         use Confederacao::*;
-        assert_eq!(amplitude_da_selecao(&[], total), AmplitudeGeografica::Mundo);
-        assert_eq!(amplitude_da_selecao(&[Europa], total), AmplitudeGeografica::Pais);
-        assert_eq!(amplitude_da_selecao(&[AmericaDoSul, AmericaDoSul], total), AmplitudeGeografica::VariosPaises);
-        assert_eq!(amplitude_da_selecao(&[AmericaDoSul; 3], total), AmplitudeGeografica::Continente);
-        assert_eq!(amplitude_da_selecao(&[Europa, AmericaDoSul], total), AmplitudeGeografica::Mundo);
+        use EscopoGeografico as E;
+        let liga = |continente, pais, liga| E::Liga { continente, pais, liga };
+        assert_eq!(amplitude_da_geografia(&[]), AmplitudeGeografica::Mundo);
+        assert_eq!(amplitude_da_geografia(&[liga(AmericaDoSul, Some(54), 7)]), AmplitudeGeografica::Pais);
+        assert_eq!(
+            amplitude_da_geografia(&[liga(AmericaDoSul, Some(54), 7), liga(AmericaDoSul, Some(54), 83), E::Pais(AmericaDoSul, 54)]),
+            AmplitudeGeografica::Pais,
+            "ligas do mesmo país"
+        );
+        assert_eq!(amplitude_da_geografia(&[E::Pais(Europa, 14), E::Pais(Europa, 45)]), AmplitudeGeografica::VariosPaises);
+        assert_eq!(amplitude_da_geografia(&[E::Pais(Europa, 14), liga(Europa, None, 77)]), AmplitudeGeografica::VariosPaises);
+        assert_eq!(amplitude_da_geografia(&[E::Continente(Europa), E::Pais(Europa, 14)]), AmplitudeGeografica::Continente);
+        assert_eq!(amplitude_da_geografia(&[E::Continente(Europa), E::Pais(AmericaDoSul, 54)]), AmplitudeGeografica::Mundo);
+        assert_eq!(amplitude_da_geografia(&[E::Pais(Europa, 14), E::Pais(AmericaDoSul, 54)]), AmplitudeGeografica::Mundo);
+    }
+
+    #[test]
+    fn each_especializacao_opens_with_filters_that_match_it() {
+        for e in Especializacao::TODAS {
+            let f = filtros_ideais(e);
+            assert!(f.overall.valida() && f.potencial.valida() && f.idade.valida() && f.contrato.valida(), "{e:?}");
+            assert!(f.idade.min >= IDADE_MENOR && f.idade.max <= IDADE_MAIOR, "{e:?}");
+            let tipo = tipo_por_filtros(&f);
+            if e == Especializacao::Generalista {
+                assert_eq!(tipo, TipoMissao::Geral);
+            } else {
+                assert!(combina(e, tipo), "{e:?} → {tipo:?}");
+            }
+        }
+        assert!(filtros_ideais(Especializacao::Tatico).atributos_dominantes.len() <= MAX_DOMINANTES);
+    }
+
+    #[test]
+    fn a_young_age_cap_makes_a_youth_missao() {
+        let f = FiltrosMissao { idade: FaixaAtributo { min: 16, max: IDADE_JOVEM }, ..FiltrosMissao::default() };
+        assert_eq!(tipo_por_filtros(&f), TipoMissao::Jovens);
+        let f = FiltrosMissao { idade: FaixaAtributo { min: 16, max: IDADE_JOVEM + 1 }, ..f };
+        assert_eq!(tipo_por_filtros(&f), TipoMissao::Geral);
     }
 
     #[test]
@@ -1343,11 +1457,11 @@ mod tests {
 
     #[test]
     fn with_a_target_position_its_heaviest_attributes_are_observed_early() {
-        let ordem = ordem_de_observacao(Funcao::MeioCampo, None, Some(PosicaoAlvo::Volante));
+        let ordem = ordem_de_observacao(Funcao::MeioCampo, &[], Some(PosicaoAlvo::Volante));
         let topo: Vec<Atributo> = ordem.iter().take(3).copied().collect();
         assert_eq!(topo, [Atributo::PasseCurto, Atributo::Interceptacao, Atributo::DesarmeEmPe]);
         assert_eq!(ordem.len(), 28, "sem atributos de goleiro, sem repetir");
-        let com_dominante = ordem_de_observacao(Funcao::MeioCampo, Some(Atributo::Drible), Some(PosicaoAlvo::Volante));
+        let com_dominante = ordem_de_observacao(Funcao::MeioCampo, &[Atributo::Drible], Some(PosicaoAlvo::Volante));
         assert_eq!(com_dominante.first(), Some(&Atributo::Drible));
         assert_eq!(relevancia(TipoMissao::Tatica, 70, 80, &[80, 90]), 85, "média dos critérios de perfil");
     }

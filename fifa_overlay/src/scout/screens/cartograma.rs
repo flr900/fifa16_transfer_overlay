@@ -6,6 +6,11 @@
 //! Cada quadro é UM item navegável (mouse e controle: o D-pad anda entre
 //! vizinhos, A ativa); o nome inteiro aparece no tooltip. Cor nunca é o
 //! único indicador: selecionado também ganha borda de 2 px e um "•".
+//!
+//! Desde 2026-10-03 o filtro geográfico usa ligas (`selecao_geografica`):
+//! o cartograma fica sem uso até o Sonar (Épico 4) decidir se mostra
+//! nacionalidades ou ligas.
+#![allow(dead_code)]
 
 use imgui::Ui;
 
