@@ -312,6 +312,8 @@ impl Scout {
     fn aplicar_controle(&mut self, atual: EstadoControle, ja_alternou: bool) {
         let comandos = comandos_controle(self.controle_anterior, atual);
         self.controle_anterior = atual;
+        // `ja_alternou` com o painel fechado agora = o F10 acabou de fechá-lo
+        let estava_aberto = self.painel_aberto || ja_alternou;
 
         if comandos.alternar_painel && !ja_alternou {
             self.alternar_painel();
@@ -337,8 +339,10 @@ impl Scout {
 
         if self.painel_aberto {
             self.esperando_soltar = false;
-        } else if !atual.solto() && (comandos.alternar_painel || comandos.voltar) {
-            // fechou agora, com o botão ainda apertado
+        } else if estava_aberto && !atual.solto() {
+            // fechou agora, com o botão ainda apertado. Só no fechamento:
+            // com o painel já fechado, o B é do jogo (chutar) e não pode
+            // bloquear o controle inteiro.
             self.esperando_soltar = true;
         } else if atual.solto() {
             self.esperando_soltar = false;
@@ -595,6 +599,33 @@ mod tests {
         assert!(!scout.painel_aberto());
         assert!(scout.bloqueia_controle());
         scout.aplicar_controle(controle(botao::START), false);
+        assert!(scout.bloqueia_controle());
+        scout.aplicar_controle(controle(0), false);
+        assert!(!scout.bloqueia_controle());
+    }
+
+    #[test]
+    fn b_during_the_match_never_blocks_the_game() {
+        let mut scout = Scout::new();
+        // correndo (RT) e chutando (B) com o painel fechado
+        let chute = EstadoControle { botoes: botao::B, rt: 255, ly: 30_000, ..Default::default() };
+        scout.aplicar_controle(EstadoControle { rt: 255, ..Default::default() }, false);
+        scout.aplicar_controle(chute, false);
+        assert!(!scout.painel_aberto());
+        assert!(!scout.bloqueia_controle(), "B no jogo não é do painel");
+        scout.aplicar_controle(EstadoControle { rt: 255, ..Default::default() }, false);
+        assert!(!scout.bloqueia_controle());
+    }
+
+    #[test]
+    fn closing_with_f10_while_holding_a_button_waits_for_release() {
+        let mut scout = Scout::new();
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        assert!(scout.painel_aberto());
+        // F10 fechou neste frame (`atualizar_atalho`), com A apertado
+        scout.painel_aberto = false;
+        scout.aplicar_controle(controle(botao::A), true);
         assert!(scout.bloqueia_controle());
         scout.aplicar_controle(controle(0), false);
         assert!(!scout.bloqueia_controle());
