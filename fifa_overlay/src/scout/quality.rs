@@ -478,6 +478,97 @@ pub fn estimar_missao(pedido: &PedidoMissao) -> EstimativaMissao {
 }
 
 // ---------------------------------------------------------------------
+// Valor de mercado e salário estimados (branch `claude/relatorio-ficha`,
+// 2026-10-01; salário recalibrado em 2026-10-03)
+// ---------------------------------------------------------------------
+//
+// O FIFA não grava valor nem salário dos jogadores: calcula na hora, ao
+// abrir a tela do jogador. O save só tem os contratos do PRÓPRIO elenco
+// (`career_playercontract`). O Relatório mostra uma ESTIMATIVA do Olheiro,
+// a partir do que ele revelou (meio das faixas) e da idade; o teto de
+// gastos da busca usa a mesma conta com os valores reais.
+// - valor = 3 M × 1,2^(Overall − 70) × idade × margem de crescimento,
+//   goleiro × 0,8 (Overall 80, 27 anos ≈ 18,6 M; 90 ≈ 115 M; 60 ≈ 0,5 M);
+// - salário semanal: calibrado com os contratos reais do elenco do Felipe
+//   (2026-10-03): Overall 70 ≈ 20 mil, 80 ≈ 120 mil, 87 ≈ 240 mil,
+//   90 ≈ 300 mil. Sobe ~19,6% por ponto até 80 e ~9,6% depois.
+
+/// Multiplicador de valor pela idade.
+fn fator_idade(idade: u8) -> f64 {
+    match idade {
+        0..=21 => 1.3,
+        22..=25 => 1.15,
+        26..=29 => 1.0,
+        30..=31 => 0.7,
+        32..=33 => 0.45,
+        _ => 0.25,
+    }
+}
+
+/// Arredonda para um número "de mercado": 100 mil acima de 1 M, 5 mil abaixo.
+fn arredondar_mercado(valor: f64) -> i64 {
+    let passo = if valor >= 1_000_000.0 { 100_000.0 } else { 5_000.0 };
+    let v = ((valor / passo).round() * passo) as i64;
+    v.max(10_000)
+}
+
+/// Valor de mercado estimado (mesma unidade do orçamento).
+pub fn valor_estimado(overall: u8, potencial: u8, idade: u8, goleiro: bool) -> i64 {
+    let base = 3_000_000.0 * 1.2f64.powi(i32::from(overall) - 70);
+    let margem = 1.0 + (f64::from(potencial.saturating_sub(overall)) * 0.04).min(0.8);
+    let posicao = if goleiro { 0.8 } else { 1.0 };
+    arredondar_mercado(base * fator_idade(idade) * margem * posicao)
+}
+
+/// Salário semanal estimado.
+pub fn salario_estimado(overall: u8) -> i64 {
+    let delta = i32::from(overall) - 70;
+    let base = if delta <= 10 {
+        20_000.0 * 1.196f64.powi(delta)
+    } else {
+        120_000.0 * 1.096f64.powi(delta - 10)
+    };
+    let passo = if base >= 10_000.0 { 1_000.0 } else { 100.0 };
+    (((base / passo).round() * passo) as i64).max(500)
+}
+
+/// Quanto o Olheiro já sabe de um jogador que apareceu no Relatório
+/// parcial (pedido do Felipe, 2026-10-01): primeiro o mercado (valor e
+/// contrato), depois a expectativa de salário, por fim os atributos.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Observacao {
+    /// Só Overall/Potencial, valor e contrato.
+    SoMercado,
+    /// + expectativa de salário.
+    MercadoESalario,
+    /// Tudo o que a Qualidade permite (atributos inclusive).
+    #[default]
+    Completa,
+}
+
+/// Quanto do progresso da Missão (0–1) depois de o jogador aparecer o
+/// Olheiro leva para saber o salário e para observar os atributos.
+const MATURACAO_SALARIO: f32 = 0.08;
+const MATURACAO_ATRIBUTOS: f32 = 0.18;
+
+/// Etapa de observação do `indice`-ésimo jogador (ordem de descoberta)
+/// com o progresso `fracao` da Missão. Missão concluída: tudo.
+pub fn observacao(fracao: f32, indice: usize, alvo: usize, concluida: bool) -> Observacao {
+    if concluida || alvo == 0 {
+        return Observacao::Completa;
+    }
+    let apareceu = indice as f32 / alvo as f32;
+    let tempo = fracao.clamp(0.0, 1.0) - apareceu;
+    if fracao >= 1.0 || tempo >= MATURACAO_ATRIBUTOS {
+        Observacao::Completa
+    } else if tempo >= MATURACAO_SALARIO {
+        Observacao::MercadoESalario
+    } else {
+        Observacao::SoMercado
+    }
+}
+
+// ---------------------------------------------------------------------
 // Relatório parcial e Missão contínua (Story 2.10)
 // ---------------------------------------------------------------------
 
@@ -1545,5 +1636,33 @@ mod tests {
         let com_dominante = ordem_de_observacao(Funcao::MeioCampo, &[Atributo::Drible], Some(PosicaoAlvo::Volante));
         assert_eq!(com_dominante.first(), Some(&Atributo::Drible));
         assert_eq!(relevancia(TipoMissao::Tatica, 70, 80, &[80, 90]), 85, "média dos critérios de perfil");
+    }
+
+    #[test]
+    fn estimated_value_and_wage_follow_overall_age_and_growth() {
+        let v80 = valor_estimado(80, 80, 27, false);
+        assert!((15_000_000..30_000_000).contains(&v80), "{v80}");
+        assert!(valor_estimado(90, 90, 27, false) > 100_000_000);
+        assert!(valor_estimado(60, 60, 27, false) < 1_000_000);
+        assert!(valor_estimado(75, 88, 19, false) > valor_estimado(75, 75, 27, false), "jovem com potencial vale mais");
+        assert!(valor_estimado(80, 80, 34, false) < valor_estimado(80, 80, 27, false), "veterano vale menos");
+        assert!(valor_estimado(80, 80, 27, true) < v80, "goleiro um pouco abaixo");
+        assert_eq!(v80 % 100_000, 0, "arredondado");
+        // salário: calibrado nos contratos reais do elenco do Felipe
+        for (overall, real) in [(70u8, 20_000i64), (80, 120_000), (87, 240_000), (90, 300_000)] {
+            let estimado = salario_estimado(overall);
+            assert!((estimado - real).abs() * 100 <= real * 15, "{overall}: {estimado} vs {real}");
+        }
+        assert!(salario_estimado(40) >= 500);
+    }
+
+    #[test]
+    fn a_player_shows_market_first_then_wage_then_attributes() {
+        // 3º de 10: aparece com ~20% do progresso
+        assert_eq!(observacao(0.21, 2, 10, false), Observacao::SoMercado);
+        assert_eq!(observacao(0.30, 2, 10, false), Observacao::MercadoESalario);
+        assert_eq!(observacao(0.40, 2, 10, false), Observacao::Completa);
+        assert_eq!(observacao(0.21, 2, 10, true), Observacao::Completa, "concluída: tudo");
+        assert_eq!(observacao(1.0, 9, 10, false), Observacao::Completa, "no prazo: tudo");
     }
 }

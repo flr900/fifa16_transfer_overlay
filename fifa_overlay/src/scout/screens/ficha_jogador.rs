@@ -282,6 +282,8 @@ mod tests {
             nacao_id: 54,
             nacao: "Brazil".to_string(),
             clube: String::new(),
+            contrato_ate: None,
+            observacao: Default::default(),
             overall: FaixaAtributo { min: 70, max: 74 },
             potencial: FaixaAtributo { min: 80, max: 84 },
             atributos: Vec::new(),

@@ -38,6 +38,10 @@ pub struct CareerSnapshot {
     pub tecnico: String,
     /// SHA-256 da identidade do save (AD-11): nome do arquivo de estado.
     pub id_save: String,
+    /// Data gravada no save que o jogo carregou (ver
+    /// `save_repo::read_saved_date`): o Scout desfaz o que foi feito
+    /// depois dela ao ativar a carreira.
+    pub data_do_save: Date,
 }
 
 /// De onde vem o estado da carreira. Em produção é o `save_repo`; nos
@@ -108,6 +112,7 @@ impl CareerSource for SaveRepoSource {
                 .trim()
                 .to_string(),
             id_save: identidade.hash(),
+            data_do_save: save_repo::read_saved_date()?,
         })
     }
 }
@@ -329,6 +334,8 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         nacao_id: jogador.nacionalidade,
         nacao: nacao.map(|n| n.nome.clone()).unwrap_or_else(|| "Outros".to_string()),
         clube: jogador.clube.clone(),
+        contrato_ate: jogador.clube_id.map(|_| jogador.contrato_ate),
+        observacao: Default::default(),
         overall: quality::faixa_revelada(jogador.overall, precisao, quality::semente(id, pid, 1)),
         potencial: quality::faixa_revelada(jogador.potencial, precisao, quality::semente(id, pid, 2)),
         atributos,

@@ -1203,6 +1203,15 @@ pub fn read_career_identity() -> Result<CareerIdentity, SaveRepoError> {
     with_live(|live| Ok(live.save.identity.clone()))
 }
 
+/// Data (`GJUr.currdate`) gravada no save que o jogo carregou — o ponto
+/// para onde o Scout "volta no tempo" se o jogador sair sem salvar e
+/// carregar de novo. Não é a data viva: logo depois do load a data viva
+/// ainda mostra o dia anterior (sessão 6). Trazido da branch
+/// `claude/relatorio-ficha` (2026-10-01).
+pub fn read_saved_date() -> Result<Date, SaveRepoError> {
+    with_live(|live| Ok(live.save.saved_date))
+}
+
 /// SHA-256 (hex minúsculo) de `startdate|firstname|surname|clubteamid`
 /// (AD-11) — nome do arquivo de estado do Scout para esta carreira.
 #[allow(dead_code)] // o Scout usa `read_career_identity().hash()` (uma leitura só)

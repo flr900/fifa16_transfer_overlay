@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn a_hired_olheiro_says_what_he_is_doing() {
-        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Elite };
+        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Elite, contratado_em: None };
         let livre = OlheiroContratado { olheiro: olheiro.clone(), em_missao: false, missao: None, relatorio_atual: None, relatorios: 2 };
         assert_eq!(texto_status(&livre), "Disponível");
         assert!(texto_missao(&livre).starts_with("Livre"));

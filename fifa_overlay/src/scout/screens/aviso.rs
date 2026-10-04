@@ -53,6 +53,15 @@ pub fn textos(aviso: &TipoAviso) -> (String, String, [f32; 4]) {
             "F10 abre o painel.".to_string(),
             theme::ACCENT_PRIMARY,
         ),
+        TipoAviso::VoltouNoTempo { data, desfeitos } => (
+            format!("Scout voltou para {}", formatar_data(*data)),
+            format!(
+                "O save carregado é de antes: {} {} pelo Scout depois dele.",
+                desfeitos,
+                if *desfeitos == 1 { "item feito foi desfeito" } else { "itens feitos foram desfeitos" }
+            ),
+            theme::WARNING,
+        ),
         TipoAviso::BuscaFalhou => (
             "A busca de uma Missão falhou.".to_string(),
             "Ela roda de novo quando o painel abrir.".to_string(),
@@ -122,6 +131,7 @@ mod tests {
             data_atual: Date(20260701),
             tecnico: "Senhor Manager".to_string(),
             id_save: String::new(),
+            data_do_save: Date(20260701),
         });
         assert_eq!(textos(&pronta).1, "Senhor Manager · 01/07/2026 · F10 abre o painel.");
         assert_eq!(textos(&TipoAviso::Injetado).0, "Central de Scout ativa");

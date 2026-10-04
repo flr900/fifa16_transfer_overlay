@@ -580,6 +580,8 @@ mod tests {
             nacao_id: 54,
             nacao: "Brazil".to_string(),
             clube: "Clube".to_string(),
+            contrato_ate: None,
+            observacao: Default::default(),
             overall: faixa(overall.0, overall.1),
             potencial: faixa(80, 84),
             atributos: atributos.iter().map(|&a| AtributoRevelado { atributo: a, valor: faixa(70, 72) }).collect(),

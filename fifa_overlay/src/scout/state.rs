@@ -71,6 +71,9 @@ pub enum TipoAviso {
     Carregando,
     Pronta(CareerSnapshot),
     Falhou,
+    /// O jogo voltou para um save anterior: o Scout desfez o que tinha sido
+    /// feito depois dele.
+    VoltouNoTempo { data: Date, desfeitos: usize },
     /// Uma Missão terminou a busca e o Relatório está pronto (Story 2.4).
     RelatorioPronto { tipo: quality::TipoMissao, jogadores: usize },
     /// Apareceram jogadores novos num Relatório (Story 2.10).
@@ -174,6 +177,10 @@ pub struct Olheiro {
     pub id: Uuid,
     pub especializacao: Especializacao,
     pub tier: Tier,
+    /// Data da carreira na contratação (para "voltar no tempo" se o jogo
+    /// for recarregado sem salvar). `None` em arquivos antigos.
+    #[serde(default)]
+    pub contratado_em: Option<Date>,
 }
 
 /// Uma das 12 combinações Especialização × Tier à venda (FR-2). Sem
@@ -621,6 +628,10 @@ pub struct Missao {
     /// buscar os jogadores do bloco novo.
     #[serde(default)]
     pub blocos_buscados: u16,
+    /// Renovações: `(data da renovação, prazo anterior)` — para desfazer
+    /// uma renovação se o jogo for recarregado sem salvar.
+    #[serde(default)]
+    pub renovacoes: Vec<(Date, Date)>,
 }
 
 fn um_bloco() -> u16 {
@@ -673,6 +684,7 @@ impl Missao {
             continua: false,
             blocos: 1,
             blocos_buscados: 0,
+            renovacoes: Vec::new(),
         }
     }
 }
@@ -696,6 +708,14 @@ pub struct JogadorEncontrado {
     pub nacao_id: u16,
     pub nacao: String,
     pub clube: String,
+    /// Ano de fim do contrato (dado do save, não revelado por faixa).
+    /// `None` em Relatórios antigos ou sem clube.
+    #[serde(default)]
+    pub contrato_ate: Option<u16>,
+    /// Quanto o Olheiro já sabe dele agora (Relatório parcial). Não vai
+    /// para o arquivo: é calculado pela data ao montar a lista.
+    #[serde(skip)]
+    pub observacao: quality::Observacao,
     pub overall: FaixaAtributo,
     pub potencial: FaixaAtributo,
     /// Na ordem em que o Olheiro observou (a função do jogador primeiro).
@@ -736,6 +756,36 @@ impl JogadorEncontrado {
     pub fn valor_visto(&self, atributo: Atributo) -> Option<f32> {
         self.atributo(atributo).map(|f| (f32::from(f.min) + f32::from(f.max)) * 0.5)
     }
+
+    pub fn goleiro(&self) -> bool {
+        crate::save_repo::funcao_da_posicao(self.posicao) == Funcao::Goleiro
+    }
+
+    /// Valor de mercado estimado pelo Olheiro (o save não guarda valor):
+    /// a partir do meio das faixas reveladas e da idade.
+    pub fn valor_estimado(&self) -> i64 {
+        quality::valor_estimado(meio_da_faixa(self.overall), meio_da_faixa(self.potencial), self.idade, self.goleiro())
+    }
+
+    /// Salário semanal estimado.
+    pub fn salario_estimado(&self) -> i64 {
+        quality::salario_estimado(meio_da_faixa(self.overall))
+    }
+
+    /// O Olheiro já tem a expectativa de salário?
+    pub fn salario_conhecido(&self) -> bool {
+        self.observacao != quality::Observacao::SoMercado
+    }
+
+    /// O Olheiro já observou os atributos?
+    pub fn atributos_observados(&self) -> bool {
+        self.observacao == quality::Observacao::Completa
+    }
+}
+
+/// Meio de uma faixa revelada (arredondado para baixo).
+pub fn meio_da_faixa(faixa: FaixaAtributo) -> u8 {
+    u8::try_from((u16::from(faixa.min) + u16::from(faixa.max)) / 2).unwrap_or(faixa.min)
 }
 
 /// Um jogador do elenco do técnico (seletor de elenco, Stories 3.2/3.3).
@@ -1234,6 +1284,7 @@ impl ScoutState {
             self.ativar_save(snapshot.id_save.clone());
             self.data_progresso = Some(snapshot.data_atual);
             self.avisar(TipoAviso::Pronta(snapshot.clone()));
+            self.voltar_no_tempo(snapshot.data_do_save);
             // Carreira ficou pronta COM o painel aberto: vale como a
             // abertura (AD-8) — senão a Missão vencida esperaria fechar e
             // abrir de novo.
@@ -1370,6 +1421,10 @@ impl ScoutState {
             id: Uuid::new_v4(),
             especializacao: contratacao.especializacao,
             tier: contratacao.tier,
+            contratado_em: match &self.status {
+                CarreiraStatus::Pronta(c) => Some(c.data_atual),
+                _ => None,
+            },
         };
         let novo = olheiro.clone();
         match self.comprar(contratacao.custo, move |dados| dados.olheiros.push(novo)) {
@@ -1825,6 +1880,7 @@ impl ScoutState {
             continua: previa.rascunho.continua,
             blocos: 1,
             blocos_buscados: 0,
+            renovacoes: Vec::new(),
         };
         let nova = missao.clone();
         match self.comprar(estimativa.custo, move |dados| dados.missoes.push(nova)) {
@@ -1888,6 +1944,91 @@ impl ScoutState {
                 })
                 .collect()
         })
+    }
+
+    // -----------------------------------------------------------------
+    // Voltar no tempo (bug relatado pelo Felipe em 2026-10-01; trazido da
+    // branch `claude/relatorio-ficha`)
+    // -----------------------------------------------------------------
+
+    /// A carreira acabou de ficar ativa a partir de um save gravado em
+    /// `data_do_save`. Se o jogador avançou, usou o Scout e saiu SEM
+    /// salvar, o jogo voltou para esse save — o orçamento gasto volta
+    /// sozinho (estava só na memória), mas o arquivo do Scout não. Aqui o
+    /// Scout volta junto: desfaz tudo o que aconteceu DEPOIS da data do
+    /// save (o que foi feito no mesmo dia fica — não há como saber se foi
+    /// antes ou depois de salvar):
+    /// - Olheiros contratados depois → saem;
+    /// - Missões encomendadas depois → saem, com os Relatórios;
+    /// - renovações de Missão contínua depois → desfeitas;
+    /// - Missão de prazo fixo concluída num prazo depois → volta a correr
+    ///   (o Relatório parcial continua, revelado pela data).
+    ///
+    /// Devolve quantas coisas foram desfeitas.
+    fn voltar_no_tempo(&mut self, data_do_save: Date) -> usize {
+        let Some(estado) = self.estado_ativo().cloned() else {
+            return 0;
+        };
+        let depois = |d: Date| d > data_do_save;
+        let desfeitos = estado.ler(|dados| {
+            dados.olheiros.iter().filter(|o| o.contratado_em.is_some_and(depois)).count()
+                + dados
+                    .missoes
+                    .iter()
+                    .filter(|m| {
+                        depois(m.criada_em)
+                            || m.renovacoes.iter().any(|(d, _)| depois(*d))
+                            || (!m.continua && m.status == StatusMissao::Concluida && depois(m.prazo_estimado))
+                    })
+                    .count()
+        });
+        if desfeitos == 0 {
+            return 0;
+        }
+        let resultado = estado.mutar(|dados| {
+            dados.olheiros.retain(|o| !o.contratado_em.is_some_and(depois));
+            let removidas: Vec<Uuid> = dados.missoes.iter().filter(|m| depois(m.criada_em)).map(|m| m.id).collect();
+            dados.missoes.retain(|m| !removidas.contains(&m.id));
+            dados.relatorios.retain(|r| !removidas.contains(&r.missao_id));
+            for m in dados.missoes.iter_mut() {
+                // renovações desfeitas da mais nova para a mais antiga
+                while let Some(&(quando, prazo_anterior)) = m.renovacoes.last() {
+                    if !depois(quando) {
+                        break;
+                    }
+                    m.renovacoes.pop();
+                    m.blocos = m.blocos.saturating_sub(1).max(1);
+                    m.blocos_buscados = m.blocos_buscados.min(m.blocos);
+                    m.prazo_estimado = prazo_anterior;
+                }
+                if !m.continua && m.status == StatusMissao::Concluida && depois(m.prazo_estimado) {
+                    m.status = StatusMissao::Pendente;
+                }
+            }
+            // Relatórios com mais jogadores que os blocos pagos agora
+            for r in dados.relatorios.iter_mut() {
+                if let Some(m) = dados.missoes.iter().find(|m| m.id == r.missao_id) {
+                    r.jogadores.truncate(m.alvo_total());
+                    let teto = u16::try_from(r.jogadores.len()).unwrap_or(u16::MAX);
+                    r.vistos = r.vistos.min(teto);
+                    r.notificados = r.notificados.min(teto);
+                }
+            }
+        });
+        match resultado {
+            Ok(()) => {
+                tracing::info!(
+                    "[scout::state] Save de {} carregado: {desfeitos} item(ns) do Scout feitos depois dele foram desfeitos.",
+                    data_do_save.0
+                );
+                self.avisar(TipoAviso::VoltouNoTempo { data: data_do_save, desfeitos });
+                desfeitos
+            }
+            Err(err) => {
+                tracing::warn!("[scout::state] Não deu para voltar o Scout para {}: {err:?}", data_do_save.0);
+                0
+            }
+        }
     }
 
     // -----------------------------------------------------------------
@@ -2078,6 +2219,20 @@ impl ScoutState {
         let mut relatorio = r.clone();
         relatorio.jogadores.truncate(revelados);
         let parcial = missao.as_ref().is_some_and(|m| m.status != StatusMissao::Concluida);
+        // Relatório parcial: quem acabou de aparecer ainda está sendo
+        // observado (mercado → salário → atributos).
+        if let (Some(m), Some(hoje)) = (missao.as_ref(), hoje) {
+            let fracao = progresso_missao(m.criada_em, m.prazo_estimado, hoje).fracao;
+            for (indice, j) in relatorio.jogadores.iter_mut().enumerate() {
+                j.observacao = quality::observacao(fracao, indice, m.alvo_total(), !parcial);
+                if !j.atributos_observados() {
+                    j.atributos.clear();
+                    j.similaridade = None;
+                    j.fit = None;
+                    j.variacao_overall = None;
+                }
+            }
+        }
         RelatorioNaLista {
             novo: revelados > usize::from(r.vistos) || (!r.aberto && revelados > 0),
             previstos: missao.as_ref().map_or(revelados, Missao::alvo_total),
@@ -2299,6 +2454,7 @@ impl ScoutState {
         let hoje = self.data_progresso.unwrap_or(missao.prazo_estimado);
         let resultado = self.comprar(Self::custo_do_bloco(&missao), move |dados| {
             if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
+                m.renovacoes.push((hoje, m.prazo_estimado));
                 m.blocos = m.blocos.saturating_add(1);
                 // o bloco novo começa hoje (ou no fim do anterior, se antes)
                 let inicio = hoje.max(m.prazo_estimado);
@@ -2528,6 +2684,7 @@ mod tests {
             data_atual: Date(20260703),
             tecnico: "Senhor Manager".to_string(),
             id_save: ID_A.to_string(),
+            data_do_save: Date(20260703),
         }
     }
 
@@ -2939,8 +3096,8 @@ mod tests {
         assert!(st.olheiros_contratados().is_empty());
         assert_eq!(st.orcamento(), Some(63_999_988));
 
-        let ocupado = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente };
-        let livre = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Generalista, tier: Tier::Junior };
+        let ocupado = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente, contratado_em: None };
+        let livre = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Generalista, tier: Tier::Junior, contratado_em: None };
         let missao = |olheiro: &Olheiro, status| Missao::de_teste(olheiro.id, status);
         let missoes = vec![missao(&ocupado, StatusMissao::Pendente), missao(&livre, StatusMissao::Concluida)];
         let (o1, o2) = (ocupado.clone(), livre.clone());
@@ -3094,7 +3251,7 @@ mod tests {
     }
 
     fn olheiro(especializacao: Especializacao, tier: Tier) -> Olheiro {
-        Olheiro { id: Uuid::new_v4(), especializacao, tier }
+        Olheiro { id: Uuid::new_v4(), especializacao, tier, contratado_em: None }
     }
 
     #[test]
@@ -3989,5 +4146,53 @@ mod tests {
         let json = serde_json::to_string(&FiltrosMissao { fit_posicional: Some(PosicaoAlvo::MeiaAtacante), ..FiltrosMissao::default() })
             .expect("serializa");
         assert!(json.contains("\"fit_posicional\":\"meia_atacante\""), "{json}");
+    }
+
+    #[test]
+    fn loading_an_older_save_rolls_the_scout_back_to_its_date() {
+        let pasta = PastaTemporaria::nova();
+        // feito ANTES do save (02/07): fica
+        let mut antigo = olheiro(Especializacao::Generalista, Tier::Junior);
+        antigo.contratado_em = Some(Date(20260702));
+        let mut missao_antiga = missao_com_prazo(&antigo, 20260702, 20260712);
+        missao_antiga.status = StatusMissao::Concluida;
+        missao_antiga.blocos_buscados = 1;
+        let mut continua = missao_com_prazo(&antigo, 20260601, 20260731);
+        continua.continua = true;
+        continua.blocos = 2;
+        continua.blocos_buscados = 2;
+        continua.renovacoes = vec![(Date(20260705), Date(20260701))];
+        // feito DEPOIS do save: sai
+        let mut novo = olheiro(Especializacao::Tatico, Tier::Elite);
+        novo.contratado_em = Some(Date(20260706));
+        let missao_nova = missao_com_prazo(&novo, 20260706, 20260716);
+        let (missao_antiga_id, nova_id, continua_id) = (missao_antiga.id, missao_nova.id, continua.id);
+
+        // o jogo recarregou o save de 03/07 (a data viva ainda mostra 02/07)
+        let (mut st, _busca, _) = estado_com_datas(&pasta, &[20260702], vec![missao_antiga, continua, missao_nova], &antigo);
+        let (n, r1, r2) = (novo.clone(), Relatorio::de_teste(missao_antiga_id), Relatorio::de_teste(nova_id));
+        EstadoPersistido::carregar(Some(&pasta.0), ID_A)
+            .mutar(move |d| {
+                d.olheiros.push(n);
+                d.relatorios = vec![r1, r2];
+            })
+            .expect("gravou");
+        st.ao_abrir_painel();
+
+        let (olheiros, missoes, relatorios) = st
+            .estado_ativo()
+            .map(|e| e.ler(|d| (d.olheiros.clone(), d.missoes.clone(), d.relatorios.clone())))
+            .expect("estado");
+        assert_eq!(olheiros.iter().map(|o| o.id).collect::<Vec<_>>(), vec![antigo.id], "o Olheiro de 06/07 saiu");
+        assert!(missoes.iter().all(|m| m.id != nova_id), "a MissÃ£o de 06/07 saiu");
+        assert!(relatorios.iter().all(|r| r.missao_id != nova_id), "com o RelatÃ³rio");
+        let antiga = missoes.iter().find(|m| m.id == missao_antiga_id).expect("antiga");
+        assert_eq!(antiga.status, StatusMissao::Pendente, "concluÃ­da em 12/07 volta a correr");
+        let c = missoes.iter().find(|m| m.id == continua_id).expect("contÃ­nua");
+        assert_eq!((c.blocos, c.prazo_estimado, c.renovacoes.len()), (1, Date(20260701), 0), "renovaÃ§Ã£o de 05/07 desfeita");
+        assert!(matches!(st.aviso_visivel(Instant::now()), Some(TipoAviso::VoltouNoTempo { desfeitos: 4, .. })));
+
+        // nada mais a desfazer: reativar nÃ£o mexe
+        assert_eq!(st.voltar_no_tempo(Date(20260703)), 0);
     }
 }

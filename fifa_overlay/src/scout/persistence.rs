@@ -391,7 +391,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ids_and_dates_follow_ad12() {
-        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente };
+        let olheiro = Olheiro { id: Uuid::new_v4(), especializacao: Especializacao::Tatico, tier: Tier::Experiente, contratado_em: None };
         let missao = Missao {
             criada_em: Date(20260703),
             prazo_estimado: Date(20261015),
@@ -473,7 +473,7 @@ pub(crate) mod tests {
         let _ = fs::write(pasta.0.join(format!("{ID_A}.json")), conteudo);
 
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        let esperado = Olheiro { id, especializacao: Especializacao::CacadorDeJovens, tier: Tier::Elite };
+        let esperado = Olheiro { id, especializacao: Especializacao::CacadorDeJovens, tier: Tier::Elite, contratado_em: None };
         assert_eq!(estado.ler(|d| d.olheiros.clone()), vec![esperado]);
         assert_eq!(estado.ler(|d| d.ui_prefs.clone()), UiPrefs::default());
         assert_eq!(estado.ler(|d| d.versao), VERSAO_FORMATO, "versão ausente = atual");
