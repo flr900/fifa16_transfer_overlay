@@ -43,7 +43,6 @@ pub const MSG_SEM_CARREIRA: &str =
 pub const MSG_ERRO_LEITURA: &str = "Não foi possível ler o save ativo.";
 pub const MSG_LOCALIZANDO: &str = "Localizando carreira…";
 const MSG_LOCALIZANDO_DETALHE: &str = "Isso leva cerca de 15 segundos na primeira abertura.";
-const MSG_ABA_VAZIA: &str = "Esta aba ainda não tem conteúdo.";
 
 /// Desenha o painel inteiro (só é chamada com o painel aberto).
 pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: &mut ScoutState) {
@@ -535,18 +534,13 @@ fn conteudo_da_tela(
                     *pedido = Some(Pedido::AbrirRelatorio(id));
                 }
             }
-            Aba::Sonar => sonar::render(ui, fonts),
+            Aba::Sonar => sonar::render(ui, fonts, state),
         },
     }
 }
 
 fn mensagem(ui: &Ui, fonts: Option<&Fonts>, texto: &str) {
     com_fonte(ui, fonts.map(|f| f.body), || ui.text_wrapped(texto));
-}
-
-/// Placeholder neutro das abas que ainda não têm conteúdo.
-fn aba_vazia(ui: &Ui, fonts: Option<&Fonts>) {
-    com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_ABA_VAZIA));
 }
 
 /// `63999988` → `63.999.988` (separador de milhar brasileiro).

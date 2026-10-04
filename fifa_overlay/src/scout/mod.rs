@@ -22,6 +22,7 @@
 //! (`bloqueia_controle`, aplicado em `crate::gamepad`): sem isso o B ou o
 //! START que fechou o painel chegaria ao FIFA ao ser solto.
 
+pub mod cobertura;
 pub mod minifaces;
 pub mod persistence;
 pub mod quality;

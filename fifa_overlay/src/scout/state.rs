@@ -45,6 +45,7 @@ use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, RitmoTrabalho};
 pub use super::quality::{Atalho, NivelEquipe, Perfil, PosicaoAlvo};
 
+use super::cobertura::Cobertura;
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::Densidade;
 use super::persistence::{self, EstadoPersistido};
@@ -1034,6 +1035,8 @@ pub struct ScoutState {
     data_avisos: Option<Date>,
     /// Falha da última renovação/encerramento, por Missão (Story 2.10).
     erros_missao: HashMap<Uuid, ErroCompra>,
+    /// País escolhido no Sonar para o resumo (Story 4.2; não persiste).
+    pais_sonar: Option<u16>,
     /// Elenco do técnico, lido em background e marcado com a carreira dona
     /// (Stories 3.2/3.3).
     tarefa_elenco: AsyncTask<(String, Arc<Vec<JogadorElenco>>)>,
@@ -1103,6 +1106,7 @@ impl ScoutState {
             vendo_arquivados: false,
             data_avisos: None,
             erros_missao: HashMap::new(),
+            pais_sonar: None,
             tarefa_elenco: AsyncTask::new(),
             ficha: None,
             comparacao: None,
@@ -1162,6 +1166,7 @@ impl ScoutState {
         self.cancelar_nova_missao();
         self.fechar_relatorio();
         self.vendo_arquivados = false;
+        self.pais_sonar = None;
         self.troca_de_aba_pendente = None;
     }
 
@@ -1634,9 +1639,8 @@ impl ScoutState {
 
     /// Nações do mapa, ou `None` enquanto carregam (a primeira chamada
     /// dispara a leitura em background; uma falha é tentada de novo). O
-    /// filtro geográfico passou a usar as ligas (`listar_ligas`); o
-    /// cartograma de nações fica para o Sonar (Épico 4).
-    #[allow(dead_code)] // Sonar (Épico 4)
+    /// filtro geográfico passou a usar as ligas (`listar_ligas`); o Sonar
+    /// só usa as nações para nomear países de Missões antigas.
     pub fn nacoes(&self) -> Option<Arc<Vec<Nacao>>> {
         match self.tarefa_nacoes.poll() {
             TaskState::Done(nacoes) => Some(nacoes),
@@ -2501,6 +2505,23 @@ impl ScoutState {
 
     pub fn ver_arquivados(&mut self, arquivados: bool) {
         self.vendo_arquivados = arquivados;
+    }
+
+    /// Cobertura do Sonar (Story 4.1), recalculada das Missões gravadas da
+    /// carreira pronta; `ligas` são as de `listar_ligas` (país de cada
+    /// liga). `None` sem carreira pronta.
+    pub fn cobertura(&self, ligas: &[Liga]) -> Option<Cobertura> {
+        let estado = self.estado_ativo()?;
+        Some(estado.ler(|dados| Cobertura::de(&dados.missoes, ligas)))
+    }
+
+    /// País do resumo do Sonar (Story 4.2).
+    pub fn pais_sonar(&self) -> Option<u16> {
+        self.pais_sonar
+    }
+
+    pub fn escolher_pais_sonar(&mut self, pais: u16) {
+        self.pais_sonar = Some(pais);
     }
 
     /// Pode arquivar: já foi aberto ao menos uma vez e a Missão terminou
@@ -3921,6 +3942,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_sonar_counts_archived_reports_as_coverage_and_forgets_the_country_on_close() {
+        use crate::scout::cobertura::{Contagem, EstadoPais};
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let mut vencida = missao_com_prazo(&o, 20260701, 20260710);
+        vencida.filtros.paises_dos_clubes = vec![54];
+        // criada até a data do save (03/07): depois dela o Scout voltaria no tempo
+        let mut ativa = missao_com_prazo(&o, 20260701, 20260801);
+        ativa.filtros.paises_dos_clubes = vec![52];
+        let id_vencida = vencida.id;
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![vencida, ativa], &o);
+        assert!(st.cobertura(&[]).is_none(), "sem carreira pronta");
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+
+        let lista = st.relatorios(false);
+        let id = lista.iter().find(|r| r.relatorio.missao_id == id_vencida).expect("Relatório da vencida").relatorio.id;
+        st.abrir_relatorio(id);
+        st.fechar_relatorio();
+        assert!(st.arquivar_relatorio(id));
+        let cobertura = st.cobertura(&esperar_ligas(&st)).expect("carreira pronta");
+        assert_eq!(cobertura.estado(54), EstadoPais::MissaoConcluida, "arquivar não apaga cobertura");
+        assert_eq!(cobertura.estado(52), EstadoPais::MissaoAtiva);
+        assert_eq!(cobertura.contagem(54), Contagem { ativas: 0, concluidas: 1 });
+
+        st.escolher_pais_sonar(54);
+        assert_eq!(st.pais_sonar(), Some(54));
+        st.ao_fechar_painel();
+        assert_eq!(st.pais_sonar(), None);
     }
 
     #[test]
