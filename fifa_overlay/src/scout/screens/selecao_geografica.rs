@@ -1,15 +1,22 @@
 //! Filtro geográfico (Story 2.9, refeito em 2026-10-03 a pedido do
-//! Felipe): tela cheia sobre o formulário Nova Missão, com tudo numa tela
-//! só — continente → país → ligas — em vez do mapa de nacionalidades.
+//! Felipe): **onde o jogador joga** — continente → país → liga —, só com
+//! países que têm ligas com clubes no save (ver `save_repo::Liga`).
 //!
-//! O filtro é **onde o jogador joga**: só aparecem países que têm ligas
-//! com clubes no save, e as ligas de cada um (ver `save_repo::Liga`). Cada
-//! nível é um botão que entra/sai da seleção, sem tecla modificadora:
-//! "Europa inteira", "Todas" (o país inteiro) ou uma liga. O que já está
-//! incluído por um nível acima aparece marcado e não muda ao ser ativado
-//! (o tooltip diz por quê). "Confirmar" ou B volta ao formulário; o resumo
-//! do rodapé (Qualidade, precisão, custo, prazo) muda ao vivo: quanto
-//! mais amplo, menos preciso (FR4).
+//! Em níveis, para a tela não ficar poluída (segundo pedido do mesmo
+//! dia):
+//! - **Continentes** (o filtro rápido): uma linha por continente, com
+//!   "Inteiro" (entra/sai da seleção) e, ao lado, "Países e ligas ›", que
+//!   desce para escolher só parte dele;
+//! - **um continente**: uma linha por país, com "Inteiro" e "Ligas ›", e as
+//!   ligas sem país ("Clubes da UEFA") como linhas próprias;
+//! - **um país**: uma linha por liga.
+//!
+//! Cada linha tem as mesmas colunas (nome, botão de escolha, botão de
+//! descer, resumo), alinhadas ao centro da linha. O que já está incluído
+//! por um nível acima aparece marcado e não muda ao ser ativado (o tooltip
+//! diz por quê). B sobe um nível; no topo, volta ao formulário, como
+//! "Confirmar". O resumo do rodapé (Qualidade, precisão, custo, prazo)
+//! muda ao vivo: quanto mais amplo, menos preciso (FR4).
 
 use imgui::{StyleColor, Ui};
 
@@ -17,14 +24,16 @@ use super::componentes::{self, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, nova_missao};
 use crate::scout::quality::AmplitudeGeografica;
-use crate::scout::state::{Carga, Confederacao, FiltrosMissao, Liga, ScoutState};
+use crate::scout::state::{Carga, Confederacao, FiltrosMissao, FocoGeografico, Liga, ScoutState};
 
-const LARGURA_PAIS: f32 = 190.0;
-const RECUO: f32 = 16.0;
+const COLUNA_NOME: f32 = 240.0;
+const LARGURA_ESCOLHA: f32 = 130.0;
+const LARGURA_DESCER: f32 = 200.0;
 
 pub const MSG_TODOS: &str = "Nada escolhido: o Olheiro procura em todas as ligas.";
 pub const MSG_LENDO: &str = "Lendo as ligas do save…";
 pub const MSG_ERRO: &str = "Não foi possível ler as ligas do save ativo.";
+const MSG_DICA: &str = "Filtro rápido por continente. Para escolher só alguns países ou ligas, use \"Países e ligas ›\".";
 
 /// Nome da amplitude para o jogador.
 pub fn nome_amplitude(amplitude: AmplitudeGeografica) -> &'static str {
@@ -66,12 +75,57 @@ pub fn resumo_geografia(filtros: &FiltrosMissao, ligas: &[Liga]) -> String {
     }
 }
 
+/// Países de um continente (com o nome), em ordem alfabética.
+pub fn paises_do_continente(ligas: &[Liga], continente: Confederacao) -> Vec<(u16, String)> {
+    let mut paises: Vec<(u16, String)> = ligas
+        .iter()
+        .filter(|l| l.continente == continente)
+        .filter_map(|l| Some((l.pais?, l.pais_nome.clone())))
+        .collect();
+    paises.sort_by(|a, b| a.1.cmp(&b.1));
+    paises.dedup();
+    paises
+}
+
+/// Resumo de um continente na lista rápida: "inteiro", "2 escolhidos de
+/// 12 países" ou "12 países · 28 ligas".
+pub fn resumo_continente(ligas: &[Liga], continente: Confederacao, filtros: &FiltrosMissao) -> String {
+    let paises = paises_do_continente(ligas, continente);
+    let do_continente: Vec<&Liga> = ligas.iter().filter(|l| l.continente == continente).collect();
+    if filtros.continentes.contains(&continente) {
+        return format!("inteiro: {} países, {} ligas", paises.len(), do_continente.len());
+    }
+    let escolhidos = paises.iter().filter(|(p, _)| filtros.paises_dos_clubes.contains(p)).count()
+        + do_continente.iter().filter(|l| filtros.ligas.contains(&l.id)).count();
+    if escolhidos > 0 {
+        format!("{escolhidos} escolhido(s) aqui dentro")
+    } else {
+        format!("{} países · {} ligas", paises.len(), do_continente.len())
+    }
+}
+
+/// Resumo de um país: "inteiro", "escolhidas: Premier League" ou "4 ligas".
+pub fn resumo_pais(ligas: &[Liga], pais: u16, filtros: &FiltrosMissao, incluido: bool) -> String {
+    let do_pais: Vec<&Liga> = ligas.iter().filter(|l| l.pais == Some(pais)).collect();
+    if incluido || filtros.paises_dos_clubes.contains(&pais) {
+        return format!("inteiro: {} liga(s)", do_pais.len());
+    }
+    let escolhidas: Vec<String> = do_pais.iter().filter(|l| filtros.ligas.contains(&l.id)).map(|l| nome_curto(l)).collect();
+    if escolhidas.is_empty() {
+        format!("{} liga(s)", do_pais.len())
+    } else {
+        format!("escolhidas: {}", escolhidas.join(", "))
+    }
+}
+
 /// O que foi ativado na tela neste frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Clique {
     Continente(Confederacao),
     Pais(u16),
     Liga(u32),
+    Focar(FocoGeografico),
+    Subir,
 }
 
 /// Desenha o painel; `true` = voltar ao formulário.
@@ -80,6 +134,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
         return true;
     };
     let filtros = previa.rascunho.filtros.clone();
+    let foco = state.foco_geografico();
     let mut voltar = false;
     let mut limpar = false;
     let mut reler = false;
@@ -106,7 +161,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
             _ => MSG_TODOS.to_string(),
         };
         com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, &linha));
-        ui.dummy([0.0, theme::ESPACO_1]);
+        ui.dummy([0.0, theme::ESPACO_2]);
 
         match &ligas {
             Carga::Carregando => com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_LENDO)),
@@ -117,8 +172,12 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
                 }
             }
             Carga::Pronto(ligas) => {
-                ui.child_window("##arvore").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
-                    clique = arvore(ui, fonts, ligas, &filtros);
+                ui.child_window("##niveis").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
+                    clique = match foco {
+                        FocoGeografico::Continentes => nivel_continentes(ui, fonts, ligas, &filtros),
+                        FocoGeografico::Continente(c) => nivel_continente(ui, fonts, ligas, &filtros, c),
+                        FocoGeografico::Pais(c, p) => nivel_pais(ui, fonts, ligas, &filtros, c, p),
+                    };
                 });
             }
         }
@@ -135,6 +194,10 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
         Some(Clique::Continente(c)) => state.alternar_continente_da_missao(c),
         Some(Clique::Pais(p)) => state.alternar_pais_do_clube_da_missao(p),
         Some(Clique::Liga(id)) => state.alternar_liga_da_missao(id),
+        Some(Clique::Focar(f)) => state.focar_geografia(f),
+        Some(Clique::Subir) => {
+            state.subir_foco_geografico();
+        }
         None => {}
     }
     if limpar {
@@ -146,152 +209,153 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> bool {
     voltar
 }
 
-/// Países de um continente (com o nome), em ordem alfabética.
-pub fn paises_do_continente(ligas: &[Liga], continente: Confederacao) -> Vec<(u16, String)> {
-    let mut paises: Vec<(u16, String)> = ligas
-        .iter()
-        .filter(|l| l.continente == continente)
-        .filter_map(|l| Some((l.pais?, l.pais_nome.clone())))
-        .collect();
-    paises.sort_by(|a, b| a.1.cmp(&b.1));
-    paises.dedup();
-    paises
-}
-
-/// Continente → países → ligas. Devolve o que foi ativado.
-fn arvore(ui: &Ui, fonts: Option<&Fonts>, ligas: &[Liga], filtros: &FiltrosMissao) -> Option<Clique> {
+/// Lista rápida: um continente por linha.
+fn nivel_continentes(ui: &Ui, fonts: Option<&Fonts>, ligas: &[Liga], filtros: &FiltrosMissao) -> Option<Clique> {
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, MSG_DICA));
+    ui.dummy([0.0, theme::ESPACO_1]);
     let mut clique = None;
     for continente in Confederacao::TODAS {
-        let do_continente: Vec<&Liga> = ligas.iter().filter(|l| l.continente == continente).collect();
-        if do_continente.is_empty() {
+        if !ligas.iter().any(|l| l.continente == continente) {
             continue;
         }
         let _id = ui.push_id(continente.nome());
-        let continente_todo = filtros.continentes.contains(&continente);
-        ui.dummy([0.0, theme::ESPACO_2]);
-        let inicio = ui.cursor_pos();
-        com_fonte(ui, fonts.map(|f| f.heading), || {
-            ui.set_cursor_pos([inicio[0], inicio[1] + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
-            ui.text(continente.nome());
-        });
-        ui.same_line_with_spacing(inicio[0] + LARGURA_PAIS, 0.0);
-        ui.set_cursor_pos([ui.cursor_pos()[0], inicio[1]]);
-        let rotulo = format!("{} inteira", continente.nome());
-        if chip(ui, fonts, &rotulo, continente_todo, None) {
+        let escolha = Escolha { texto: "Inteiro", escolhido: filtros.continentes.contains(&continente), incluido_por: None };
+        let (escolheu, desceu) =
+            linha(ui, fonts, continente.nome(), escolha, Some("Países e ligas ›"), &resumo_continente(ligas, continente, filtros));
+        if escolheu {
             clique = Some(Clique::Continente(continente));
         }
-
-        for (pais, nome) in paises_do_continente(ligas, continente) {
-            let _p = ui.push_id_usize(usize::from(pais));
-            let pais_todo = filtros.paises_dos_clubes.contains(&pais);
-            let incluido_por = continente_todo.then(|| format!("{} inteira", continente.nome()));
-            let ligas_do_pais: Vec<&Liga> = do_continente.iter().copied().filter(|l| l.pais == Some(pais)).collect();
-            if let Some(c) = linha_de_pais(ui, fonts, &nome, pais, pais_todo, incluido_por.as_deref(), &ligas_do_pais, filtros) {
-                clique = Some(c);
-            }
-        }
-        let sem_pais: Vec<&Liga> = do_continente.iter().copied().filter(|l| l.pais.is_none()).collect();
-        if !sem_pais.is_empty() {
-            let incluido_por = continente_todo.then(|| format!("{} inteira", continente.nome()));
-            if let Some(c) = linha_de_ligas(ui, fonts, "Outros clubes", &sem_pais, incluido_por.as_deref(), filtros) {
-                clique = Some(c);
-            }
+        if desceu {
+            clique = Some(Clique::Focar(FocoGeografico::Continente(continente)));
         }
     }
     clique
 }
 
-/// Uma linha de país: nome, "Todas" (o país inteiro) e as ligas.
-#[allow(clippy::too_many_arguments)]
-fn linha_de_pais(
-    ui: &Ui,
-    fonts: Option<&Fonts>,
-    nome: &str,
-    pais: u16,
-    pais_todo: bool,
-    incluido_por: Option<&str>,
-    ligas: &[&Liga],
-    filtros: &FiltrosMissao,
-) -> Option<Clique> {
-    let mut clique = None;
-    let inicio = ui.cursor_pos();
-    rotulo_de_linha(ui, fonts, nome, inicio);
-    ui.same_line_with_spacing(inicio[0] + LARGURA_PAIS, 0.0);
-    ui.set_cursor_pos([ui.cursor_pos()[0], inicio[1]]);
-    if chip(ui, fonts, "Todas", pais_todo || incluido_por.is_some(), incluido_por) {
-        clique = Some(Clique::Pais(pais));
+/// Um continente: o continente inteiro, os países e as ligas sem país.
+fn nivel_continente(ui: &Ui, fonts: Option<&Fonts>, ligas: &[Liga], filtros: &FiltrosMissao, continente: Confederacao) -> Option<Clique> {
+    let mut clique = cabecalho_nivel(ui, fonts, "‹ Continentes", continente.nome());
+    let inteiro = filtros.continentes.contains(&continente);
+    let escolha = Escolha { texto: "Inteiro", escolhido: inteiro, incluido_por: None };
+    if linha(ui, fonts, &format!("{} inteira", continente.nome()), escolha, None, "").0 {
+        clique = Some(Clique::Continente(continente));
     }
-    let nome_pais = format!("{nome} inteiro");
-    let incluida_por = incluido_por.or(pais_todo.then_some(nome_pais.as_str()));
-    if let Some(c) = chips_de_ligas(ui, fonts, ligas, incluida_por, filtros, inicio[0] + LARGURA_PAIS) {
-        clique = Some(c);
-    }
-    clique
-}
-
-/// Uma linha só de ligas (as "Outros clubes" de um continente).
-fn linha_de_ligas(ui: &Ui, fonts: Option<&Fonts>, nome: &str, ligas: &[&Liga], incluida_por: Option<&str>, filtros: &FiltrosMissao) -> Option<Clique> {
-    let inicio = ui.cursor_pos();
-    rotulo_de_linha(ui, fonts, nome, inicio);
-    // âncora sem largura: o primeiro chip entra com o mesmo espaço dos outros
-    ui.set_cursor_pos([inicio[0] + LARGURA_PAIS - theme::ESPACO_2, inicio[1]]);
-    ui.dummy([0.0, theme::ALVO_MINIMO]);
-    chips_de_ligas(ui, fonts, ligas, incluida_por, filtros, inicio[0] + LARGURA_PAIS)
-}
-
-fn rotulo_de_linha(ui: &Ui, fonts: Option<&Fonts>, nome: &str, inicio: [f32; 2]) {
-    com_fonte(ui, fonts.map(|f| f.body), || {
-        ui.set_cursor_pos([inicio[0] + RECUO, inicio[1] + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
-        ui.text_colored(theme::TEXT_SECONDARY, nome);
-    });
-}
-
-/// Os chips das ligas na mesma linha, quebrando para a linha de baixo
-/// (alinhados em `x_recuo`) quando não cabem.
-fn chips_de_ligas(
-    ui: &Ui,
-    fonts: Option<&Fonts>,
-    ligas: &[&Liga],
-    incluida_por: Option<&str>,
-    filtros: &FiltrosMissao,
-    x_recuo: f32,
-) -> Option<Clique> {
-    let mut clique = None;
-    let direita = ui.window_content_region_max()[0];
-    for liga in ligas {
-        let nome = nome_curto(liga);
-        let largura = largura_do_chip(ui, fonts, &nome);
-        ui.same_line_with_spacing(0.0, theme::ESPACO_2);
-        if ui.cursor_pos()[0] + largura > direita {
-            ui.new_line();
-            ui.set_cursor_pos([x_recuo, ui.cursor_pos()[1]]);
+    separador(ui);
+    let por = format!("{} inteira", continente.nome());
+    let incluido_por = inteiro.then_some(por.as_str());
+    for (pais, nome) in paises_do_continente(ligas, continente) {
+        let _id = ui.push_id_usize(usize::from(pais));
+        let escolha = Escolha { texto: "Inteiro", escolhido: inteiro || filtros.paises_dos_clubes.contains(&pais), incluido_por };
+        let resumo = resumo_pais(ligas, pais, filtros, inteiro);
+        let (escolheu, desceu) = linha(ui, fonts, &nome, escolha, Some("Ligas ›"), &resumo);
+        if escolheu {
+            clique = Some(Clique::Pais(pais));
         }
+        if desceu {
+            clique = Some(Clique::Focar(FocoGeografico::Pais(continente, pais)));
+        }
+    }
+    for liga in ligas.iter().filter(|l| l.continente == continente && l.pais.is_none()) {
         let _id = ui.push_id_usize(liga.id as usize);
-        let escolhida = incluida_por.is_some() || filtros.ligas.contains(&liga.id);
-        if chip(ui, fonts, &nome, escolhida, incluida_por) {
+        let escolha = Escolha { texto: "Incluir", escolhido: inteiro || filtros.ligas.contains(&liga.id), incluido_por };
+        if linha(ui, fonts, &liga.nome, escolha, None, &format!("{} clubes, sem país definido", liga.clubes)).0 {
             clique = Some(Clique::Liga(liga.id));
         }
-        if ui.is_item_hovered() && incluida_por.is_none() {
-            ui.tooltip_text(format!("{} · {} clubes · divisão {}", liga.nome, liga.clubes, liga.nivel));
+    }
+    clique
+}
+
+/// Um país: o país inteiro e as ligas dele.
+fn nivel_pais(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    ligas: &[Liga],
+    filtros: &FiltrosMissao,
+    continente: Confederacao,
+    pais: u16,
+) -> Option<Clique> {
+    let nome = ligas.iter().find(|l| l.pais == Some(pais)).map_or_else(String::new, |l| l.pais_nome.clone());
+    let voltar = format!("‹ {}", continente.nome());
+    let mut clique = cabecalho_nivel(ui, fonts, &voltar, &nome);
+    let por_continente = filtros.continentes.contains(&continente).then(|| format!("{} inteira", continente.nome()));
+    let pais_todo = filtros.paises_dos_clubes.contains(&pais);
+    let escolha = Escolha { texto: "Inteiro", escolhido: pais_todo || por_continente.is_some(), incluido_por: por_continente.as_deref() };
+    if linha(ui, fonts, &format!("{nome} inteiro"), escolha, None, "").0 {
+        clique = Some(Clique::Pais(pais));
+    }
+    separador(ui);
+    let por_pais = format!("{nome} inteiro");
+    let incluido_por = por_continente.as_deref().or(pais_todo.then_some(por_pais.as_str()));
+    for liga in ligas.iter().filter(|l| l.pais == Some(pais)) {
+        let _id = ui.push_id_usize(liga.id as usize);
+        let escolha = Escolha { texto: "Incluir", escolhido: incluido_por.is_some() || filtros.ligas.contains(&liga.id), incluido_por };
+        let detalhe = format!("divisão {} · {} clubes", liga.nivel, liga.clubes);
+        if linha(ui, fonts, &nome_curto(liga), escolha, None, &detalhe).0 {
+            clique = Some(Clique::Liga(liga.id));
         }
     }
     clique
 }
 
-fn largura_do_chip(ui: &Ui, fonts: Option<&Fonts>, texto: &str) -> f32 {
-    com_fonte(ui, fonts.map(|f| f.heading), || ui.calc_text_size(texto)[0]) + theme::ESPACO_4 * 2.0
+/// "‹ Voltar" de nível + título do nível.
+fn cabecalho_nivel(ui: &Ui, fonts: Option<&Fonts>, voltar: &str, titulo: &str) -> Option<Clique> {
+    let clicou = componentes::botao(ui, fonts, voltar, EstiloBotao::Secundario, true);
+    ui.same_line_with_spacing(0.0, theme::ESPACO_4);
+    let y = ui.cursor_pos()[1];
+    com_fonte(ui, fonts.map(|f| f.heading), || {
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
+        ui.text(titulo);
+    });
+    ui.dummy([0.0, theme::ESPACO_1]);
+    clicou.then_some(Clique::Subir)
 }
 
-/// Botão que entra/sai da seleção. `incluido_por`: já está dentro de um
-/// nível acima (aparece marcado; o tooltip diz qual).
-fn chip(ui: &Ui, fonts: Option<&Fonts>, texto: &str, escolhido: bool, incluido_por: Option<&str>) -> bool {
-    let estilo = if escolhido { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
-    let largura = largura_do_chip(ui, fonts, texto);
-    let ativou = componentes::botao_com_largura(ui, fonts, texto, estilo, true, Some(largura));
-    if let (Some(por), true) = (incluido_por, ui.is_item_hovered()) {
+fn separador(ui: &Ui) {
+    let _c = ui.push_style_color(StyleColor::Separator, theme::BORDER_HAIRLINE_SUBTLE);
+    ui.separator();
+    ui.dummy([0.0, theme::ESPACO_1]);
+}
+
+/// O botão de escolha de uma linha.
+struct Escolha<'a> {
+    texto: &'a str,
+    escolhido: bool,
+    /// Já incluído por um nível acima (aparece marcado; o tooltip diz qual).
+    incluido_por: Option<&'a str>,
+}
+
+/// Uma linha com colunas fixas — nome | escolha | descer | resumo —, tudo
+/// centrado na altura da linha. Devolve (escolheu, desceu).
+fn linha(ui: &Ui, fonts: Option<&Fonts>, nome: &str, escolha: Escolha<'_>, descer: Option<&str>, resumo: &str) -> (bool, bool) {
+    let [x0, y0] = ui.cursor_pos();
+    let centro = |altura: f32| y0 + ((theme::ALVO_MINIMO - altura) * 0.5).max(0.0);
+    com_fonte(ui, fonts.map(|f| f.body), || {
+        ui.set_cursor_pos([x0, centro(ui.text_line_height())]);
+        ui.text(nome);
+    });
+
+    ui.set_cursor_pos([x0 + COLUNA_NOME, y0]);
+    let estilo = if escolha.escolhido { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+    let escolheu = componentes::botao_com_largura(ui, fonts, escolha.texto, estilo, true, Some(LARGURA_ESCOLHA));
+    if let (Some(por), true) = (escolha.incluido_por, ui.is_item_hovered()) {
         ui.tooltip_text(format!("Já incluído: {por}"));
     }
-    ativou
+    let mut x = x0 + COLUNA_NOME + LARGURA_ESCOLHA + theme::ESPACO_2;
+    let mut desceu = false;
+    if let Some(texto) = descer {
+        ui.set_cursor_pos([x, y0]);
+        desceu = componentes::botao_com_largura(ui, fonts, texto, EstiloBotao::Secundario, true, Some(LARGURA_DESCER));
+        x += LARGURA_DESCER + theme::ESPACO_2;
+    }
+    if !resumo.is_empty() {
+        com_fonte(ui, fonts.map(|f| f.meta), || {
+            ui.set_cursor_pos([x + theme::ESPACO_2, centro(ui.text_line_height())]);
+            ui.text_colored(theme::TEXT_SECONDARY, resumo);
+        });
+    }
+    ui.set_cursor_pos([x0, y0 + theme::ALVO_MINIMO + theme::ESPACO_2]);
+    ui.dummy([0.0, 0.0]);
+    (escolheu && escolha.incluido_por.is_none(), desceu)
 }
 
 #[cfg(test)]
@@ -350,5 +414,19 @@ mod tests {
         f.ligas = vec![13];
         assert_eq!(resumo_geografia(&f, &l), "Premier League (England)");
         assert!(!MSG_TODOS.contains('!') && !MSG_ERRO.contains('!'));
+    }
+
+    #[test]
+    fn level_summaries_say_what_is_chosen_inside() {
+        let l = ligas();
+        let mut f = FiltrosMissao::default();
+        assert_eq!(resumo_continente(&l, Confederacao::Europa, &f), "2 países · 4 ligas");
+        assert_eq!(resumo_pais(&l, 14, &f, false), "2 liga(s)");
+        f.ligas = vec![13];
+        assert_eq!(resumo_continente(&l, Confederacao::Europa, &f), "1 escolhido(s) aqui dentro");
+        assert_eq!(resumo_pais(&l, 14, &f, false), "escolhidas: Premier League");
+        f.continentes = vec![Confederacao::Europa];
+        assert_eq!(resumo_continente(&l, Confederacao::Europa, &f), "inteiro: 2 países, 4 ligas");
+        assert_eq!(resumo_pais(&l, 14, &f, true), "inteiro: 2 liga(s)");
     }
 }

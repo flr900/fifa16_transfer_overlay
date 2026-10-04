@@ -211,6 +211,11 @@ mod tests {
             pe: None,
             similaridade: None,
             fit: None,
+            variacao_overall: None,
+            ritmo_ataque: None,
+            ritmo_defesa: None,
+            estrelas_drible: None,
+            pe_fraco: None,
         }
     }
 

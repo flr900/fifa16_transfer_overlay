@@ -95,8 +95,10 @@ static INTER: &[u8] = include_bytes!("../../../assets/fonts/Inter-Variable.ttf")
 const CONSOLAS: &str = r"C:\Windows\Fonts\consola.ttf";
 
 /// Latin-1 (acentos do português) + pontuação geral (travessões, aspas
-/// curvas, reticências `…`) + `€`. Termina em 0, como o ImGui exige.
-static FAIXAS_DE_GLIFOS: [u32; 7] = [0x0020, 0x00FF, 0x2010, 0x2027, 0x20AC, 0x20AC, 0];
+/// curvas, reticências `…`, setas simples `‹ ›`) + `€` + `≈` (valores
+/// aproximados do Relatório). Termina em 0, como o ImGui exige. Até
+/// 2026-10-03 `‹ ›` e `≈` ficavam de fora e saíam como "?".
+static FAIXAS_DE_GLIFOS: [u32; 9] = [0x0020, 0x00FF, 0x2010, 0x203A, 0x20AC, 0x20AC, 0x2248, 0x2248, 0];
 
 /// Fontes já registradas no atlas do ImGui, uma por papel tipográfico.
 #[derive(Debug, Clone, Copy)]

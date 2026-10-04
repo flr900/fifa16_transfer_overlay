@@ -47,6 +47,31 @@ pub fn linha_bio(j: &JogadorEncontrado) -> String {
     partes.join(" · ")
 }
 
+/// "Ritmo alto/baixo · dribles 5/5 · pé fraco 4/5" (some em Relatórios de
+/// antes de 2026-10-03).
+pub fn linha_caracteristicas(j: &JogadorEncontrado) -> Option<String> {
+    let mut partes = Vec::new();
+    if let (Some(a), Some(d)) = (j.ritmo_ataque, j.ritmo_defesa) {
+        partes.push(format!("Ritmo {}/{}", a.nome().to_lowercase(), d.nome().to_lowercase()));
+    }
+    if let Some(e) = j.estrelas_drible {
+        partes.push(format!("dribles {e}/5"));
+    }
+    if let Some(e) = j.pe_fraco {
+        partes.push(format!("pé fraco {e}/5"));
+    }
+    (!partes.is_empty()).then(|| partes.join(" · "))
+}
+
+/// "OVR ≈ 72 (-2)": o Overall (meio da faixa revelada) mais a variação
+/// estimada na posição-alvo.
+pub fn texto_overall_no_alvo(j: &JogadorEncontrado) -> Option<String> {
+    let variacao = j.variacao_overall?;
+    let meio = (i16::from(j.overall.min) + i16::from(j.overall.max)) / 2;
+    let estimado = (meio + i16::from(variacao)).clamp(1, 99);
+    Some(format!("OVR ≈ {estimado} ({})", super::relatorio::texto_variacao(variacao)))
+}
+
 /// "Observados: 15 de 28 atributos".
 pub fn texto_observados(ficha: &FichaAberta) -> String {
     let eixos = radar::eixos(&ficha.jogador, None);
@@ -123,10 +148,17 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, ficha: &FichaAb
     // posição nativa + Fit Posicional (Story 3.5)
     let [w_bio, h_bio] = texto_em(ui, fonts.map(|f| f.body), &dl, [x, y], theme::TEXT_SECONDARY, &linha_bio(j));
     if let Some(alvo) = perfil.alvo {
-        let texto = format!("FIT {}", texto_fit(alvo, j.fit, perfil.aproximado));
+        let texto = format!("FIT {}", texto_fit(alvo, j.fit, j.variacao_overall, perfil.aproximado));
         desenhar_badge_texto(ui, fonts, &dl, &badge_fit(), &texto, [x + w_bio + theme::ESPACO_2, y], h_bio);
     }
     y += h_bio;
+    if let Some(caracteristicas) = linha_caracteristicas(j) {
+        y += texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::TEXT_SECONDARY, &caracteristicas)[1];
+    }
+    if let (Some(alvo), Some(texto)) = (perfil.alvo, texto_overall_no_alvo(j)) {
+        let linha = format!("Como {}: {texto} (estimativa)", alvo.nome());
+        y += texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::ACCENT_PRIMARY, &linha)[1];
+    }
     let clube = if j.clube.is_empty() { "Sem clube" } else { j.clube.as_str() };
     y += texto_em(ui, fonts.map(|f| f.body), &dl, [x, y], theme::TEXT_SECONDARY, &format!("{} · {clube}", j.nacao))[1]
         + theme::ESPACO_1;
@@ -246,7 +278,7 @@ mod tests {
             player_id: 1,
             nome: "A".to_string(),
             idade: 22,
-            posicao: 17,
+            posicao: 18,
             nacao_id: 54,
             nacao: "Brazil".to_string(),
             clube: String::new(),
@@ -256,10 +288,23 @@ mod tests {
             pe: Some(Pe::Esquerdo),
             similaridade: None,
             fit: None,
+            variacao_overall: None,
+            ritmo_ataque: None,
+            ritmo_defesa: None,
+            estrelas_drible: None,
+            pe_fraco: None,
         };
         assert_eq!(linha_bio(&j), "22 anos · MEI · Pé esquerdo");
         j.pe = None;
         assert_eq!(linha_bio(&j), "22 anos · MEI", "Relatório de antes da Story 3.1");
+        assert_eq!(linha_caracteristicas(&j), None);
+        j.ritmo_ataque = Some(crate::scout::state::RitmoTrabalho::Alto);
+        j.ritmo_defesa = Some(crate::scout::state::RitmoTrabalho::Baixo);
+        j.estrelas_drible = Some(5);
+        j.pe_fraco = Some(4);
+        assert_eq!(linha_caracteristicas(&j).as_deref(), Some("Ritmo alto/baixo · dribles 5/5 · pé fraco 4/5"));
+        j.variacao_overall = Some(-2);
+        assert_eq!(texto_overall_no_alvo(&j).as_deref(), Some("OVR ≈ 70 (-2)"));
         assert!(!ROTULO_COMPARAR.contains('!'));
     }
 }

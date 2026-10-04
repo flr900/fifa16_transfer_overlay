@@ -49,6 +49,18 @@ so that creating a Missão is faster and the filters match how I scout.
 - [x] Tests — `cargo test`: 217 passed (leagues from the real save with Latin-1 names and the special leagues; age/contract/geography/multi-attribute filters; breadth rules; ideal filters match each Especialização; toggles absorb lower levels; old JSON loads; hired Olheiro destinations; B from the form back to step 1).
 - [ ] Manual check in game (Felipe).
 
+## Second round (Felipe, 2026-10-03, build `3.6-v2`)
+
+Requests: work-rate filter (attack and defence: high/medium/low), dribble stars, preferred foot (left/right/two-footed), Completa should return more players than Rápida, league chips misaligned and too much on one screen (continent quick filter with a drill-down button next to it), right-backs shown as "ZAD" and full-backs coming into position filters, and an estimate of how much Overall changes in the Fit target.
+
+- **Position codes were shifted by one** (the table had no SW): the FIFA enum is 0 GK, 1 SW, 2 RWB, 3 RB, 4 RCB, 5 CB, 6 LCB, 7 LB, 8 LWB, 9–11 DM, 12 RM, 13–15 CM, 16 LM, 17–19 AM, 20–22 F, 23 RW, 24–26 ST, 27 LW (checked: CB and ST most common; Mbappé 25 with 27 second). Fixed `nome_posicao`, `funcao_da_posicao`, `perfil_da_posicao`, `posicoes_nativas`.
+- **Fit excludes trivial moves** (`PosicaoAlvo::posicoes_excluidas`): any defensive target excludes the whole back line (no full-back for right-back or centre-back); wide midfield/winger targets exclude all wide players; others exclude their own position. Thresholds re-calibrated (pass rate ~17–19% defence/striker/CDM, ~28% CM, ~45–58% attacking and wide).
+- **Overall change estimate:** `quality::variacao_overall` = target-profile rating − native-profile rating (from revealed values), stored in `JogadorEncontrado.variacao_overall`; shown as "VOL ≈96% (-2)" and in the Ficha as "Como Volante: OVR ≈ 72 (-2) (estimativa)".
+- **Work rate** (`BqFe`/`boFm`: 0 medium, 1 low, 2 high — Mbappé high/low), **dribble stars** (`BAPc` 0–4 → 1–5), **weak foot** (`aOBn` 1–5). Filters: work rate in attack and in defence (multi-select chips, none = any), dribble stars range, foot Qualquer/Direito/Esquerdo/Ambidestro (two-footed = weak foot ≥ 4 stars, ~23% of the save). Shown in the Ficha ("Ritmo alto/baixo · dribles 5/5 · pé fraco 4/5").
+- **Rápida vs Completa rebalanced:** Rápida 7–11 players, Completa 28–44 (was 17–25 vs 6–10). A test checks that the Rápidas that fit in one Completa's time always bring fewer names.
+- **Geographic screen in levels:** continents (quick filter: "Inteiro" + "Países e ligas ›"), then a continent's countries ("Inteiro" + "Ligas ›", plus country-less leagues), then a country's leagues. Fixed columns, everything vertically centred. B goes up one level.
+- **Glyphs:** `‹ ›` and `≈` were missing from the font atlas (rendered as "?").
+
 ## Dev Agent Record
 
 ### Agent Model Used
@@ -58,3 +70,4 @@ claude-opus-5-5
 ### Change Log
 
 - 2026-10-03: post-test adjustments implemented (build `3.6-v1`).
+- 2026-10-03: second round (build `3.6-v2`).

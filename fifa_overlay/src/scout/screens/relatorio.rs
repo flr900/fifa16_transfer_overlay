@@ -31,7 +31,7 @@ const LARGURA_NACAO: f32 = 120.0;
 const LARGURA_CLUBE: f32 = 150.0;
 const LARGURA_NUMERO: f32 = 62.0;
 const LARGURA_ATRIBUTO: f32 = 58.0;
-const LARGURA_FIT: f32 = 96.0;
+const LARGURA_FIT: f32 = 140.0;
 const LARGURA_SIMILARIDADE: f32 = 70.0;
 const ALTURA_LINHA: f32 = 30.0;
 const LARGURA_CARD: f32 = 380.0;
@@ -72,9 +72,23 @@ pub fn texto_percentual(valor: Option<u8>, aproximado: bool) -> String {
     }
 }
 
-/// "VOL ≈96%" (posição-alvo e força do fit).
-pub fn texto_fit(alvo: PosicaoAlvo, forca: Option<u8>, aproximado: bool) -> String {
-    format!("{} {}", alvo.sigla(), texto_percentual(forca, aproximado))
+/// "VOL ≈96% (-2)": posição-alvo, força do fit e, se houver, a variação
+/// estimada do Overall jogando lá.
+pub fn texto_fit(alvo: PosicaoAlvo, forca: Option<u8>, variacao: Option<i8>, aproximado: bool) -> String {
+    let base = format!("{} {}", alvo.sigla(), texto_percentual(forca, aproximado));
+    match variacao {
+        Some(v) => format!("{base} ({})", texto_variacao(v)),
+        None => base,
+    }
+}
+
+/// "+3", "-2", "±0".
+pub fn texto_variacao(variacao: i8) -> String {
+    if variacao == 0 {
+        "±0".to_string()
+    } else {
+        format!("{variacao:+}")
+    }
 }
 
 /// O que a Missão pediu de perfil (decide as colunas extras).
@@ -303,7 +317,7 @@ fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorE
 
     let clube = if j.clube.is_empty() { "Sem clube" } else { j.clube.as_str() };
     // Fit Posicional: badge extra na linha da posição nativa (Story 3.5).
-    let fit = perfil.alvo.map(|alvo| format!("FIT {}", texto_fit(alvo, j.fit, perfil.aproximado)));
+    let fit = perfil.alvo.map(|alvo| format!("FIT {}", texto_fit(alvo, j.fit, j.variacao_overall, perfil.aproximado)));
     let largura_fit = fit.as_ref().map_or(0.0, |t| {
         com_fonte(ui, fonts.map(|f| f.badge), || ui.calc_text_size(t)[0]) + theme::ESPACO_2 * 3.0
     });
@@ -433,7 +447,9 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, jogadores: &[JogadorEncontrado], perfi
     com_fonte(ui, fonts.map(|f| f.meta), || {
         ui.table_next_row_with_flags(TableRowFlags::HEADERS);
         let explicar = |n: &str| match n {
-            "Fit" => perfil.alvo.map(|a| format!("Fit Posicional: força do perfil dele como {}", a.nome())),
+            "Fit" => perfil
+                .alvo
+                .map(|a| format!("Fit Posicional: força do perfil dele como {} e, entre parênteses, quanto o Overall mudaria lá (estimativa)", a.nome())),
             "Sim." => perfil.referencia.as_ref().map(|r| format!("Similaridade com {r}")),
             _ => None,
         };
@@ -484,7 +500,7 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, jogadores: &[JogadorEncontrado], perfi
         celula_texto(ui, fonts, 2, nome_posicao(j.posicao), LARGURA_NUMERO);
         let mut coluna = 3;
         if let Some(alvo) = perfil.alvo {
-            celula_numero(ui, mono, coluna, &texto_fit(alvo, j.fit, perfil.aproximado), theme::ACCENT_PRIMARY);
+            celula_numero(ui, mono, coluna, &texto_fit(alvo, j.fit, j.variacao_overall, perfil.aproximado), theme::ACCENT_PRIMARY);
             coluna += 1;
         }
         if perfil.referencia.is_some() {
@@ -570,6 +586,11 @@ mod tests {
             pe: None,
             similaridade: None,
             fit: None,
+            variacao_overall: None,
+            ritmo_ataque: None,
+            ritmo_defesa: None,
+            estrelas_drible: None,
+            pe_fraco: None,
         }
     }
 
@@ -625,7 +646,10 @@ mod tests {
         assert_eq!(texto_percentual(Some(87), true), "≈87%");
         assert_eq!(texto_percentual(Some(87), false), "87%");
         assert_eq!(texto_percentual(None, true), "—");
-        assert_eq!(texto_fit(PosicaoAlvo::Volante, Some(96), false), "VOL 96%");
+        assert_eq!(texto_fit(PosicaoAlvo::Volante, Some(96), None, false), "VOL 96%");
+        assert_eq!(texto_fit(PosicaoAlvo::Volante, Some(96), Some(-2), true), "VOL ≈96% (-2)");
+        assert_eq!(texto_variacao(3), "+3");
+        assert_eq!(texto_variacao(0), "±0");
     }
 
     #[test]

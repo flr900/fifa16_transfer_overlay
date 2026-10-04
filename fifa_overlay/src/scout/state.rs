@@ -42,7 +42,7 @@ use uuid::Uuid;
 
 use crate::async_task::{AsyncTask, TaskState};
 use crate::save_repo::{Date, SaveRepoError};
-pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe};
+pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, RitmoTrabalho};
 pub use super::quality::PosicaoAlvo;
 
 use super::minifaces::{Minifaces, Rosto};
@@ -308,6 +308,17 @@ pub struct FiltrosMissao {
     pub paises_dos_clubes: Vec<u16>,
     #[serde(default)]
     pub ligas: Vec<u32>,
+    /// Ritmos de trabalho aceitos no ataque e na defesa (vazio = qualquer).
+    #[serde(default)]
+    pub ritmo_ataque: Vec<RitmoTrabalho>,
+    #[serde(default)]
+    pub ritmo_defesa: Vec<RitmoTrabalho>,
+    /// Estrelas de drible (1–5).
+    #[serde(default = "estrelas_padrao")]
+    pub estrelas_drible: FaixaAtributo,
+    /// Pé preferido; `None` = qualquer.
+    #[serde(default)]
+    pub pe: Option<FiltroPe>,
     /// Posição-alvo: só entram jogadores de OUTRA posição nativa cujo perfil
     /// serve nela (Story 3.4).
     #[serde(default)]
@@ -353,10 +364,41 @@ impl Default for FiltrosMissao {
             continentes: Vec::new(),
             paises_dos_clubes: Vec::new(),
             ligas: Vec::new(),
+            ritmo_ataque: Vec::new(),
+            ritmo_defesa: Vec::new(),
+            estrelas_drible: estrelas_padrao(),
+            pe: None,
             fit_posicional: None,
             referencia: None,
         }
     }
+}
+
+/// Filtro de pé (2026-10-03). "Ambidestro" = pé fraco com pelo menos
+/// `quality::PE_FRACO_AMBIDESTRO` estrelas, qualquer que seja o preferido.
+/// No JSON: `"direito"`, `"esquerdo"`, `"ambidestro"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FiltroPe {
+    Direito,
+    Esquerdo,
+    Ambidestro,
+}
+
+impl FiltroPe {
+    pub const TODOS: [FiltroPe; 3] = [FiltroPe::Direito, FiltroPe::Esquerdo, FiltroPe::Ambidestro];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            FiltroPe::Direito => "Direito",
+            FiltroPe::Esquerdo => "Esquerdo",
+            FiltroPe::Ambidestro => "Ambidestro",
+        }
+    }
+}
+
+fn estrelas_padrao() -> FaixaAtributo {
+    FaixaAtributo { min: quality::ESTRELAS_MENOR, max: quality::ESTRELAS_MAIOR }
 }
 
 impl FiltrosMissao {
@@ -402,6 +444,8 @@ pub enum CampoFaixa {
     IdadeMax,
     ContratoMin,
     ContratoMax,
+    DribleMin,
+    DribleMax,
 }
 
 impl CampoFaixa {
@@ -410,6 +454,7 @@ impl CampoFaixa {
         match self {
             CampoFaixa::IdadeMin | CampoFaixa::IdadeMax => (quality::IDADE_MENOR, quality::IDADE_MAIOR),
             CampoFaixa::ContratoMin | CampoFaixa::ContratoMax => (0, quality::CONTRATO_MAIOR),
+            CampoFaixa::DribleMin | CampoFaixa::DribleMax => (quality::ESTRELAS_MENOR, quality::ESTRELAS_MAIOR),
             _ => (FaixaAtributo::MENOR, FaixaAtributo::MAIOR),
         }
     }
@@ -666,6 +711,20 @@ pub struct JogadorEncontrado {
     /// Olheiro viu (Story 3.4).
     #[serde(default)]
     pub fit: Option<u8>,
+    /// Quanto o Overall mudaria na posição-alvo (estimativa, pelo que o
+    /// Olheiro viu; 2026-10-03).
+    #[serde(default)]
+    pub variacao_overall: Option<i8>,
+    /// Ritmos de trabalho (ataque, defesa), estrelas de drible e de pé
+    /// fraco (2026-10-03; `None` em Relatórios de antes).
+    #[serde(default)]
+    pub ritmo_ataque: Option<RitmoTrabalho>,
+    #[serde(default)]
+    pub ritmo_defesa: Option<RitmoTrabalho>,
+    #[serde(default)]
+    pub estrelas_drible: Option<u8>,
+    #[serde(default)]
+    pub pe_fraco: Option<u8>,
 }
 
 impl JogadorEncontrado {
@@ -871,6 +930,18 @@ pub struct ScoutState {
     /// Ligas com clubes da carreira (filtro geográfico), lidas em
     /// background e marcadas com a carreira dona.
     tarefa_ligas: AsyncTask<(String, Arc<Vec<Liga>>)>,
+    /// Nível aberto da árvore do filtro geográfico.
+    foco_geografico: FocoGeografico,
+}
+
+/// Nível aberto no filtro geográfico: a lista de continentes (o filtro
+/// rápido), os países de um continente ou as ligas de um país.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FocoGeografico {
+    #[default]
+    Continentes,
+    Continente(Confederacao),
+    Pais(Confederacao, u16),
 }
 
 impl ScoutState {
@@ -914,6 +985,7 @@ impl ScoutState {
             ficha: None,
             comparacao: None,
             tarefa_ligas: AsyncTask::new(),
+            foco_geografico: FocoGeografico::Continentes,
         }
     }
 
@@ -1419,6 +1491,8 @@ impl ScoutState {
             CampoFaixa::IdadeMax => &mut r.filtros.idade.max,
             CampoFaixa::ContratoMin => &mut r.filtros.contrato.min,
             CampoFaixa::ContratoMax => &mut r.filtros.contrato.max,
+            CampoFaixa::DribleMin => &mut r.filtros.estrelas_drible.min,
+            CampoFaixa::DribleMax => &mut r.filtros.estrelas_drible.max,
         };
         let (menor, maior) = campo.limites();
         let novo = (i32::from(*valor) + delta).clamp(i32::from(menor), i32::from(maior));
@@ -1554,6 +1628,51 @@ impl ScoutState {
         }
     }
 
+    /// Ritmo de trabalho entra/sai do filtro (`ataque` = de ataque).
+    pub fn alternar_ritmo_da_missao(&mut self, ataque: bool, ritmo: RitmoTrabalho) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            let lista = if ataque { &mut r.filtros.ritmo_ataque } else { &mut r.filtros.ritmo_defesa };
+            match lista.iter().position(|x| *x == ritmo) {
+                Some(i) => {
+                    lista.remove(i);
+                }
+                None => {
+                    lista.push(ritmo);
+                    lista.sort();
+                }
+            }
+            r.erro = None;
+        }
+    }
+
+    /// Pé preferido do filtro (`None` = qualquer).
+    pub fn definir_pe_da_missao(&mut self, pe: Option<FiltroPe>) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.pe = pe;
+            r.erro = None;
+        }
+    }
+
+    /// Onde a árvore do filtro geográfico está aberta.
+    pub fn foco_geografico(&self) -> FocoGeografico {
+        self.foco_geografico
+    }
+
+    pub fn focar_geografia(&mut self, foco: FocoGeografico) {
+        self.foco_geografico = foco;
+    }
+
+    /// B na árvore: sobe um nível. `false` = já estava no topo (a tela
+    /// fecha).
+    pub fn subir_foco_geografico(&mut self) -> bool {
+        self.foco_geografico = match self.foco_geografico {
+            FocoGeografico::Continentes => return false,
+            FocoGeografico::Continente(_) => FocoGeografico::Continentes,
+            FocoGeografico::Pais(c, _) => FocoGeografico::Continente(c),
+        };
+        true
+    }
+
     /// "Limpar": volta ao mundo todo.
     pub fn limpar_geografia_da_missao(&mut self) {
         if let Some(r) = self.rascunho_missao.as_mut() {
@@ -1658,6 +1777,8 @@ impl ScoutState {
             Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::IdadeMin })
         } else if !rascunho.filtros.contrato.valida() {
             Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::ContratoMin })
+        } else if !rascunho.filtros.estrelas_drible.valida() {
+            Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::DribleMin })
         } else {
             estimativa
                 .filter(|e| orcamento_atual < e.custo)

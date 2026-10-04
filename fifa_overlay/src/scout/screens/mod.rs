@@ -165,6 +165,9 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             None => {}
         },
         Some(Pedido::AbrirCampo(satelite)) => {
+            if satelite == Satelite::SelecaoGeografica {
+                state.focar_geografia(super::state::FocoGeografico::Continentes);
+            }
             nav.push(satelite);
         }
         Some(Pedido::FecharCampo) => nav.pop(),

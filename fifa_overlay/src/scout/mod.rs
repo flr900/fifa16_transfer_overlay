@@ -342,6 +342,11 @@ impl Scout {
                     Satelite::NovaMissao => self.state.cancelar_nova_missao(),
                     Satelite::Relatorio => self.state.fechar_relatorio(),
                     Satelite::FichaJogador => self.state.fechar_ficha(),
+                    // na árvore geográfica, B sobe um nível antes de sair
+                    Satelite::SelecaoGeografica if self.state.subir_foco_geografico() => {
+                        self.nav.pedir_foco();
+                        return;
+                    }
                     _ => {}
                 }
                 self.nav.pop();

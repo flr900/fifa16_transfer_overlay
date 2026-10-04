@@ -173,7 +173,7 @@ mod tests {
         for t in [explica_filtro, explica_comparar, MSG_LENDO, MSG_ERRO, MSG_VAZIO] {
             assert!(!t.contains('!'));
         }
-        let j = JogadorElenco { player_id: 1, nome: "A".to_string(), idade: 27, posicao: 24, overall: 84, potencial: 86, atributos: vec![50; 33] };
+        let j = JogadorElenco { player_id: 1, nome: "A".to_string(), idade: 27, posicao: 25, overall: 84, potencial: 86, atributos: vec![50; 33] };
         assert_eq!(detalhe(&j), "ATA · 27 anos · OVR 84 · POT 86");
     }
 }

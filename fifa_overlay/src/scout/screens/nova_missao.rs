@@ -26,13 +26,17 @@ use super::{com_fonte, formatar_data, formatar_milhar, olheiros};
 use crate::scout::quality::TipoMissao;
 use crate::scout::{ContextoSeletor, Satelite};
 use crate::scout::quality;
-use crate::scout::state::{Atributo, BloqueioMissao, Carga, CampoFaixa, ErroCompra, FaixaAtributo, ModoBusca, PreviaMissao, ScoutState};
+use crate::scout::state::{
+    Atributo, BloqueioMissao, Carga, CampoFaixa, ErroCompra, FaixaAtributo, FiltroPe, ModoBusca, PreviaMissao, RitmoTrabalho,
+    ScoutState,
+};
 
 const ALTURA_RODAPE: f32 = 176.0;
 const LARGURA_ROTULO: f32 = 170.0;
 const LARGURA_VALOR: f32 = 44.0;
 const LARGURA_MODO: f32 = 150.0;
 const LARGURA_VALOR_CAMPO: f32 = 320.0;
+const LARGURA_RITMO: f32 = 120.0;
 
 pub const MSG_SEM_OLHEIRO: &str = "Nenhum Olheiro disponível.";
 
@@ -87,6 +91,9 @@ pub fn texto_bloqueio(bloqueio: BloqueioMissao) -> String {
         BloqueioMissao::FaixaInvalida { campo: CampoFaixa::ContratoMin | CampoFaixa::ContratoMax } => {
             "O contrato mínimo não pode ser maior que o máximo.".to_string()
         }
+        BloqueioMissao::FaixaInvalida { campo: CampoFaixa::DribleMin | CampoFaixa::DribleMax } => {
+            "O mínimo de estrelas de drible não pode ser maior que o máximo.".to_string()
+        }
         BloqueioMissao::OrcamentoInsuficiente { faltam } => olheiros::texto_faltam(faltam),
     }
 }
@@ -116,8 +123,8 @@ pub fn texto_erro(erro: &ErroCompra) -> String {
 
 pub fn descricao_modo(modo: ModoBusca) -> &'static str {
     match modo {
-        ModoBusca::Rapida => "Mais nomes, Qualidade menor, termina antes.",
-        ModoBusca::Completa => "Menos nomes, Qualidade maior, leva mais tempo.",
+        ModoBusca::Rapida => "Resposta curta: poucos nomes, Qualidade menor, termina antes e custa menos.",
+        ModoBusca::Completa => "Varredura: muito mais nomes e Qualidade maior; leva mais tempo e custa mais.",
     }
 }
 
@@ -162,6 +169,14 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             if campo_painel(ui, fonts, "Atributos dominantes", &texto_atributos(&f.atributos_dominantes)) {
                 campo = Some(Satelite::CampoAtributo);
             }
+            divisor(ui);
+            campo_ritmo(ui, fonts, state, "Ritmo no ataque", true, &f.ritmo_ataque);
+            divisor(ui);
+            campo_ritmo(ui, fonts, state, "Ritmo na defesa", false, &f.ritmo_defesa);
+            divisor(ui);
+            campo_faixa(ui, fonts, state, "Dribles", f.estrelas_drible, CampoFaixa::DribleMin, CampoFaixa::DribleMax, "estrelas");
+            divisor(ui);
+            campo_pe(ui, fonts, state, f.pe);
             divisor(ui);
             if campo_painel(ui, fonts, "Fit Posicional", &super::campo_fit::texto_fit(previa.rascunho.filtros.fit_posicional)) {
                 campo = Some(Satelite::CampoFit);
@@ -330,6 +345,57 @@ fn stepper(ui: &Ui, fonts: Option<&Fonts>, id: &str, campo: CampoFaixa, valor: u
         delta = Some(1);
     }
     delta
+}
+
+/// Ritmo de trabalho aceito (2026-10-03): Baixo / Médio / Alto, cada um
+/// entra ou sai ao ser ativado (aqui foco não é escolha: é multisseleção);
+/// nenhum marcado = qualquer.
+fn campo_ritmo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, nome: &str, ataque: bool, escolhidos: &[RitmoTrabalho]) {
+    let _id = ui.push_id(nome);
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, nome);
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    for (indice, ritmo) in RitmoTrabalho::TODOS.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        let estilo = if escolhidos.contains(&ritmo) { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        if componentes::botao_com_largura(ui, fonts, ritmo.nome(), estilo, true, Some(LARGURA_RITMO)) {
+            state.alternar_ritmo_da_missao(ataque, ritmo);
+        }
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+    let texto = if escolhidos.is_empty() { "qualquer um" } else { "os marcados" };
+    rotulo(ui, fonts, texto);
+}
+
+/// Pé preferido: Qualquer / Direito / Esquerdo / Ambidestro (escolha
+/// única: foco = escolha, como o Modo de Busca).
+fn campo_pe(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pe: Option<FiltroPe>) {
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Pé");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let opcoes: Vec<(Option<FiltroPe>, &str)> =
+        std::iter::once((None, "Qualquer")).chain(FiltroPe::TODOS.into_iter().map(|p| (Some(p), p.nome()))).collect();
+    for (indice, (opcao, nome)) in opcoes.into_iter().enumerate() {
+        if indice > 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        }
+        let estilo = if opcao == pe { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        let clicou = componentes::botao_com_largura(ui, fonts, nome, estilo, true, Some(LARGURA_RITMO));
+        if (clicou || componentes::focado_pelo_controle(ui)) && opcao != pe {
+            state.definir_pe_da_missao(opcao);
+        }
+    }
+    if pe == Some(FiltroPe::Ambidestro) {
+        ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+        com_fonte(ui, fonts.map(|f| f.meta), || {
+            ui.text_colored(
+                theme::TEXT_SECONDARY,
+                format!("Pé fraco com {} estrelas ou mais, qualquer que seja o preferido.", quality::PE_FRACO_AMBIDESTRO),
+            )
+        });
+    }
 }
 
 fn campo_modo(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, modo: ModoBusca) {

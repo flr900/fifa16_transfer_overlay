@@ -19,8 +19,11 @@
 //! **Amplitude geográfica** não muda o nível de Qualidade: piora a
 //! **precisão** (faixa ± maior) e encarece/alonga a Missão (FR-4).
 //!
-//! **Jogadores** (alvo do Relatório): Rápida traz mais nomes, Completa
-//! menos (FR-5); dentro do Modo, mais pontuação traz mais nomes.
+//! **Jogadores** (alvo do Relatório): Completa traz MAIS nomes que Rápida
+//! (mudou em 2026-10-03, pedido do Felipe: do jeito antigo, várias Rápidas
+//! seguidas rendiam mais que uma Completa). Rápida é a resposta curta e
+//! barata; Completa leva ~3× o tempo e rende ~4× os nomes, com Qualidade
+//! maior. Dentro do Modo, mais pontuação traz mais nomes.
 //!
 //! Falsos positivos NÃO entram no v1 (decisão de 2026-10-01; ver
 //! `_bmad-output/planning-artifacts/melhorias-futuras-olheiros.md`).
@@ -238,10 +241,13 @@ fn precisao_extra_amplitude(amplitude: AmplitudeGeografica) -> u8 {
 }
 
 /// Jogadores no Relatório: `base do Modo + por ponto × pontuação`.
+/// Rápida: 7 a 11; Completa: 28 a 44. No mesmo tempo de uma Completa
+/// cabem ~3 Rápidas (21 a 33 nomes, de Qualidade menor): a Completa sempre
+/// rende mais.
 fn alvo_jogadores(modo: ModoBusca, pontos: u8) -> u8 {
     let (base, por_ponto) = match modo {
-        ModoBusca::Rapida => (15, 2),
-        ModoBusca::Completa => (5, 1),
+        ModoBusca::Rapida => (6, 1),
+        ModoBusca::Completa => (24, 4),
     };
     base + por_ponto * pontos
 }
@@ -306,6 +312,13 @@ pub const IDADE_JOVEM: u8 = 21;
 /// Anos de contrato restantes que o formulário aceita: 0 = termina nesta
 /// temporada; este valor = "isso ou mais".
 pub const CONTRATO_MAIOR: u8 = 5;
+/// Estrelas (dribles, pé fraco): 1 a 5.
+pub const ESTRELAS_MENOR: u8 = 1;
+pub const ESTRELAS_MAIOR: u8 = 5;
+/// "Ambidestro" no filtro de pé: pé fraco com pelo menos estas estrelas
+/// (4 e 5 estrelas chutam bem com os dois pés; no save do Felipe, ~23% dos
+/// jogadores).
+pub const PE_FRACO_AMBIDESTRO: u8 = 4;
 
 /// Tipo da Missão a partir de todos os filtros: pedir um perfil —
 /// atributos dominantes ("o melhor driblador", Story 2.8), um Fit
@@ -569,24 +582,46 @@ impl PosicaoAlvo {
         }
     }
 
-    /// Códigos de `preferredposition1` que JÁ são esta posição (quem joga
-    /// nela de origem não é um "fit", é a posição dele).
+    /// Códigos de `preferredposition1` que JÁ são esta posição (enum do
+    /// FIFA, ver `save_repo::nome_posicao`).
     pub fn posicoes_nativas(self) -> &'static [u8] {
         match self {
-            PosicaoAlvo::Zagueiro => &[3, 4, 5],
-            PosicaoAlvo::LateralDireito => &[2],
-            PosicaoAlvo::LateralEsquerdo => &[6],
-            PosicaoAlvo::AlaDireito => &[1],
-            PosicaoAlvo::AlaEsquerdo => &[7],
-            PosicaoAlvo::Volante => &[8, 9, 10],
-            PosicaoAlvo::MeioCampista => &[12, 13, 14],
-            PosicaoAlvo::MeiaAtacante => &[16, 17, 18],
-            PosicaoAlvo::MeiaDireita => &[11],
-            PosicaoAlvo::MeiaEsquerda => &[15],
-            PosicaoAlvo::PontaDireita => &[22],
-            PosicaoAlvo::PontaEsquerda => &[26],
-            PosicaoAlvo::SegundoAtacante => &[19, 20, 21],
-            PosicaoAlvo::Centroavante => &[23, 24, 25],
+            PosicaoAlvo::Zagueiro => &[1, 4, 5, 6],
+            PosicaoAlvo::LateralDireito => &[3],
+            PosicaoAlvo::LateralEsquerdo => &[7],
+            PosicaoAlvo::AlaDireito => &[2],
+            PosicaoAlvo::AlaEsquerdo => &[8],
+            PosicaoAlvo::Volante => &[9, 10, 11],
+            PosicaoAlvo::MeioCampista => &[13, 14, 15],
+            PosicaoAlvo::MeiaAtacante => &[17, 18, 19],
+            PosicaoAlvo::MeiaDireita => &[12],
+            PosicaoAlvo::MeiaEsquerda => &[16],
+            PosicaoAlvo::PontaDireita => &[23],
+            PosicaoAlvo::PontaEsquerda => &[27],
+            PosicaoAlvo::SegundoAtacante => &[20, 21, 22],
+            PosicaoAlvo::Centroavante => &[24, 25, 26],
+        }
+    }
+
+    /// Quem NÃO entra num Fit para esta posição: a posição nativa e as
+    /// mudanças triviais (2026-10-03, pedido do Felipe — "o ideal seria não
+    /// ter lateral nesse caso"): para qualquer posição da defesa, toda a
+    /// linha de defesa (zagueiros, laterais e alas dos dois lados); para
+    /// os lados do meio e do ataque, todos os jogadores de lado (meias
+    /// abertos e pontas); nas demais, só a posição nativa.
+    pub fn posicoes_excluidas(self) -> &'static [u8] {
+        const DEFESA: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8];
+        const LADOS: &[u8] = &[12, 16, 23, 27];
+        match self {
+            PosicaoAlvo::Zagueiro
+            | PosicaoAlvo::LateralDireito
+            | PosicaoAlvo::LateralEsquerdo
+            | PosicaoAlvo::AlaDireito
+            | PosicaoAlvo::AlaEsquerdo => DEFESA,
+            PosicaoAlvo::MeiaDireita | PosicaoAlvo::MeiaEsquerda | PosicaoAlvo::PontaDireita | PosicaoAlvo::PontaEsquerda => {
+                LADOS
+            }
+            outra => outra.posicoes_nativas(),
         }
     }
 
@@ -809,19 +844,19 @@ impl Perfil {
     }
 }
 
-/// Perfil da posição nativa (`preferredposition1`).
+/// Perfil da posição nativa (`preferredposition1`, enum do FIFA).
 pub fn perfil_da_posicao(posicao: u8) -> Perfil {
     match posicao {
         0 => Perfil::Goleiro,
-        1 | 7 => Perfil::Ala,
-        2 | 6 => Perfil::Lateral,
-        3..=5 => Perfil::Zagueiro,
-        8..=10 => Perfil::Volante,
-        11 | 15 => Perfil::MeiaAberto,
-        16..=18 => Perfil::MeiaAtacante,
-        19..=21 => Perfil::SegundoAtacante,
-        22 | 26 => Perfil::Ponta,
-        23..=25 => Perfil::Centroavante,
+        2 | 8 => Perfil::Ala,
+        3 | 7 => Perfil::Lateral,
+        1 | 4..=6 => Perfil::Zagueiro,
+        9..=11 => Perfil::Volante,
+        12 | 16 => Perfil::MeiaAberto,
+        17..=19 => Perfil::MeiaAtacante,
+        20..=22 => Perfil::SegundoAtacante,
+        23 | 27 => Perfil::Ponta,
+        24..=26 => Perfil::Centroavante,
         _ => Perfil::MeioCampista,
     }
 }
@@ -848,12 +883,24 @@ pub fn forca_fit(alvo: PosicaoAlvo, posicao: u8, valor: impl Fn(Atributo) -> Opt
     Some((100.0 * no_alvo / nativa).round().clamp(0.0, 100.0) as u8)
 }
 
+/// Quanto o Overall do jogador mudaria jogando na posição-alvo (estimativa,
+/// em pontos): nota no perfil-alvo − nota no perfil da posição nativa. Os
+/// perfis imitam a nota por posição do FIFA, então a diferença entre eles
+/// aproxima a mudança do Overall que o jogo mostraria (2026-10-03).
+pub fn variacao_overall(alvo: PosicaoAlvo, posicao: u8, valor: impl Fn(Atributo) -> Option<f32>) -> Option<i8> {
+    let no_alvo = nota_no_perfil(alvo.perfil(), &valor)?;
+    let nativa = nota_no_perfil(perfil_da_posicao(posicao), &valor)?;
+    Some((no_alvo - nativa).round().clamp(-99.0, 99.0) as i8)
+}
+
 /// Força mínima do fit para um jogador entrar no Relatório: perde no
 /// máximo ~5% do nível dele na posição-alvo. Calibrado no save do Felipe
-/// (2026-10-03, jogadores com Overall ≥ 60 de outra posição): passam de
-/// ~15% (Centroavante, Zagueiro, Volante) a ~65% (Meia aberto, Ponta) —
-/// posições vizinhas têm perfis parecidos. A ordem do Relatório (nota no
-/// perfil-alvo) põe os melhores na frente.
+/// (2026-10-03, com os códigos de posição corrigidos e sem as mudanças
+/// triviais; jogadores com Overall ≥ 60 de fora delas): passam ~17–19%
+/// para Centroavante, Volante e as posições da defesa, ~28% para
+/// Meio-campista e ~45–58% para meias, pontas e segundo atacante (perfis
+/// de ataque se parecem). A ordem do Relatório (nota no perfil-alvo) põe
+/// os melhores na frente.
 pub const LIMIAR_FIT: u8 = 95;
 
 // ---------------------------------------------------------------------
@@ -1078,14 +1125,17 @@ mod tests {
     }
 
     #[test]
-    fn completa_has_better_quality_fewer_players_and_takes_longer_than_rapida() {
+    fn completa_has_better_quality_more_players_and_takes_longer_than_rapida() {
         for pedido in todos_os_pedidos().into_iter().filter(|p| p.modo == ModoBusca::Rapida) {
             let completa = PedidoMissao { modo: ModoBusca::Completa, ..pedido };
             let (r, c) = (estimar_missao(&pedido), estimar_missao(&completa));
             assert!(c.qualidade >= r.qualidade && c.atributos_revelados > r.atributos_revelados, "{pedido:?}");
-            assert!(c.alvo_jogadores < r.alvo_jogadores, "{pedido:?}");
+            assert!(c.alvo_jogadores > r.alvo_jogadores, "{pedido:?}");
             assert!(c.duracao_dias > r.duracao_dias, "{pedido:?}");
             assert!(c.custo > r.custo, "{pedido:?}");
+            // várias Rápidas no tempo de uma Completa rendem menos nomes
+            let rapidas = c.duracao_dias / r.duracao_dias.max(1);
+            assert!(u32::from(c.alvo_jogadores) > rapidas * u32::from(r.alvo_jogadores), "{pedido:?}: {c:?} × {r:?}");
         }
     }
 
@@ -1154,7 +1204,7 @@ mod tests {
                 qualidade: Qualidade::Baixa,
                 atributos_revelados: 6,
                 precisao_mais_menos: 14,
-                alvo_jogadores: 17,
+                alvo_jogadores: 7,
             }
         );
         assert_eq!(
@@ -1165,7 +1215,7 @@ mod tests {
                 qualidade: Qualidade::Alta,
                 atributos_revelados: 28,
                 precisao_mais_menos: 1,
-                alvo_jogadores: 10,
+                alvo_jogadores: 44,
             }
         );
     }
@@ -1385,7 +1435,7 @@ mod tests {
         use Atributo::*;
         let criativo = [PasseCurto, PasseLongo, Visao, ControleDeBola, Drible, PosicionamentoOfensivo, Finalizacao, Agilidade];
         let defesa = [Interceptacao, DesarmeEmPe, Marcacao, Carrinho, Agressividade, Folego, Forca, Reacao];
-        // MEI (posição 17) com passe E defesa altos
+        // MEI (posição 18) com passe E defesa altos
         let completo = {
             let mut v = perfil(55, &criativo, 82);
             for a in defesa {
@@ -1393,28 +1443,59 @@ mod tests {
             }
             v
         };
-        let fit = forca_fit(PosicaoAlvo::Volante, 17, de(&completo)).expect("fit");
+        let fit = forca_fit(PosicaoAlvo::Volante, 18, de(&completo)).expect("fit");
         assert!(fit >= LIMIAR_FIT, "{fit}");
         // o mesmo MEI sem defesa não serve de volante
         let so_ataque = perfil(45, &criativo, 82);
-        let fit_fraco = forca_fit(PosicaoAlvo::Volante, 17, de(&so_ataque)).expect("fit");
+        let fit_fraco = forca_fit(PosicaoAlvo::Volante, 18, de(&so_ataque)).expect("fit");
         assert!(fit_fraco < LIMIAR_FIT, "{fit_fraco}");
         assert!(fit > fit_fraco);
         // e um centroavante puro não serve de zagueiro
         let atacante = perfil(40, &[Finalizacao, PosicionamentoOfensivo, ForcaDoChute, Cabeceio, ControleDeBola], 85);
-        assert!(forca_fit(PosicaoAlvo::Zagueiro, 24, de(&atacante)).expect("fit") < 70);
+        assert!(forca_fit(PosicaoAlvo::Zagueiro, 25, de(&atacante)).expect("fit") < 70);
+    }
+
+    #[test]
+    fn trivial_moves_are_excluded_and_every_target_excludes_its_own_position() {
+        for alvo in PosicaoAlvo::TODAS {
+            assert!(alvo.posicoes_nativas().iter().all(|p| alvo.posicoes_excluidas().contains(p)), "{alvo:?}");
+        }
+        // lateral esquerdo (7) não vira "fit" de lateral direito nem de zagueiro
+        assert!(PosicaoAlvo::LateralDireito.posicoes_excluidas().contains(&7));
+        assert!(PosicaoAlvo::Zagueiro.posicoes_excluidas().contains(&3));
+        // ponta não é fit de meia aberto; volante continua podendo virar zagueiro
+        assert!(PosicaoAlvo::MeiaDireita.posicoes_excluidas().contains(&23));
+        assert!(!PosicaoAlvo::Zagueiro.posicoes_excluidas().contains(&10));
+        // códigos do FIFA: 3 é lateral, 5 zagueiro, 25 centroavante
+        assert_eq!(perfil_da_posicao(3), Perfil::Lateral);
+        assert_eq!(perfil_da_posicao(5), Perfil::Zagueiro);
+        assert_eq!(perfil_da_posicao(25), Perfil::Centroavante);
+        assert_eq!(perfil_da_posicao(27), Perfil::Ponta);
+    }
+
+    #[test]
+    fn the_overall_change_estimate_is_the_profile_difference() {
+        use Atributo::*;
+        let criativo = [PasseCurto, PasseLongo, Visao, ControleDeBola, Drible, PosicionamentoOfensivo, Finalizacao, Agilidade];
+        let so_ataque = perfil(45, &criativo, 82);
+        let perda = variacao_overall(PosicaoAlvo::Volante, 18, de(&so_ataque)).expect("estimativa");
+        assert!(perda < -5, "MEI sem defesa perde muito como volante: {perda}");
+        let zagueiro_que_arma = perfil(50, &[PasseCurto, Visao, ControleDeBola, PasseLongo], 90);
+        let ganho = variacao_overall(PosicaoAlvo::MeioCampista, 5, de(&zagueiro_que_arma)).expect("estimativa");
+        assert!(ganho > 0, "{ganho}");
+        assert_eq!(variacao_overall(PosicaoAlvo::Zagueiro, 5, de(&zagueiro_que_arma)), Some(0), "mesmo perfil");
     }
 
     #[test]
     fn fit_is_capped_at_one_hundred_and_ignores_unobserved_attributes() {
         // um jogador melhor no alvo que na própria posição: 100, não 130
         let zagueiro_que_arma = perfil(50, &[Atributo::PasseCurto, Atributo::Visao, Atributo::ControleDeBola, Atributo::PasseLongo], 90);
-        assert_eq!(forca_fit(PosicaoAlvo::MeioCampista, 4, de(&zagueiro_que_arma)), Some(100));
+        assert_eq!(forca_fit(PosicaoAlvo::MeioCampista, 5, de(&zagueiro_que_arma)), Some(100));
         // só os atributos observados contam
         let observado = |a: Atributo| (a == Atributo::Finalizacao).then_some(80.0);
         assert_eq!(nota_no_perfil(Perfil::Centroavante, observado), Some(80.0));
         assert_eq!(nota_no_perfil(Perfil::Zagueiro, observado), None, "nenhum atributo do perfil observado");
-        assert_eq!(forca_fit(PosicaoAlvo::Zagueiro, 24, observado), None);
+        assert_eq!(forca_fit(PosicaoAlvo::Zagueiro, 25, observado), None);
     }
 
     #[test]

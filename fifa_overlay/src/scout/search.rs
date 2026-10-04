@@ -19,7 +19,9 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::quality;
-use super::state::{Atributo, AtributoRevelado, FiltrosMissao, JogadorEncontrado, JogadorReferencia, Missao, PosicaoAlvo, Relatorio};
+use super::state::{
+    Atributo, AtributoRevelado, FiltroPe, FiltrosMissao, JogadorEncontrado, JogadorReferencia, Missao, PosicaoAlvo, Relatorio,
+};
 use crate::async_task::AsyncTask;
 use crate::save_repo::{self, Date, Liga, Nacao, PlayerPool, PlayerRaw, SaveRepoError};
 
@@ -170,6 +172,10 @@ pub fn passa_nos_filtros(missao: &Missao, pool: &PlayerPool, jogador: &PlayerRaw
         && (filtros.idade.min..=filtros.idade.max).contains(&jogador.idade(hoje))
         && (filtros.contrato.min..=filtros.contrato.max).contains(&contrato)
         && tem_dominantes(jogador, &filtros.atributos_dominantes)
+        && (filtros.ritmo_ataque.is_empty() || filtros.ritmo_ataque.contains(&jogador.ritmo_ataque))
+        && (filtros.ritmo_defesa.is_empty() || filtros.ritmo_defesa.contains(&jogador.ritmo_defesa))
+        && (filtros.estrelas_drible.min..=filtros.estrelas_drible.max).contains(&jogador.estrelas_drible)
+        && filtros.pe.is_none_or(|pe| do_pe(jogador, pe))
         && do_pais(&filtros.paises, pool, jogador)
         && da_geografia(filtros, pool, jogador)
         && filtros.fit_posicional.is_none_or(|alvo| serve_no_alvo(jogador, alvo))
@@ -181,10 +187,21 @@ fn valores(jogador: &PlayerRaw) -> impl Fn(Atributo) -> Option<f32> + '_ {
     move |a| Some(f32::from(jogador.atributo(a)))
 }
 
-/// Fit Posicional (Story 3.4): posição nativa diferente do alvo e força
-/// do fit ≥ `quality::LIMIAR_FIT`.
+/// Filtro de pé: direito/esquerdo pelo preferido; ambidestro pelo pé
+/// fraco (`quality::PE_FRACO_AMBIDESTRO`).
+pub fn do_pe(jogador: &PlayerRaw, pe: FiltroPe) -> bool {
+    match pe {
+        FiltroPe::Direito => jogador.pe == save_repo::Pe::Direito,
+        FiltroPe::Esquerdo => jogador.pe == save_repo::Pe::Esquerdo,
+        FiltroPe::Ambidestro => jogador.pe_fraco >= quality::PE_FRACO_AMBIDESTRO,
+    }
+}
+
+/// Fit Posicional (Story 3.4): fora das posições excluídas do alvo (a
+/// nativa e as mudanças triviais, `PosicaoAlvo::posicoes_excluidas`) e
+/// força do fit ≥ `quality::LIMIAR_FIT`.
 pub fn serve_no_alvo(jogador: &PlayerRaw, alvo: PosicaoAlvo) -> bool {
-    !alvo.posicoes_nativas().contains(&jogador.posicao)
+    !alvo.posicoes_excluidas().contains(&jogador.posicao)
         && quality::forca_fit(alvo, jogador.posicao, valores(jogador)).is_some_and(|f| f >= quality::LIMIAR_FIT)
 }
 
@@ -318,6 +335,11 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         pe: Some(jogador.pe),
         similaridade: None,
         fit: None,
+        variacao_overall: None,
+        ritmo_ataque: Some(jogador.ritmo_ataque),
+        ritmo_defesa: Some(jogador.ritmo_defesa),
+        estrelas_drible: Some(jogador.estrelas_drible),
+        pe_fraco: Some(jogador.pe_fraco),
     };
     // Similaridade e fit "pelo que o Olheiro viu" (nunca o valor real).
     let visto = |a: Atributo| encontrado.valor_visto(a);
@@ -326,8 +348,10 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         .as_ref()
         .and_then(|r| quality::similaridade(visto, |a| r.atributo(a).map(f32::from), r.goleiro()));
     let fit = filtros.fit_posicional.and_then(|alvo| quality::forca_fit(alvo, jogador.posicao, visto));
+    let variacao = filtros.fit_posicional.and_then(|alvo| quality::variacao_overall(alvo, jogador.posicao, visto));
     encontrado.similaridade = similaridade;
     encontrado.fit = fit;
+    encontrado.variacao_overall = variacao;
     encontrado
 }
 
@@ -355,6 +379,10 @@ pub mod tests {
             pe: crate::save_repo::Pe::Direito,
             liga_id: Some(13),
             contrato_ate: 2028,
+            ritmo_ataque: crate::save_repo::RitmoTrabalho::Medio,
+            ritmo_defesa: crate::save_repo::RitmoTrabalho::Medio,
+            estrelas_drible: 3,
+            pe_fraco: 3,
         }
     }
 
@@ -453,7 +481,7 @@ pub mod tests {
             j.atributos[Atributo::Drible.indice()] = drible;
             j
         };
-        let mut defensor = jogador(9, 70, 75, 4);
+        let mut defensor = jogador(9, 70, 75, 5);
         defensor.atributos = [60; TOTAL_ATRIBUTOS];
         defensor.atributos[Atributo::Marcacao.indice()] = 85;
         defensor.atributos[Atributo::Drible.indice()] = 40;
@@ -488,10 +516,10 @@ pub mod tests {
     // Épico 3
     // -----------------------------------------------------------------
 
-    /// Meia-atacante (17) com passe/drible altos e defesa em `defesa`.
+    /// Meia-atacante (18) com passe/drible altos e defesa em `defesa`.
     fn meia(id: u32, defesa: u8) -> PlayerRaw {
         use Atributo::*;
-        let mut j = jogador(id, 75, 78, 17);
+        let mut j = jogador(id, 75, 78, 18);
         j.atributos = [50; TOTAL_ATRIBUTOS];
         for a in [PasseCurto, PasseLongo, Visao, ControleDeBola, Drible, PosicionamentoOfensivo, Agilidade, Reacao] {
             j.atributos[a.indice()] = 82;
@@ -505,7 +533,7 @@ pub mod tests {
     #[test]
     fn fit_keeps_other_positions_whose_profile_serves_the_target() {
         let mut volante_nato = meia(3, 82);
-        volante_nato.posicao = 9; // já é VOL: não é um "fit"
+        volante_nato.posicao = 10; // já é VOL: não é um "fit"
         let p = pool(vec![meia(1, 80), meia(2, 40), volante_nato]);
         let mut m = missao_com((50, 99), (50, 99));
         m.filtros.fit_posicional = Some(PosicaoAlvo::Volante);
@@ -522,12 +550,12 @@ pub mod tests {
         let referencia = JogadorReferencia {
             player_id: 50,
             nome: "Meu Meia".to_string(),
-            posicao: 17,
+            posicao: 18,
             atributos: meu_meia.atributos.to_vec(),
         };
         let mut gemeo = meia(1, 80);
         gemeo.pe = crate::save_repo::Pe::Esquerdo;
-        let p = pool(vec![gemeo, meia(2, 40), jogador(3, 75, 78, 4)]);
+        let p = pool(vec![gemeo, meia(2, 40), jogador(3, 75, 78, 5)]);
         let mut m = missao_com((50, 99), (50, 99));
         m.filtros.referencia = Some(referencia.clone());
         m.filtros.fit_posicional = Some(PosicaoAlvo::Volante);
@@ -544,6 +572,8 @@ pub mod tests {
         assert!(visto <= 100);
         let fit = j.fit.expect("fit pelo revelado");
         assert!(fit > 0);
+        assert!(j.variacao_overall.is_some(), "estimativa de Overall na posição-alvo");
+        assert_eq!((j.estrelas_drible, j.pe_fraco), (Some(3), Some(3)));
         // os atributos do alvo vêm logo no começo da observação
         assert_eq!(j.atributos.first().map(|a| a.atributo), Some(Atributo::PasseCurto));
     }
@@ -551,7 +581,7 @@ pub mod tests {
     #[test]
     fn similar_profiles_rank_first() {
         let referencia = meia(50, 80);
-        let r = JogadorReferencia { player_id: 50, nome: "R".to_string(), posicao: 17, atributos: referencia.atributos.to_vec() };
+        let r = JogadorReferencia { player_id: 50, nome: "R".to_string(), posicao: 18, atributos: referencia.atributos.to_vec() };
         let mut quase = meia(2, 74);
         quase.atributos[Atributo::Visao.indice()] = 76;
         let p = pool(vec![quase, meia(1, 80)]);
@@ -584,7 +614,7 @@ pub mod tests {
         for alvo in PosicaoAlvo::TODAS {
             let fits: Vec<u8> = ativos
                 .iter()
-                .filter(|j| !alvo.posicoes_nativas().contains(&j.posicao) && j.posicao != 0)
+                .filter(|j| !alvo.posicoes_excluidas().contains(&j.posicao) && j.posicao != 0)
                 .filter_map(|j| quality::forca_fit(alvo, j.posicao, valores(j)))
                 .collect();
             let passam = fits.iter().filter(|&&f| f >= quality::LIMIAR_FIT).count();
@@ -691,5 +721,49 @@ pub mod tests {
         let lista = escolher_jogadores(&m, &p, HOJE, &HashSet::new(), 1);
         let primeiros: Vec<Atributo> = lista[0].atributos.iter().take(2).map(|a| a.atributo).collect();
         assert_eq!(primeiros, [Atributo::Velocidade, Atributo::Drible]);
+    }
+
+    #[test]
+    fn work_rate_dribble_stars_and_foot_filter_together() {
+        use crate::save_repo::{Pe, RitmoTrabalho};
+        let mut box_to_box = jogador(1, 70, 75, 14);
+        box_to_box.ritmo_ataque = RitmoTrabalho::Alto;
+        box_to_box.ritmo_defesa = RitmoTrabalho::Alto;
+        box_to_box.estrelas_drible = 4;
+        box_to_box.pe = Pe::Esquerdo;
+        box_to_box.pe_fraco = 2;
+        let mut ambidestro = jogador(2, 70, 75, 14);
+        ambidestro.ritmo_defesa = RitmoTrabalho::Baixo;
+        ambidestro.estrelas_drible = 2;
+        ambidestro.pe_fraco = 5;
+        let p = pool(vec![box_to_box, ambidestro]);
+        let mut m = missao_com((50, 99), (50, 99));
+        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j, HOJE)).map(|j| j.player_id).collect() };
+        assert_eq!(ids(&m), vec![1, 2], "padrão não restringe");
+        m.filtros.ritmo_defesa = vec![RitmoTrabalho::Alto, RitmoTrabalho::Medio];
+        assert_eq!(ids(&m), vec![1]);
+        m.filtros.ritmo_defesa.clear();
+        m.filtros.estrelas_drible = FaixaAtributo { min: 4, max: 5 };
+        assert_eq!(ids(&m), vec![1]);
+        m.filtros.estrelas_drible = FaixaAtributo { min: 1, max: 5 };
+        m.filtros.pe = Some(FiltroPe::Ambidestro);
+        assert_eq!(ids(&m), vec![2], "pé fraco 4+ estrelas");
+        m.filtros.pe = Some(FiltroPe::Esquerdo);
+        assert_eq!(ids(&m), vec![1]);
+    }
+
+    #[test]
+    fn fit_never_brings_trivial_moves_like_a_left_back_for_right_back() {
+        let lateral = |id: u32, posicao: u8| {
+            let mut j = jogador(id, 75, 78, posicao);
+            j.atributos = [80; TOTAL_ATRIBUTOS];
+            j
+        };
+        // perfis idênticos: força 100 para qualquer alvo
+        let p = pool(vec![lateral(1, 7), lateral(2, 8), lateral(3, 5), lateral(4, 10)]);
+        let mut m = missao_com((50, 99), (50, 99));
+        m.filtros.fit_posicional = Some(PosicaoAlvo::LateralDireito);
+        let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j, HOJE)).map(|j| j.player_id).collect();
+        assert_eq!(ids, vec![4], "LE, ALE e zagueiro ficam de fora; o volante pode virar lateral");
     }
 }

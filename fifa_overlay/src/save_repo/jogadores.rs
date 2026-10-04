@@ -364,6 +364,12 @@ pub struct PlayerRaw {
     /// `contractvaliduntil`: ano em que o contrato termina (no fim da
     /// temporada europeia, 30/06).
     pub contrato_ate: u16,
+    pub ritmo_ataque: RitmoTrabalho,
+    pub ritmo_defesa: RitmoTrabalho,
+    /// Estrelas de drible, 1–5 (`skillmoves` 0–4 + 1).
+    pub estrelas_drible: u8,
+    /// Estrelas do pé fraco, 1–5 (`weakfootabilitytypecode`).
+    pub pe_fraco: u8,
 }
 
 /// Pé preferido (`CZUM.preferredfoot`: 1 = direito, 2 = esquerdo). No JSON
@@ -408,12 +414,17 @@ impl PlayerRaw {
     }
 }
 
-/// Sigla da posição (`preferredposition1`; enum do FIFA 16, igual ao de
-/// `fifa16_search.py`).
+/// Sigla da posição (`preferredposition1`). Enum do FIFA: 0 GK, 1 SW,
+/// 2 RWB, 3 RB, 4 RCB, 5 CB, 6 LCB, 7 LB, 8 LWB, 9 RDM, 10 CDM, 11 LDM,
+/// 12 RM, 13 RCM, 14 CM, 15 LCM, 16 LM, 17 RAM, 18 CAM, 19 LAM, 20 RF,
+/// 21 CF, 22 LF, 23 RW, 24 RS, 25 ST, 26 LS, 27 LW. Conferido no save do
+/// Felipe (2026-10-03): 5 (CB) e 25 (ST) são os mais comuns, Mbappé é 25
+/// com 27 de segunda posição. Até essa data a tabela estava deslocada uma
+/// casa (sem o SW): lateral direito aparecia como "ZAD".
 pub fn nome_posicao(posicao: u8) -> &'static str {
     const NOMES: [&str; 28] = [
-        "GOL", "ALD", "LD", "ZAD", "ZAG", "ZAE", "LE", "ALE", "VOD", "VOL", "VOE", "MD", "MCD", "MC", "MCE", "ME", "MAD",
-        "MEI", "MAE", "SAD", "SA", "SAE", "PD", "ATD", "ATA", "ATE", "PE", "RES",
+        "GOL", "LIB", "ALD", "LD", "ZAD", "ZAG", "ZAE", "LE", "ALE", "VOD", "VOL", "VOE", "MD", "MCD", "MC", "MCE", "ME",
+        "MAD", "MEI", "MAE", "SAD", "SA", "SAE", "PD", "ATD", "ATA", "ATE", "PE",
     ];
     NOMES.get(posicao as usize).copied().unwrap_or("?")
 }
@@ -431,9 +442,41 @@ pub enum Funcao {
 pub fn funcao_da_posicao(posicao: u8) -> Funcao {
     match posicao {
         0 => Funcao::Goleiro,
-        1..=7 => Funcao::Defensor,
-        8..=18 => Funcao::MeioCampo,
+        1..=8 => Funcao::Defensor,
+        9..=19 => Funcao::MeioCampo,
         _ => Funcao::Atacante,
+    }
+}
+
+/// Ritmo de trabalho (`attackingworkrate` / `defensiveworkrate`: 0 =
+/// médio, 1 = baixo, 2 = alto; conferido com Mbappé, alto/baixo). No JSON:
+/// `"baixo"`, `"medio"`, `"alto"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RitmoTrabalho {
+    Baixo,
+    #[default]
+    Medio,
+    Alto,
+}
+
+impl RitmoTrabalho {
+    pub const TODOS: [RitmoTrabalho; 3] = [RitmoTrabalho::Baixo, RitmoTrabalho::Medio, RitmoTrabalho::Alto];
+
+    fn de_raw(valor: i64) -> RitmoTrabalho {
+        match valor {
+            1 => RitmoTrabalho::Baixo,
+            2 => RitmoTrabalho::Alto,
+            _ => RitmoTrabalho::Medio,
+        }
+    }
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            RitmoTrabalho::Baixo => "Baixo",
+            RitmoTrabalho::Medio => "Médio",
+            RitmoTrabalho::Alto => "Alto",
+        }
     }
 }
 
@@ -830,6 +873,10 @@ fn ler_jogadores(dados: &[u8], nomes_estaticos: &HashMap<u32, String>) -> Result
                     .and_then(|t| liga_do_time.get(&t))
                     .and_then(|&l| u32::try_from(l).ok()),
                 contrato_ate: como(inteiro(r, campos.contrato, 0)),
+                ritmo_ataque: RitmoTrabalho::de_raw(inteiro(r, campos.ritmo_ataque, 0)),
+                ritmo_defesa: RitmoTrabalho::de_raw(inteiro(r, campos.ritmo_defesa, 0)),
+                estrelas_drible: como::<u8>(inteiro(r, campos.dribles, 0)).saturating_add(1),
+                pe_fraco: como(inteiro(r, campos.pe_fraco, 1)),
             }
         })
         .collect();
@@ -850,6 +897,10 @@ struct CamposJogador<'a> {
     genero: &'a FieldDescriptor,
     pe: &'a FieldDescriptor,
     contrato: &'a FieldDescriptor,
+    ritmo_ataque: &'a FieldDescriptor,
+    ritmo_defesa: &'a FieldDescriptor,
+    dribles: &'a FieldDescriptor,
+    pe_fraco: &'a FieldDescriptor,
     atributos: Vec<&'a FieldDescriptor>,
 }
 
@@ -868,6 +919,10 @@ impl<'a> CamposJogador<'a> {
             genero: czum.campo(b"EveZ")?,
             pe: czum.campo(b"MDvm")?,
             contrato: czum.campo(b"qvmK")?,
+            ritmo_ataque: czum.campo(b"BqFe")?,
+            ritmo_defesa: czum.campo(b"boFm")?,
+            dribles: czum.campo(b"BAPc")?,
+            pe_fraco: czum.campo(b"aOBn")?,
             atributos: Atributo::TODOS.iter().map(|a| czum.campo(a.campo())).collect::<Result<_, _>>()?,
         })
     }
@@ -971,11 +1026,17 @@ mod tests {
     #[test]
     fn positions_and_roles() {
         assert_eq!(nome_posicao(0), "GOL");
-        assert_eq!(nome_posicao(24), "ATA");
+        assert_eq!(nome_posicao(3), "LD", "lateral direito não é ZAD");
+        assert_eq!(nome_posicao(5), "ZAG");
+        assert_eq!(nome_posicao(7), "LE");
+        assert_eq!(nome_posicao(10), "VOL");
+        assert_eq!(nome_posicao(18), "MEI");
+        assert_eq!(nome_posicao(25), "ATA");
+        assert_eq!(nome_posicao(27), "PE");
         assert_eq!(nome_posicao(99), "?");
         assert_eq!(funcao_da_posicao(0), Funcao::Goleiro);
-        assert_eq!(funcao_da_posicao(4), Funcao::Defensor);
-        assert_eq!(funcao_da_posicao(13), Funcao::MeioCampo);
+        assert_eq!(funcao_da_posicao(8), Funcao::Defensor, "ala esquerdo");
+        assert_eq!(funcao_da_posicao(14), Funcao::MeioCampo);
         assert_eq!(funcao_da_posicao(25), Funcao::Atacante);
     }
 
@@ -996,6 +1057,10 @@ mod tests {
             pe: Pe::Direito,
             liga_id: None,
             contrato_ate: 2030,
+            ritmo_ataque: RitmoTrabalho::Medio,
+            ritmo_defesa: RitmoTrabalho::Medio,
+            estrelas_drible: 3,
+            pe_fraco: 3,
         };
         assert_eq!(p.idade(Date(20350720)), 34);
         assert_eq!(p.idade(Date(20350721)), 35);
@@ -1017,6 +1082,9 @@ mod tests {
         let mbappe = jogadores.iter().find(|j| j.player_id == 231747).expect("Mbappé no save");
         assert_eq!(mbappe.nome, "Kylian Mbappé");
         assert_eq!(mbappe.nascimento, Date(19981220));
+        assert_eq!(nome_posicao(mbappe.posicao), "ATA");
+        assert_eq!((mbappe.ritmo_ataque, mbappe.ritmo_defesa), (RitmoTrabalho::Alto, RitmoTrabalho::Baixo));
+        assert_eq!((mbappe.estrelas_drible, mbappe.pe_fraco), (5, 4));
         assert!((80..=99).contains(&mbappe.overall));
         // em 2035 ele tem 36 anos: a velocidade caiu, a finalização não
         assert!(mbappe.atributo(Atributo::Finalizacao) >= 75);

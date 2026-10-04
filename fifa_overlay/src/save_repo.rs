@@ -44,7 +44,7 @@ use crate::memscan::{self, Region};
 
 pub use jogadores::{
     funcao_da_posicao, ler_miniface, nome_posicao, read_all_players, read_nations, read_squad_players, Atributo, Confederacao,
-    Funcao, Liga, Nacao, Pe, PlayerPool, PlayerRaw, read_leagues,
+    Funcao, Liga, Nacao, Pe, PlayerPool, PlayerRaw, RitmoTrabalho, read_leagues,
 };
 
 /// Short names (4 chars) das tabelas/campos que o `save_repo` lê.
