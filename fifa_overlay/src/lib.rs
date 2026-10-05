@@ -35,7 +35,13 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "5.0-v2 — Olheiros com estrelas, Escolhidos e Sonar (main)";
+const BUILD_TAG: &str = "5.0-v3 — Versão da build visível no cabeçalho";
+
+/// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
+/// cabeçalho do painel.
+pub(crate) fn versao_da_build() -> &'static str {
+    BUILD_TAG.split(" — ").next().unwrap_or(BUILD_TAG)
+}
 
 /// Arquivo que pede para a DLL se descarregar sem fechar o jogo
 /// (script `recarregar_dev.ps1` da pasta `fifa_overlay`, só para
