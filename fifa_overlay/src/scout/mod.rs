@@ -253,6 +253,9 @@ pub struct Scout {
     /// O painel fechou com algum botão do controle apertado: o jogo segue
     /// bloqueado até tudo ser solto.
     esperando_soltar: bool,
+    /// Último valor de `bloqueia_controle` que foi para o log (diagnóstico
+    /// do "controle travou": só as transições, nunca por frame).
+    bloqueio_logado: bool,
 }
 
 impl Scout {
@@ -263,6 +266,7 @@ impl Scout {
             nav: Navigation::new(Aba::Olheiros),
             controle_anterior: EstadoControle::default(),
             esperando_soltar: false,
+            bloqueio_logado: false,
             state: ScoutState::new(),
         }
     }
@@ -301,6 +305,7 @@ impl Scout {
     pub fn frame(&mut self, ui: &Ui, fonts: Option<&Fonts>, controle: Option<EstadoControle>) {
         let alternou = self.atualizar_atalho(tecla_pressionada(ATALHO_PAINEL));
         self.aplicar_controle(controle.unwrap_or_default(), alternou);
+        self.registrar_bloqueio(controle.unwrap_or_default());
         let ry = controle.map_or(0, |c| c.ry);
         let rolagem = if self.painel_aberto { crate::gamepad::rolagem_do_analogico(ry) } else { 0.0 };
         self.state.definir_rolagem(rolagem);
@@ -381,6 +386,25 @@ impl Scout {
     /// No `before_render`: sobe para a GPU os rostos já lidos (Story 2.6).
     pub fn enviar_minifaces(&self, carregar: &mut dyn FnMut(&crate::dds::Imagem, Option<imgui::TextureId>) -> Option<imgui::TextureId>) {
         self.state.minifaces().enviar(carregar);
+    }
+
+    /// Loga cada vez que o jogo passa a receber (ou deixa de receber) o
+    /// controle parado, com o motivo e o estado dos botões.
+    fn registrar_bloqueio(&mut self, atual: EstadoControle) {
+        let bloqueado = self.bloqueia_controle();
+        if bloqueado == self.bloqueio_logado {
+            return;
+        }
+        self.bloqueio_logado = bloqueado;
+        tracing::info!(
+            "[scout] Controle do jogo {} (painel_aberto={}, esperando_soltar={}, botoes=0x{:04X}, lt={}, rt={}).",
+            if bloqueado { "BLOQUEADO" } else { "liberado" },
+            self.painel_aberto,
+            self.esperando_soltar,
+            atual.botoes,
+            atual.lt,
+            atual.rt,
+        );
     }
 
     /// O jogo deve receber o controle parado neste frame?
