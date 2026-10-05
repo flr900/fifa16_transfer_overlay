@@ -319,6 +319,15 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, status: &CarreiraStatus) {
     com_fonte(ui, fonts.map(|f| f.display), || ui.text("Central de Scout"));
     let fim_titulo = ui.cursor_pos();
 
+    // Versão da build, discreta, na linha de base do título.
+    let versao = format!("build {}", crate::versao_da_build());
+    let largura_titulo = com_fonte(ui, fonts.map(|f| f.display), || ui.calc_text_size("Central de Scout")[0]);
+    let altura_versao = com_fonte(ui, fonts.map(|f| f.meta), || ui.calc_text_size(&versao)[1]);
+    let espaco_linhas = ui.clone_style().item_spacing[1];
+    ui.set_cursor_pos([inicio[0] + largura_titulo + theme::ESPACO_3, fim_titulo[1] - altura_versao - espaco_linhas]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_DISABLED, &versao));
+    ui.set_cursor_pos(fim_titulo);
+
     if let CarreiraStatus::Pronta(carreira) = status {
         let rotulo = "Orçamento de Scouting";
         let valor = formatar_milhar(carreira.orcamento_transferencias);
