@@ -54,6 +54,29 @@ if (-not (Test-Path $injector)) {
 Write-Host "Pedindo para a Central de Scout carregada se descarregar..."
 New-Item -Path $pedido -ItemType File -Force | Out-Null
 
+# A DLL apaga o pedido quando o atende. Esperar por isso, e não só pela
+# cópia ficar livre: a DLL carregada pode ser a de OUTRO checkout (main x
+# worktree), e aí a cópia daqui nunca está travada e a build nova era
+# injetada por cima da antiga, com dois hudhooks no jogo (derrubou o FIFA
+# em 2026-10-04). Se o jogo não estiver desenhando (minimizado, fora da
+# tela cheia), a DLL não vê o pedido: volte para o jogo.
+$atendido = $false
+for ($i = 0; $i -lt 60; $i++) {
+    if (-not (Test-Path $pedido)) {
+        $atendido = $true
+        break
+    }
+    if ($i -eq 4) { Write-Host "Esperando a DLL atender (volte para a janela do FIFA)..." }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $atendido) {
+    Remove-Item $pedido -Force -ErrorAction SilentlyContinue
+    Write-Error ("A DLL carregada não atendeu o pedido em 30 s (jogo fora da tela, ou build " +
+        "anterior à 1.6-v2). Nada foi injetado.")
+}
+# Um instante para o hudhook terminar de soltar os ganchos.
+Start-Sleep -Seconds 1
+
 # A cópia só pode ser sobrescrita depois que o jogo soltar a DLL.
 $copiou = $false
 for ($i = 0; $i -lt 30; $i++) {
