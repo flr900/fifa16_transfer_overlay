@@ -43,7 +43,9 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "..\fifa_overlay\target\release\fifa_overlay.dll"; DestDir: "{app}"; Flags: ignoreversion
+; Uma fifa_overlay.dll por versão do histórico (gerado pelo build_installer.ps1);
+; só a escolhida na página "Versão" é instalada.
+#include "versoes_arquivos.gen.inc"
 Source: "..\fifa_injector\target\release\fifa_injector.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\iniciar_scout.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\configurar_scout.ps1"; DestDir: "{app}"; Flags: ignoreversion
@@ -53,6 +55,8 @@ Source: "scripts\configurar_scout.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Root: HKCU; Subkey: "Software\{#AppNome}"; ValueType: string; ValueName: "FifaFriendsExe"; ValueData: "{code:GetFifaFriendsExe}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\{#AppNome}"; ValueType: string; ValueName: "FifaFriendsArgs"; ValueData: "{code:GetFifaFriendsArgs}"
 Root: HKCU; Subkey: "Software\{#AppNome}"; ValueType: string; ValueName: "PastaInstalacao"; ValueData: "{app}"
+Root: HKCU; Subkey: "Software\{#AppNome}"; ValueType: string; ValueName: "VersaoInstalada"; ValueData: "{code:GetVersaoEscolhida}"
+Root: HKCU; Subkey: "Software\{#AppNome}"; ValueType: string; ValueName: "VersaoInstalador"; ValueData: "{#AppVersao}"
 
 [Icons]
 ; O ícone vem do executável do FIFA Friends.
@@ -71,6 +75,131 @@ Type: filesandordirs; Name: "{app}\runtime"
 var
   PaginaFifa: TInputFileWizardPage;
   ArgsFifaFriends: String;
+  PaginaVersao: TInputOptionWizardPage;
+  NotasVersao: TNewMemo;
+  // Histórico de versões (preenchido por CarregarVersoes, gerada pelo
+  // build_installer.ps1): mais nova primeiro.
+  VersaoId, VersaoTitulo, VersaoData, VersaoNotas, VersaoHash: array of String;
+  // O que já está instalado: id da build ('' = nenhuma instalação;
+  // 'desconhecida' = há uma DLL que não é de nenhuma versão do histórico).
+  InstaladaId, InstaladaPasta, InstaladorInstalado: String;
+
+#include "versoes_codigo.gen.inc"
+
+// A pasta onde o Inno instalaria sem perguntar (sem o registro, a
+// instalação anterior só é achada por ela).
+function PastaPadrao: String;
+begin
+  Result := ExpandConstant('{autopf}\{#AppNome}');
+end;
+
+function IdsDisponiveis: String;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to GetArrayLength(VersaoId) - 1 do
+  begin
+    if I > 0 then Result := Result + ', ';
+    Result := Result + VersaoId[I];
+  end;
+end;
+
+function IndiceDaVersao(const Id: String): Integer;
+var
+  I: Integer;
+begin
+  Result := -1;
+  for I := 0 to GetArrayLength(VersaoId) - 1 do
+    if SameText(VersaoId[I], Id) then
+    begin
+      Result := I;
+      Exit;
+    end;
+end;
+
+// Procura uma instalação anterior: registro da Central de Scout, entrada de
+// desinstalação do Inno e, como o registro pode ter sumido, a pasta padrão.
+// A versão sai do registro ou, sem ele, do hash da DLL instalada.
+procedure DetectarInstalacao;
+var
+  Hash: String;
+  I: Integer;
+begin
+  InstaladaId := '';
+  InstaladaPasta := '';
+  InstaladorInstalado := '';
+  RegQueryStringValue(HKCU, 'Software\{#AppNome}', 'PastaInstalacao', InstaladaPasta);
+  RegQueryStringValue(HKCU, 'Software\{#AppNome}', 'VersaoInstalada', InstaladaId);
+  RegQueryStringValue(HKCU, 'Software\{#AppNome}', 'VersaoInstalador', InstaladorInstalado);
+  if InstaladorInstalado = '' then
+    RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{06E27AB7-34A8-43FA-90F4-AB88D4D95B01}_is1',
+      'DisplayVersion', InstaladorInstalado);
+  if (InstaladaPasta = '') or not FileExists(AddBackslash(InstaladaPasta) + 'fifa_overlay.dll') then
+    InstaladaPasta := PastaPadrao;
+  if not FileExists(AddBackslash(InstaladaPasta) + 'fifa_overlay.dll') then
+  begin
+    InstaladaPasta := '';
+    InstaladaId := '';
+    Exit;
+  end;
+  // O que o registro diz só vale se a DLL ainda for a dessa versão.
+  Hash := GetSHA256OfFile(AddBackslash(InstaladaPasta) + 'fifa_overlay.dll');
+  for I := 0 to GetArrayLength(VersaoId) - 1 do
+    if SameText(VersaoHash[I], Hash) then
+    begin
+      InstaladaId := VersaoId[I];
+      Exit;
+    end;
+  InstaladaId := 'desconhecida';
+end;
+
+function DescricaoInstalada: String;
+begin
+  if InstaladaPasta = '' then
+    Result := 'Nenhuma instalação anterior foi encontrada.'
+  else
+  begin
+    if InstaladaId = 'desconhecida' then
+      Result := 'Já instalada: uma versão que não está no histórico'
+    else
+      Result := 'Já instalada: versão ' + InstaladaId;
+    if InstaladorInstalado <> '' then
+      Result := Result + ' (instalador ' + InstaladorInstalado + ')';
+    Result := Result + ' em ' + InstaladaPasta + '.';
+  end;
+end;
+
+procedure MostrarNotasDaVersao(Indice: Integer);
+var
+  Texto: String;
+begin
+  if (Indice < 0) or (Indice >= GetArrayLength(VersaoId)) then Exit;
+  Texto := VersaoTitulo[Indice] + ' · ' + VersaoData[Indice];
+  if VersaoNotas[Indice] <> '' then
+    Texto := Texto + #13#10 + #13#10 + VersaoNotas[Indice];
+  if Indice > 0 then
+    Texto := Texto + #13#10 + #13#10 + 'Atenção: há versões mais novas; esta pode não ter as últimas correções.';
+  if SameText(VersaoId[Indice], InstaladaId) then
+    Texto := Texto + #13#10 + #13#10 + 'É a versão já instalada: será reinstalada.';
+  NotasVersao.Text := Texto;
+end;
+
+procedure CliqueNaVersao(Sender: TObject);
+begin
+  MostrarNotasDaVersao(PaginaVersao.CheckListBox.ItemIndex);
+end;
+
+function GetVersaoEscolhida(Param: String): String;
+begin
+  Result := VersaoId[PaginaVersao.SelectedValueIndex];
+end;
+
+// Check dos arquivos de cada versão: só a escolhida é copiada.
+function EscolhidaEh(Id: String): Boolean;
+begin
+  Result := SameText(GetVersaoEscolhida(''), Id);
+end;
 
 // O overlay e o injetor são x64 e dependem do VC++ 2015-2022 (vcruntime140).
 function VcRedistInstalado: Boolean;
@@ -196,7 +325,45 @@ begin
 end;
 
 procedure InitializeWizard;
+var
+  I, Escolhida: Integer;
+  Legenda: String;
 begin
+  CarregarVersoes;
+  DetectarInstalacao;
+  Log('Detecção: ' + DescricaoInstalada + ' [id=' + InstaladaId + '] Histórico: ' + IdsDisponiveis);
+
+  // Página da versão: lista o histórico, marca o que já está instalado e
+  // mostra as notas da versão em foco. Padrão: a mais nova (ou /VERSAO=).
+  PaginaVersao := CreateInputOptionPage(wpWelcome,
+    'Versão',
+    'Qual versão da {#AppNome} instalar?',
+    DescricaoInstalada + #13#10 + 'Para atualizar, mantenha a mais recente; escolha uma anterior para voltar a ela.',
+    True, False);
+  for I := 0 to GetArrayLength(VersaoId) - 1 do
+  begin
+    Legenda := VersaoId[I] + ' — ' + VersaoTitulo[I];
+    if I = 0 then Legenda := Legenda + '  (mais recente)';
+    if SameText(VersaoId[I], InstaladaId) then Legenda := Legenda + '  (instalada)';
+    PaginaVersao.Add(Legenda);
+  end;
+  PaginaVersao.CheckListBox.Height := ScaleY(96);
+  NotasVersao := TNewMemo.Create(PaginaVersao);
+  NotasVersao.Parent := PaginaVersao.Surface;
+  NotasVersao.Left := PaginaVersao.CheckListBox.Left;
+  NotasVersao.Width := PaginaVersao.CheckListBox.Width;
+  NotasVersao.Top := PaginaVersao.CheckListBox.Top + PaginaVersao.CheckListBox.Height + ScaleY(8);
+  NotasVersao.Height := PaginaVersao.SurfaceHeight - NotasVersao.Top;
+  NotasVersao.ReadOnly := True;
+  NotasVersao.WordWrap := True;
+  NotasVersao.ScrollBars := ssVertical;
+  PaginaVersao.CheckListBox.OnClickCheck := @CliqueNaVersao;
+
+  Escolhida := IndiceDaVersao(ExpandConstant('{param:Versao|}'));
+  if Escolhida < 0 then Escolhida := 0;
+  PaginaVersao.SelectedValueIndex := Escolhida;
+  MostrarNotasDaVersao(Escolhida);
+
   PaginaFifa := CreateInputFilePage(wpSelectDir,
     'FIFA Friends',
     'Onde está o executável do FIFA Friends?',
@@ -236,11 +403,31 @@ begin
   end;
 end;
 
+// Resumo na página "Pronto para instalar": versão e FIFA Friends.
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
+var
+  Acao: String;
+begin
+  if InstaladaPasta = '' then
+    Acao := 'instalar'
+  else if SameText(GetVersaoEscolhida(''), InstaladaId) then
+    Acao := 'reinstalar'
+  else
+    Acao := 'trocar a versão instalada (' + InstaladaId + ') por';
+  Result := 'Versão da {#AppNome}:' + NewLine + Space + Acao + ' ' + GetVersaoEscolhida('') + NewLine + NewLine +
+    MemoDirInfo + NewLine + NewLine +
+    'FIFA Friends:' + NewLine + Space + GetFifaFriendsExe('') + NewLine + NewLine +
+    MemoTasksInfo;
+end;
+
 // Cobre também a instalação silenciosa, que pula as páginas.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  if not FileExists(GetFifaFriendsExe('')) then
+  if (ExpandConstant('{param:Versao|}') <> '') and (IndiceDaVersao(ExpandConstant('{param:Versao|}')) < 0) then
+    Result := 'Versão "' + ExpandConstant('{param:Versao|}') + '" não existe neste instalador.' + #13#10 +
+      'Use /VERSAO= com um destes ids: ' + IdsDisponiveis + '.'
+  else if not FileExists(GetFifaFriendsExe('')) then
     Result := 'Executável do FIFA Friends não encontrado: "' + GetFifaFriendsExe('') + '".' + #13#10 +
       'Informe o caminho na instalação ou use /FIFAFRIENDS="caminho\Server16Python.exe".';
 end;
