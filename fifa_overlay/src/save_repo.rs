@@ -111,6 +111,11 @@ pub enum SaveRepoError {
     /// O orçamento vivo não é mais o valor que o usuário viu ao confirmar
     /// (o jogo mexeu nele no meio): nada foi escrito. Traz o valor atual.
     OrcamentoMudou(i32),
+    /// A lista de escolhidos nativa está cheia (100 jogadores).
+    ListaNativaCheia,
+    /// O scout nativo não está mais como foi localizado (a estrutura se
+    /// moveu ou o conteúdo mudou): nada foi escrito.
+    NativoMudou,
     /// Falha inesperada, com descrição para o log.
     Interno(String),
 }
@@ -125,6 +130,8 @@ impl fmt::Display for SaveRepoError {
             SaveRepoError::CarreiraNaoCarregada => write!(f, "Nenhuma carreira carregada."),
             SaveRepoError::NaoLocalizado => write!(f, "Carreira ainda não localizada."),
             SaveRepoError::OrcamentoMudou(atual) => write!(f, "O orçamento mudou para {atual}."),
+            SaveRepoError::ListaNativaCheia => write!(f, "A lista de escolhidos do jogo está cheia."),
+            SaveRepoError::NativoMudou => write!(f, "O scout do jogo mudou; nada foi escrito."),
             SaveRepoError::Interno(msg) => write!(f, "Erro interno: {msg}"),
         }
     }

@@ -911,6 +911,10 @@ pub struct JogadorEncontrado {
     pub nacao_id: u16,
     pub nacao: String,
     pub clube: String,
+    /// Time de clube (`teamid`) quando o Olheiro o viu; `None` em Relatórios de
+    /// antes do Épico 7 ou sem clube. A lista de escolhidos do jogo guarda o time.
+    #[serde(default)]
+    pub clube_id: Option<u32>,
     /// Ano de fim do contrato (dado do save, não revelado por faixa).
     /// `None` em Relatórios antigos ou sem clube.
     #[serde(default)]
@@ -1089,6 +1093,10 @@ pub struct Escolhido {
     /// Relatório de onde ele veio.
     #[serde(default)]
     pub relatorio_id: Option<Uuid>,
+    /// A Central pôs este jogador na lista de escolhidos DO JOGO (Épico 7);
+    /// só quem ela pôs ela tira de lá quando ele sai dos Escolhidos.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_jogo: bool,
 }
 
 /// O acompanhamento de um Escolhido por um Generalista: de onde partiu e
@@ -1236,6 +1244,47 @@ pub fn avancar_escolhido(e: &Escolhido, pool: &crate::save_repo::PlayerPool, hoj
         precisao,
         acompanhamento: Some(acompanhamento),
         ..e.clone()
+    }
+}
+
+/// Épico 7: põe o jogador na lista de escolhidos DO JOGO. `true` só se a
+/// Central de fato o acrescentou (então ela pode tirá-lo depois). Qualquer
+/// falha só vai para o log: a Central nunca depende da escrita.
+fn adicionar_na_lista_do_jogo(jogador: &JogadorEncontrado) -> bool {
+    use crate::save_repo::nativo::{self, ResultadoLista};
+    if !nativo::sincronizacao_ligada() {
+        return false;
+    }
+    let (Some(time), Ok(id)) = (jogador.clube_id.and_then(|c| i32::try_from(c).ok()), i32::try_from(jogador.player_id)) else {
+        tracing::info!("[scout::state] {} sem time conhecido: não vai para a lista do jogo.", jogador.nome);
+        return false;
+    };
+    match nativo::write_native_shortlist_add(time, id) {
+        Ok(ResultadoLista::Adicionado) => {
+            tracing::info!("[scout::state] {} entrou na lista de escolhidos do jogo.", jogador.nome);
+            true
+        }
+        Ok(outro) => {
+            tracing::info!("[scout::state] Lista do jogo: {} → {outro:?}.", jogador.nome);
+            false
+        }
+        Err(err) => {
+            tracing::warn!("[scout::state] Lista do jogo não foi atualizada para {}: {err}", jogador.nome);
+            false
+        }
+    }
+}
+
+/// Épico 7: tira da lista do jogo um jogador que a Central pôs lá.
+fn tirar_da_lista_do_jogo(player_id: u32) {
+    use crate::save_repo::nativo;
+    if !nativo::sincronizacao_ligada() {
+        return;
+    }
+    let Ok(id) = i32::try_from(player_id) else { return };
+    match nativo::write_native_shortlist_remove(id) {
+        Ok(resultado) => tracing::info!("[scout::state] Lista do jogo: jogador {player_id} → {resultado:?}."),
+        Err(err) => tracing::warn!("[scout::state] Lista do jogo não foi atualizada (remoção de {player_id}): {err}"),
     }
 }
 
@@ -1424,6 +1473,12 @@ pub struct ScoutState {
     tarefa_clube: AsyncTask<(String, Option<quality::PerfilClube>)>,
     /// Atualização dos Escolhidos acompanhados (Épico 6), com a carreira dona.
     tarefa_escolhidos: AsyncTask<(String, Vec<Escolhido>)>,
+    /// Descobre o time (`teamid`) de Escolhidos de Relatórios antigos (sem
+    /// `clube_id`) para pô-los na lista do jogo (Épico 7).
+    tarefa_times: AsyncTask<(String, Vec<(u32, Option<u32>)>)>,
+    /// Escolhidos esperando o time para entrar na lista do jogo.
+    ids_sem_time: Vec<u32>,
+    times_pendente: bool,
     /// Há uma atualização disparada e ainda não tratada.
     atualizacao_escolhidos_pendente: bool,
     /// Pediram outra atualização enquanto uma rodava: roda de novo no fim.
@@ -1491,6 +1546,9 @@ impl ScoutState {
             detalhes_da_missao: false,
             tarefa_clube: AsyncTask::new(),
             tarefa_escolhidos: AsyncTask::new(),
+            tarefa_times: AsyncTask::new(),
+            ids_sem_time: Vec::new(),
+            times_pendente: false,
             atualizacao_escolhidos_pendente: false,
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
@@ -1752,10 +1810,25 @@ impl ScoutState {
             alvo: missao.and_then(|m| m.filtros.fit_posicional),
             referencia: missao.and_then(|m| m.filtros.referencia.clone()),
             relatorio_id: Some(r.id),
+            no_jogo: false,
         };
         match estado.mutar(move |d| d.escolhidos.push(escolhido)) {
             Ok(()) => {
                 tracing::info!("[scout::state] {} entrou na Lista de Escolhidos.", ficha.jogador.nome);
+                // Épico 7: põe também na lista do jogo (nunca falha a ação)
+                if ficha.jogador.clube_id.is_none() {
+                    self.ids_sem_time.push(ficha.jogador.player_id);
+                    self.buscar_times();
+                } else if adicionar_na_lista_do_jogo(&ficha.jogador) {
+                    let id = ficha.jogador.player_id;
+                    if let Err(err) = estado.mutar(|d| {
+                        for e in d.escolhidos.iter_mut().filter(|e| e.jogador.player_id == id) {
+                            e.no_jogo = true;
+                        }
+                    }) {
+                        tracing::warn!("[scout::state] Marca \"no jogo\" não foi salva: {err:?}");
+                    }
+                }
                 self.atualizar_escolhidos(hoje);
                 true
             }
@@ -1771,6 +1844,7 @@ impl ScoutState {
         let Some(estado) = self.estado_ativo().cloned() else {
             return false;
         };
+        let estava_no_jogo = estado.ler(|d| d.escolhidos.iter().any(|e| e.jogador.player_id == player_id && e.no_jogo));
         let resultado = estado.mutar(|d| {
             let antes = d.escolhidos.len();
             d.escolhidos.retain(|e| e.jogador.player_id != player_id);
@@ -1778,6 +1852,9 @@ impl ScoutState {
         });
         match resultado {
             Ok(saiu) => {
+                if saiu && estava_no_jogo {
+                    tirar_da_lista_do_jogo(player_id);
+                }
                 if let (true, Some(hoje)) = (saiu, self.data_progresso) {
                     // a vaga dele pode ir para outro
                     self.atualizar_escolhidos(hoje);
@@ -1899,6 +1976,62 @@ impl ScoutState {
         self.atualizacao_escolhidos_pendente = iniciou;
     }
 
+    /// Lê o save (fora do render, AD-4) para descobrir o time dos Escolhidos
+    /// de `ids_sem_time` e, ao terminar, pô-los na lista do jogo.
+    fn buscar_times(&mut self) {
+        if self.times_pendente || self.ids_sem_time.is_empty() || !crate::save_repo::nativo::sincronizacao_ligada() {
+            return;
+        }
+        let Some(id_save) = self.save_ativo.clone() else { return };
+        let ids = std::mem::take(&mut self.ids_sem_time);
+        let fonte = Arc::clone(&self.fonte);
+        self.times_pendente = self.tarefa_times.start(move || {
+            let pool = fonte.read_all_players()?;
+            let times = ids
+                .iter()
+                .map(|id| (*id, pool.jogadores.iter().find(|j| j.player_id == *id).and_then(|j| j.clube_id)))
+                .collect();
+            Ok((id_save, times))
+        });
+    }
+
+    /// Trata a descoberta de times que terminou (roda a cada frame).
+    fn processar_times(&mut self) {
+        if !self.times_pendente {
+            return;
+        }
+        match self.tarefa_times.poll() {
+            TaskState::Running | TaskState::Idle => {}
+            TaskState::Done((dono, times)) => {
+                self.times_pendente = false;
+                self.tarefa_times.reset();
+                if let Some(estado) = self.estados.get(&dono).cloned() {
+                    for (player_id, time) in times {
+                        let Some(time) = time else { continue };
+                        let jogador = estado.ler(|d| d.escolhidos.iter().find(|e| e.jogador.player_id == player_id).map(|e| (e.jogador.clone(), e.no_jogo)));
+                        let Some((mut jogador, ja_no_jogo)) = jogador else { continue };
+                        jogador.clube_id = Some(time);
+                        let entrou = !ja_no_jogo && adicionar_na_lista_do_jogo(&jogador);
+                        if let Err(err) = estado.mutar(|d| {
+                            for e in d.escolhidos.iter_mut().filter(|e| e.jogador.player_id == player_id) {
+                                e.jogador.clube_id = Some(time);
+                                e.no_jogo |= entrou;
+                            }
+                        }) {
+                            tracing::warn!("[scout::state] Time do Escolhido não foi salvo: {err:?}");
+                        }
+                    }
+                }
+                self.buscar_times();
+            }
+            TaskState::Failed(err) => {
+                self.times_pendente = false;
+                self.tarefa_times.reset();
+                tracing::warn!("[scout::state] Time dos Escolhidos não foi lido: {err:?}");
+            }
+        }
+    }
+
     /// Trata a atualização dos Escolhidos que terminou (roda a cada frame).
     fn processar_escolhidos(&mut self) {
         if !self.atualizacao_escolhidos_pendente {
@@ -1918,7 +2051,7 @@ impl ScoutState {
                     for novo in novos {
                         if let Some(e) = d.escolhidos.iter_mut().find(|e| e.jogador.player_id == novo.jogador.player_id) {
                             // prioridade pode ter mudado enquanto a leitura rodava
-                            *e = Escolhido { prioridade: e.prioridade, ..novo };
+                            *e = Escolhido { prioridade: e.prioridade, no_jogo: e.no_jogo, ..novo };
                         }
                     }
                 });
@@ -1969,6 +2102,7 @@ impl ScoutState {
         }
         self.processar_buscas();
         self.processar_escolhidos();
+        self.processar_times();
         self.minifaces.tick();
 
         match self.tarefa_localizar.poll() {
@@ -5556,7 +5690,62 @@ mod tests {
             alvo: None,
             referencia: None,
             relatorio_id: None,
+            no_jogo: false,
         }
+    }
+
+    #[test]
+    fn a_new_escolhido_keeps_the_team_and_an_old_one_gets_it_from_the_save() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let vencida = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![vencida], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let item = st.relatorios(false).into_iter().next().expect("Relatório");
+        let pid = item.relatorio.jogadores[0].player_id;
+        st.abrir_relatorio(item.relatorio.id);
+        st.abrir_ficha(pid);
+        assert!(st.adicionar_escolhido_da_ficha());
+        assert_eq!(st.escolhidos()[0].escolhido.jogador.clube_id, Some(10), "o time do save vai junto");
+        assert!(st.ids_sem_time.is_empty(), "com time conhecido não precisa perguntar ao save");
+        assert!(!st.escolhidos()[0].escolhido.no_jogo, "sem o jogo localizado nada foi posto na lista dele");
+
+        // Escolhido de um Relatório antigo: sem time
+        let estado = st.estado_ativo().cloned().expect("estado");
+        estado
+            .mutar(|d| {
+                for e in d.escolhidos.iter_mut() {
+                    e.jogador.clube_id = None;
+                }
+            })
+            .expect("grava");
+        st.ids_sem_time.push(pid);
+        st.buscar_times();
+        assert!(st.times_pendente);
+        let inicio = Instant::now();
+        while st.times_pendente {
+            st.tick();
+            assert!(inicio.elapsed() < Duration::from_secs(5), "busca do time travou");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(st.escolhidos()[0].escolhido.jogador.clube_id, Some(10), "o time veio do save");
+    }
+
+    #[test]
+    fn the_in_game_mark_is_saved_only_when_set_and_old_files_still_load() {
+        let mut e = escolhido_de_teste(1, 20_351_001);
+        let sem = serde_json::to_string(&e).expect("serializa");
+        assert!(!sem.contains("no_jogo"), "marca falsa não vai para o arquivo");
+        let lido: Escolhido = serde_json::from_str(&sem).expect("arquivo sem a marca carrega");
+        assert!(!lido.no_jogo);
+
+        e.no_jogo = true;
+        let com = serde_json::to_string(&e).expect("serializa");
+        assert!(com.contains("\"no_jogo\":true"));
+        let lido: Escolhido = serde_json::from_str(&com).expect("recarrega");
+        assert!(lido.no_jogo);
+        assert_eq!(lido.jogador.clube_id, e.jogador.clube_id);
     }
 
     #[test]

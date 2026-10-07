@@ -30,7 +30,9 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use super::{i32_at, regions_with_live_date, ByteSource, Date, OwnMemory, ProcessMemory, SaveRepoError, ScrubbedBuffer};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::{i32_at, regions_with_live_date, ByteSink, ByteSource, Date, OwnMemory, ProcessMemory, SaveRepoError, ScrubbedBuffer};
 use crate::memscan::{self, Region};
 
 /// Bytes de uma entrada da lista de escolhidos nativa.
@@ -299,9 +301,14 @@ fn donos_de_escolhidos(base: usize, bytes: &[u8]) -> Vec<usize> {
 // ---------------------------------------------------------------------
 
 /// Onde estão, na memória viva, os dois vetores do scout nativo.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalNativo {
     pub escolhidos: Option<VetorVivo>,
+    /// Todas as estruturas donas coerentes que apontam para ESSA lista de
+    /// escolhidos (o dono se move a cada recarga e cópias velhas podem
+    /// continuar íntegras; a escrita atualiza o fim em todas que ainda
+    /// batem).
+    pub escolhidos_donos: Vec<usize>,
     pub conhecimento: Option<VetorVivo>,
 }
 
@@ -340,7 +347,17 @@ fn montar_local(
         let enderecos: Vec<String> = validos.iter().map(|(n, v)| format!("0x{:X} ({n} entradas)", v.dono)).collect();
         tracing::warn!("[nativo] {} donos coerentes da lista de escolhidos ({}); usando o primeiro.", validos.len(), enderecos.join(", "));
     }
-    LocalNativo { escolhidos: validos.first().map(|(_, v)| *v), conhecimento: conhecimento.map(|(_, v)| v) }
+    let escolhidos = validos.first().map(|(_, v)| *v);
+    let escolhidos_donos = escolhidos
+        .map(|principal| {
+            validos
+                .iter()
+                .filter(|(_, v)| (v.inicio, v.fim, v.fim_capacidade) == (principal.inicio, principal.fim, principal.fim_capacidade))
+                .map(|(_, v)| v.dono)
+                .collect()
+        })
+        .unwrap_or_default();
+    LocalNativo { escolhidos, escolhidos_donos, conhecimento: conhecimento.map(|(_, v)| v) }
 }
 
 /// Lê cada região de `regions` para o `buffer` e chama `f(base, bytes)`.
@@ -399,10 +416,11 @@ fn localizar() -> Result<LocalNativo, SaveRepoError> {
             donos_lista.extend(donos_de_escolhidos(base, bytes));
         });
         let achado = montar_local(&donos_conhecimento, &donos_lista, &ProcessMemory);
-        melhor = LocalNativo {
-            escolhidos: melhor.escolhidos.or(achado.escolhidos),
-            conhecimento: melhor.conhecimento.or(achado.conhecimento),
-        };
+        if melhor.escolhidos.is_none() {
+            melhor.escolhidos = achado.escolhidos;
+            melhor.escolhidos_donos = achado.escolhidos_donos;
+        }
+        melhor.conhecimento = melhor.conhecimento.or(achado.conhecimento);
         if melhor.escolhidos.is_some() && melhor.conhecimento.is_some() {
             break;
         }
@@ -437,6 +455,7 @@ pub(super) fn localizar_e_guardar() {
             tracing::info!("[nativo] escolhidos: {:?}", local.escolhidos);
             tracing::info!("[nativo] conhecimento: {:?}", local.conhecimento);
             if let Some(v) = local.escolhidos {
+                tracing::info!("[nativo] donos da lista de escolhidos: {:X?}", local.escolhidos_donos);
                 match ler_escolhidos_de(&ProcessMemory, &v) {
                     Some(lista) => tracing::info!("[nativo] Lista de escolhidos nativa: {} jogador(es) {:?}", lista.len(), lista.iter().map(|e| e.jogador).collect::<Vec<_>>()),
                     None => tracing::warn!("[nativo] Lista de escolhidos ilegível logo depois de localizar."),
@@ -495,6 +514,166 @@ pub fn read_native_knowledge() -> Result<Vec<RegistroConhecimento>, SaveRepoErro
             Err(SaveRepoError::NaoLocalizado)
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Escrita na lista de escolhidos nativa (Story 7.2)
+// ---------------------------------------------------------------------
+
+/// Interruptor da sincronização com o jogo (a Story 7.4 o liga às
+/// configurações e o persiste). Ligado por padrão (decisão de 2026-10-06).
+static SINCRONIZAR: AtomicBool = AtomicBool::new(true);
+
+/// A Central pode escrever no scout nativo agora?
+pub fn sincronizacao_ligada() -> bool {
+    SINCRONIZAR.load(Ordering::Relaxed)
+}
+
+#[allow(dead_code)] // ligado às configurações na Story 7.4
+pub fn definir_sincronizacao(ligada: bool) {
+    SINCRONIZAR.store(ligada, Ordering::Relaxed);
+}
+
+/// O que aconteceu com um pedido de adicionar/remover na lista nativa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultadoLista {
+    Adicionado,
+    /// Já estava na lista do jogo (não é "da Central": ela não o remove depois).
+    JaEstava,
+    Removido,
+    NaoEstava,
+}
+
+/// Lê os donos ainda coerentes com a lista em cache. Os que não batem mais
+/// com o início e a capacidade guardados (estrutura liberada e reaproveitada)
+/// ficam de fora; os que sobram precisam concordar no fim. Sem dono vivo, ou
+/// com donos discordando, o cache é considerado velho.
+fn donos_vivos(mem: &impl ByteSource, local: &LocalNativo) -> Result<(VetorVivo, Vec<usize>), SaveRepoError> {
+    let esperado = local.escolhidos.ok_or(SaveRepoError::NaoLocalizado)?;
+    let vivos: Vec<VetorVivo> = local
+        .escolhidos_donos
+        .iter()
+        .filter_map(|dono| VetorVivo::ler(mem, *dono))
+        .filter(|v| v.inicio == esperado.inicio && v.fim_capacidade == esperado.fim_capacidade)
+        .collect();
+    let Some(primeiro) = vivos.first().copied() else {
+        return Err(SaveRepoError::NativoMudou);
+    };
+    if vivos.iter().any(|v| v.fim != primeiro.fim) {
+        return Err(SaveRepoError::NativoMudou);
+    }
+    Ok((primeiro, vivos.iter().map(|v| v.dono).collect()))
+}
+
+fn escrever_fim(mem: &impl ByteSink, donos: &[usize], novo_fim: usize) -> Result<(), SaveRepoError> {
+    for dono in donos {
+        if !mem.write(dono + 8, &(novo_fim as u64).to_le_bytes()) {
+            return Err(SaveRepoError::ProcessoInacessivel);
+        }
+    }
+    Ok(())
+}
+
+/// Confere, depois de escrever, que todos os donos mostram `novo_fim` e que
+/// a lista lida é exatamente `esperada`.
+fn conferir_lista(
+    mem: &impl ByteSource,
+    donos: &[usize],
+    base: &VetorVivo,
+    novo_fim: usize,
+    esperada: &[EntradaEscolhido],
+) -> Result<VetorVivo, SaveRepoError> {
+    let mut ultimo = None;
+    for dono in donos {
+        let v = VetorVivo::ler(mem, *dono).ok_or(SaveRepoError::ProcessoInacessivel)?;
+        if v.inicio != base.inicio || v.fim != novo_fim || v.fim_capacidade != base.fim_capacidade {
+            return Err(SaveRepoError::Interno(format!("releitura do dono 0x{dono:X} não confere")));
+        }
+        ultimo = Some(v);
+    }
+    let vetor = ultimo.ok_or(SaveRepoError::NativoMudou)?;
+    match ler_escolhidos_de(mem, &vetor) {
+        Some(lista) if lista == esperada => Ok(vetor),
+        _ => Err(SaveRepoError::Interno("a lista nativa relida não é a escrita".into())),
+    }
+}
+
+/// Acrescenta `jogador` (do time `time`) no fim da lista de escolhidos do
+/// jogo. Compare-and-write: só escreve se a lista continua como foi achada
+/// (mesmo início/capacidade nos donos vivos, entradas válidas), grava a
+/// entrada ANTES de avançar o ponteiro de fim e relê tudo.
+fn adicionar_em(
+    mem: &(impl ByteSource + ByteSink),
+    local: &mut LocalNativo,
+    time: i32,
+    jogador: i32,
+) -> Result<ResultadoLista, SaveRepoError> {
+    let (vetor, donos) = donos_vivos(mem, local)?;
+    let atual = ler_escolhidos_de(mem, &vetor).ok_or(SaveRepoError::NativoMudou)?;
+    if atual.iter().any(|e| e.jogador == jogador) {
+        return Ok(ResultadoLista::JaEstava);
+    }
+    if atual.len() >= CAPACIDADE_ESCOLHIDOS || vetor.fim + ENTRADA_ESCOLHIDO > vetor.fim_capacidade {
+        return Err(SaveRepoError::ListaNativaCheia);
+    }
+    let nova = EntradaEscolhido { time, jogador, revelado: [-1; 4], marca: 1 };
+    if !mem.write(vetor.fim, &nova.para_bytes()) {
+        return Err(SaveRepoError::ProcessoInacessivel);
+    }
+    let novo_fim = vetor.fim + ENTRADA_ESCOLHIDO;
+    escrever_fim(mem, &donos, novo_fim)?;
+    let mut esperada = atual;
+    esperada.push(nova);
+    let relido = conferir_lista(mem, &donos, &vetor, novo_fim, &esperada)?;
+    local.escolhidos = Some(relido);
+    local.escolhidos_donos = donos;
+    Ok(ResultadoLista::Adicionado)
+}
+
+/// Tira `jogador` da lista de escolhidos do jogo (as entradas seguintes
+/// sobem uma casa). O fim encolhe ANTES de os dados serem reescritos.
+fn remover_em(mem: &(impl ByteSource + ByteSink), local: &mut LocalNativo, jogador: i32) -> Result<ResultadoLista, SaveRepoError> {
+    let (vetor, donos) = donos_vivos(mem, local)?;
+    let atual = ler_escolhidos_de(mem, &vetor).ok_or(SaveRepoError::NativoMudou)?;
+    let Some(posicao) = atual.iter().position(|e| e.jogador == jogador) else {
+        return Ok(ResultadoLista::NaoEstava);
+    };
+    let mut restante = atual;
+    restante.remove(posicao);
+    let novo_fim = vetor.inicio + restante.len() * ENTRADA_ESCOLHIDO;
+    escrever_fim(mem, &donos, novo_fim)?;
+    if posicao < restante.len() {
+        let bytes: Vec<u8> = restante.iter().skip(posicao).flat_map(|e| e.para_bytes()).collect();
+        if !mem.write(vetor.inicio + posicao * ENTRADA_ESCOLHIDO, &bytes) {
+            return Err(SaveRepoError::ProcessoInacessivel);
+        }
+    }
+    let relido = conferir_lista(mem, &donos, &vetor, novo_fim, &restante)?;
+    local.escolhidos = Some(relido);
+    local.escolhidos_donos = donos;
+    Ok(ResultadoLista::Removido)
+}
+
+/// Acrescenta um jogador à lista de escolhidos do jogo (ver `adicionar_em`).
+/// Se o cache estiver velho (`NativoMudou`), ele é descartado.
+pub fn write_native_shortlist_add(time: i32, jogador: i32) -> Result<ResultadoLista, SaveRepoError> {
+    com_cache(|local| adicionar_em(&ProcessMemory, local, time, jogador))
+}
+
+/// Tira um jogador da lista de escolhidos do jogo (ver `remover_em`).
+pub fn write_native_shortlist_remove(jogador: i32) -> Result<ResultadoLista, SaveRepoError> {
+    com_cache(|local| remover_em(&ProcessMemory, local, jogador))
+}
+
+fn com_cache<R>(f: impl FnOnce(&mut LocalNativo) -> Result<R, SaveRepoError>) -> Result<R, SaveRepoError> {
+    let mut cache = lock_cache();
+    let Some(local) = cache.as_mut() else { return Err(SaveRepoError::NaoLocalizado) };
+    let resultado = f(local);
+    if matches!(resultado, Err(SaveRepoError::NativoMudou)) {
+        local.escolhidos = None;
+        local.escolhidos_donos.clear();
+    }
+    resultado
 }
 
 /// Descarta o cache (outra carreira carregada).
@@ -712,5 +891,148 @@ mod tests {
         let sequencias = sequencias_de_conhecimento(0, &memoria);
         let local = montar_local(&donos_de_conhecimento(0, &memoria, &sequencias), &donos_de_escolhidos(0, &memoria), &origem);
         assert_eq!(local.escolhidos.map(|v| v.dono), Some(DONO_L));
+    }
+
+    // -----------------------------------------------------------------
+    // Escrita na lista nativa (Story 7.2)
+    // -----------------------------------------------------------------
+
+    /// Memória simulada que aceita escrita (os testes de leitura usam `SliceSource`).
+    struct Mutavel(std::cell::RefCell<Vec<u8>>);
+
+    impl ByteSource for Mutavel {
+        fn read(&self, address: usize, len: usize) -> Option<Vec<u8>> {
+            self.0.borrow().get(address..address.checked_add(len)?).map(<[u8]>::to_vec)
+        }
+    }
+
+    impl ByteSink for Mutavel {
+        fn write(&self, address: usize, bytes: &[u8]) -> bool {
+            let mut memoria = self.0.borrow_mut();
+            match memoria.get_mut(address..address + bytes.len()) {
+                Some(destino) => {
+                    destino.copy_from_slice(bytes);
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+
+    const DONO_L2: usize = 0x1_6000;
+
+    /// Memória + local achado, com DOIS donos coerentes da mesma lista.
+    fn com_dois_donos() -> (Mutavel, LocalNativo) {
+        let mut memoria = memoria_simulada();
+        escreve_u64(&mut memoria, DONO_L2, LISTA as u64);
+        escreve_u64(&mut memoria, DONO_L2 + 8, (LISTA + 2 * ENTRADA_ESCOLHIDO) as u64);
+        escreve_u64(&mut memoria, DONO_L2 + 16, (LISTA + CAPACIDADE_ESCOLHIDOS * ENTRADA_ESCOLHIDO) as u64);
+        let sequencias = sequencias_de_conhecimento(0, &memoria);
+        let local = montar_local(&donos_de_conhecimento(0, &memoria, &sequencias), &donos_de_escolhidos(0, &memoria), &SliceSource(&memoria));
+        (Mutavel(std::cell::RefCell::new(memoria)), local)
+    }
+
+    fn lista_do_jogo(mem: &Mutavel, local: &LocalNativo) -> Vec<(i32, i32)> {
+        let vetor = VetorVivo::ler(mem, local.escolhidos_donos[0]).expect("dono");
+        ler_escolhidos_de(mem, &vetor).expect("lista").iter().map(|e| (e.time, e.jogador)).collect()
+    }
+
+    #[test]
+    fn both_coherent_owners_of_the_same_list_are_remembered() {
+        let (_, local) = com_dois_donos();
+        let mut donos = local.escolhidos_donos.clone();
+        donos.sort_unstable();
+        assert_eq!(donos, vec![DONO_L, DONO_L2]);
+    }
+
+    #[test]
+    fn adding_appends_the_entry_and_moves_the_end_of_every_owner() {
+        let (mem, mut local) = com_dois_donos();
+        let resultado = adicionar_em(&mem, &mut local, 1808, 73885).expect("adiciona");
+        assert_eq!(resultado, ResultadoLista::Adicionado);
+        assert_eq!(lista_do_jogo(&mem, &local), vec![(10, 268737), (1906, 71532), (1808, 73885)]);
+        for dono in [DONO_L, DONO_L2] {
+            let v = VetorVivo::ler(&mem, dono).expect("dono");
+            assert_eq!(v.fim, LISTA + 3 * ENTRADA_ESCOLHIDO, "o fim de 0x{dono:X} avançou");
+        }
+        // o cache acompanha a lista nova
+        assert_eq!(local.escolhidos.map(|v| v.fim), Some(LISTA + 3 * ENTRADA_ESCOLHIDO));
+        // a entrada nova é a do jogo: -1 ×4 e marca 1, preenchimento zerado
+        let bruto = mem.read(LISTA + 2 * ENTRADA_ESCOLHIDO, ENTRADA_ESCOLHIDO).expect("bytes");
+        assert_eq!(bruto, EntradaEscolhido { time: 1808, jogador: 73885, revelado: [-1; 4], marca: 1 }.para_bytes());
+        assert_eq!(&bruto[25..28], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn adding_a_player_who_is_already_there_writes_nothing() {
+        let (mem, mut local) = com_dois_donos();
+        let antes = mem.0.borrow().clone();
+        assert_eq!(adicionar_em(&mem, &mut local, 1906, 71532), Ok(ResultadoLista::JaEstava));
+        assert_eq!(*mem.0.borrow(), antes);
+    }
+
+    #[test]
+    fn a_full_native_list_refuses_one_more() {
+        let (mem, mut local) = com_dois_donos();
+        for i in 2..CAPACIDADE_ESCOLHIDOS {
+            let jogador = 100_000 + i as i32;
+            adicionar_em(&mem, &mut local, 5, jogador).expect("cabe");
+        }
+        assert_eq!(lista_do_jogo(&mem, &local).len(), CAPACIDADE_ESCOLHIDOS);
+        let antes = mem.0.borrow().clone();
+        assert_eq!(adicionar_em(&mem, &mut local, 5, 399_999), Err(SaveRepoError::ListaNativaCheia));
+        assert_eq!(*mem.0.borrow(), antes, "nada escrito");
+    }
+
+    #[test]
+    fn owners_that_disagree_or_moved_make_the_cache_stale_without_writing() {
+        // donos discordando no fim
+        let (mem, mut local) = com_dois_donos();
+        mem.write(DONO_L2 + 8, &((LISTA + ENTRADA_ESCOLHIDO) as u64).to_le_bytes());
+        let antes = mem.0.borrow().clone();
+        assert_eq!(adicionar_em(&mem, &mut local, 1808, 73885), Err(SaveRepoError::NativoMudou));
+        assert_eq!(*mem.0.borrow(), antes);
+
+        // todos os donos se mexeram (estrutura liberada e reaproveitada)
+        let (mem, mut local) = com_dois_donos();
+        mem.write(DONO_L, &[0u8; 24]);
+        mem.write(DONO_L2, &[0u8; 24]);
+        let antes = mem.0.borrow().clone();
+        assert_eq!(adicionar_em(&mem, &mut local, 1808, 73885), Err(SaveRepoError::NativoMudou));
+        assert_eq!(*mem.0.borrow(), antes);
+    }
+
+    #[test]
+    fn an_owner_that_was_reused_is_dropped_and_the_live_one_still_works() {
+        let (mem, mut local) = com_dois_donos();
+        mem.write(DONO_L2, &[0u8; 24]); // virou outra coisa
+        assert_eq!(adicionar_em(&mem, &mut local, 1808, 73885), Ok(ResultadoLista::Adicionado));
+        assert_eq!(local.escolhidos_donos, vec![DONO_L], "o dono morto saiu do cache");
+        assert_eq!(lista_do_jogo(&mem, &local).len(), 3);
+    }
+
+    #[test]
+    fn removing_the_first_entry_compacts_the_list_and_shrinks_the_end() {
+        let (mem, mut local) = com_dois_donos();
+        adicionar_em(&mem, &mut local, 1808, 73885).expect("adiciona");
+        assert_eq!(remover_em(&mem, &mut local, 268737), Ok(ResultadoLista::Removido));
+        assert_eq!(lista_do_jogo(&mem, &local), vec![(1906, 71532), (1808, 73885)]);
+        for dono in [DONO_L, DONO_L2] {
+            assert_eq!(VetorVivo::ler(&mem, dono).map(|v| v.fim), Some(LISTA + 2 * ENTRADA_ESCOLHIDO));
+        }
+    }
+
+    #[test]
+    fn removing_the_last_entry_and_a_missing_one() {
+        let (mem, mut local) = com_dois_donos();
+        assert_eq!(remover_em(&mem, &mut local, 71532), Ok(ResultadoLista::Removido));
+        assert_eq!(lista_do_jogo(&mem, &local), vec![(10, 268737)]);
+        let antes = mem.0.borrow().clone();
+        assert_eq!(remover_em(&mem, &mut local, 999), Ok(ResultadoLista::NaoEstava));
+        assert_eq!(*mem.0.borrow(), antes);
+        // esvazia: a lista vazia continua sendo um dono válido
+        assert_eq!(remover_em(&mem, &mut local, 268737), Ok(ResultadoLista::Removido));
+        assert!(lista_do_jogo(&mem, &local).is_empty());
+        assert_eq!(adicionar_em(&mem, &mut local, 12, 268737), Ok(ResultadoLista::Adicionado));
     }
 }
