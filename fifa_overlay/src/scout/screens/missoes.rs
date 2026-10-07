@@ -67,17 +67,29 @@ pub fn texto_estimativa(linha: &MissaoNaLista) -> String {
     }
 }
 
-/// Texto de uma Missão contínua em andamento (Story 2.10).
+/// Texto de uma Missão contínua em andamento (Story 2.10; contrato de 12
+/// meses desde 2026-10-07).
 pub fn texto_continua(linha: &MissaoNaLista) -> String {
     let m = &linha.missao;
     let achados = super::aviso::texto_jogadores(linha.revelados);
-    match linha.progresso {
-        Some(p) if p.prazo_atingido => format!(
+    let vencido = linha.progresso.is_some_and(|p| p.prazo_atingido);
+    match (m.tem_contrato(), vencido) {
+        (true, true) => format!(
+            "Contrato de 12 meses encerrado em {} ({achados} até agora). Renove para continuar ou encerre a Missão.",
+            formatar_data(m.fim_do_contrato())
+        ),
+        (true, false) => format!(
+            "Contrato de 12 meses até {} · {achados} até agora · {}",
+            formatar_data(m.fim_do_contrato()),
+            if m.renovar_sozinho { "renova sozinho." } else { "não renova sozinho." }
+        ),
+        // contínua de antes, paga bloco a bloco
+        (false, true) => format!(
             "Bloco {} encerrado em {} ({achados} até agora). Renove para continuar ou encerre a Missão.",
             m.blocos,
             formatar_data(m.prazo_estimado)
         ),
-        _ => format!("Contínua · bloco {} até {} · {achados} até agora.", m.blocos, formatar_data(m.prazo_estimado)),
+        (false, false) => format!("Contínua · bloco {} até {} · {achados} até agora.", m.blocos, formatar_data(m.prazo_estimado)),
     }
 }
 
@@ -126,36 +138,67 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pode_encom
     acao
 }
 
-/// Renovar / Encerrar de uma Missão contínua (Story 2.10). Renovar é uma
-/// compra como as outras: só com confirmação explícita, o valor exato no
-/// botão e as mesmas mensagens de falha.
+/// Renovar / Encerrar de uma Missão contínua (Story 2.10) e a renovação
+/// sozinha do contrato (2026-10-07). Renovar à mão é uma compra como as
+/// outras: só com confirmação explícita, o valor exato no botão e as mesmas
+/// mensagens de falha. A renovação sozinha só roda com a opção ligada, no fim
+/// do contrato e havendo verba.
 fn acoes_continua(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, linha: &MissaoNaLista) {
     let m = &linha.missao;
     let _id = ui.push_id(m.id.to_string());
-    let custo = ScoutState::custo_do_bloco(m);
-    let encerrado = state.bloco_encerrado(m);
+    let custo = ScoutState::custo_do_contrato(m);
+    let vencido = state.contrato_vencido(m);
     let falta = state.orcamento().map(|saldo| custo.saturating_sub(saldo)).filter(|f| *f > 0);
     let rotulo = format!("Renovar por {}", super::formatar_milhar(custo));
-    if componentes::botao(ui, fonts, &rotulo, EstiloBotao::Primario, encerrado && falta.is_none()) {
+    if componentes::botao(ui, fonts, &rotulo, EstiloBotao::Primario, vencido && falta.is_none()) {
         state.renovar_missao(m.id);
     }
     ui.same_line_with_spacing(0.0, theme::ESPACO_2);
     if componentes::botao(ui, fonts, "Encerrar Missão", EstiloBotao::Secundario, true) {
         state.encerrar_missao(m.id);
     }
+    if m.tem_contrato() {
+        ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+        let estilo = if m.renovar_sozinho { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        let texto = if m.renovar_sozinho { "Renova sozinho: ligado" } else { "Renova sozinho: desligado" };
+        if componentes::botao(ui, fonts, texto, estilo, true) {
+            state.definir_renovar_sozinho(m.id, !m.renovar_sozinho);
+        }
+    }
     let aviso = match (state.erro_da_missao(m.id), falta) {
+        (Some(erro), _) if vencido && m.tem_contrato() && m.renovar_sozinho => {
+            Some(format!("O contrato não renovou sozinho. {}", super::nova_missao::texto_erro(erro)))
+        }
         (Some(erro), _) => Some(super::nova_missao::texto_erro(erro)),
-        (None, Some(f)) if encerrado => Some(super::olheiros::texto_faltam(f)),
+        (None, Some(f)) if vencido => Some(super::olheiros::texto_faltam(f)),
         _ => None,
     };
     if let Some(texto) = aviso {
         com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::DANGER, texto));
-    } else if !encerrado {
+    } else if !vencido {
         com_fonte(ui, fonts.map(|f| f.meta), || {
-            ui.text_colored(theme::TEXT_SECONDARY, "Renovar fica disponível quando o bloco terminar.")
+            ui.text_colored(theme::TEXT_SECONDARY, texto_dica_do_contrato(m, custo));
         });
     }
     ui.dummy([0.0, theme::ESPACO_2]);
+}
+
+/// A linha de apoio embaixo dos botões, com o contrato em vigor.
+pub fn texto_dica_do_contrato(m: &crate::scout::state::Missao, custo: i32) -> String {
+    if !m.tem_contrato() {
+        return "Renovar fica disponível quando o bloco terminar.".to_string();
+    }
+    let carencia = if m.contratos.len() == 1 {
+        " Até lá, tirar o Olheiro para outra localidade cobra a multa dele."
+    } else {
+        ""
+    };
+    let renovacao = if m.renovar_sozinho {
+        format!("No fim, renova sozinho por {} se houver verba.", super::formatar_milhar(custo))
+    } else {
+        "No fim, o contrato acaba (a renovação sozinha está desligada).".to_string()
+    };
+    format!("{renovacao} Encerrar antes do fim não devolve o que foi pago.{carencia}")
 }
 
 /// Card de uma Missão; `true` = ativado (só faz algo com Relatório pronto).
@@ -184,12 +227,21 @@ fn card_missao(ui: &Ui, fonts: Option<&Fonts>, linha: &MissaoNaLista) -> bool {
     y += altura_nome + theme::ESPACO_1;
 
     // Linha 2: Modo · status · prazo.
-    let mut detalhe = format!(
-        "{} · {} · prazo {}",
-        nome_modo(missao.modo_busca),
-        nome_status(missao.status, linha.progresso),
-        formatar_data(missao.prazo_estimado)
-    );
+    let mut detalhe = if missao.tem_contrato() && missao.status != StatusMissao::Concluida {
+        format!(
+            "{} · {} · contrato até {}",
+            nome_modo(missao.modo_busca),
+            nome_status(missao.status, linha.progresso),
+            formatar_data(missao.fim_do_contrato())
+        )
+    } else {
+        format!(
+            "{} · {} · prazo {}",
+            nome_modo(missao.modo_busca),
+            nome_status(missao.status, linha.progresso),
+            formatar_data(missao.prazo_estimado)
+        )
+    };
     if !missao.filtros.atributos_dominantes.is_empty() {
         detalhe.push_str(&format!(" · foco em {}", super::nova_missao::texto_atributos(&missao.filtros.atributos_dominantes)));
     }

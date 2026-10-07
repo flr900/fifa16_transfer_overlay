@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn the_warning_says_what_is_lost_and_what_stays() {
         let olheiro = Olheiro { nome: "Zé".to_string(), especializacao: Especializacao::Generalista, tier: Tier::Experiente, ..Default::default() };
-        let livre = OlheiroContratado { olheiro: olheiro.clone(), em_missao: false, acompanhando: false, missao: None, relatorio_atual: None, relatorios: 0 };
+        let livre = OlheiroContratado { olheiro: olheiro.clone(), em_missao: false, acompanhando: false, missao: None, relatorio_atual: None, relatorios: 0, rescisao: None };
         let texto = texto_aviso(&livre);
         assert!(texto.contains("não volta") && texto.contains("continuam no histórico"), "{texto}");
         assert!(!texto.contains("Escolhidos"));

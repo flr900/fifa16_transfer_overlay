@@ -1364,12 +1364,42 @@ pub fn nivel_no_jogo(precisao: u8, parcial: bool, vencido: bool, original: i32) 
 // Relatório parcial e Missão contínua (Story 2.10)
 // ---------------------------------------------------------------------
 
-/// Uma Missão contínua ("sem prazo") é paga em blocos de tantos dias de
-/// carreira; cada bloco custa o mesmo que a Missão de prazo fixo com os
-/// mesmos filtros e traz o mesmo número de jogadores, só que espalhados
-/// pelo bloco. Nada é cobrado sozinho: cada bloco novo é confirmado pelo
-/// jogador (FR-3/NFR1).
+/// Uma Missão contínua ("sem prazo") é um **contrato de 12 meses** com o
+/// Olheiro (2026-10-07; antes era paga mês a mês): o contrato é pago uma vez
+/// e renova sozinho a cada 12 meses, se houver verba (o jogador pode
+/// desligar a renovação). Por dentro, a busca anda em blocos de tantos dias
+/// de carreira: a cada bloco o Olheiro traz mais jogadores, o mesmo número
+/// que uma Missão de prazo fixo com os mesmos filtros, espalhados pelo bloco
+/// e buscados com os dados do momento. O último bloco do contrato absorve os
+/// dias que sobram.
 pub const DIAS_BLOCO_CONTINUO: u32 = 30;
+
+/// Duração do contrato de uma Missão contínua: 12 meses.
+pub const DIAS_CONTRATO_CONTINUO: u32 = 365;
+
+/// Quanto o contrato de 12 meses custa frente à Missão de prazo fixo com os
+/// mesmos filtros, em %: mais caro que ela, bem mais barato que os 12 meses
+/// pagos um a um.
+pub const PCT_CUSTO_CONTRATO: i64 = 300;
+
+/// Custo do contrato de 12 meses de uma Missão contínua cujo equivalente de
+/// prazo fixo custa `custo_fixo` (arredondado como os outros custos).
+pub fn custo_do_contrato(custo_fixo: i32) -> i32 {
+    let total = i64::from(custo_fixo) * PCT_CUSTO_CONTRATO / 100;
+    i32::try_from((total + ARREDONDAMENTO_CUSTO / 2) / ARREDONDAMENTO_CUSTO * ARREDONDAMENTO_CUSTO).unwrap_or(i32::MAX)
+}
+
+/// Quanto da contratação o Olheiro cobra de multa por ser tirado de um
+/// contrato no meio para outra localidade, em %.
+pub const PCT_MULTA_RESCISAO: i64 = 20;
+
+/// A multa de rescisão de um Olheiro: fixa para ele (um quinto do que custou
+/// contratá-lo, então Olheiros melhores cobram mais), no mínimo 50 mil.
+pub fn multa_de_rescisao(perfil: &PerfilOlheiro, continente: Option<Confederacao>, mercados: usize) -> i32 {
+    let total = i64::from(custo_contratacao(perfil, continente, mercados)) * PCT_MULTA_RESCISAO / 100;
+    let arredondada = (total + ARREDONDAMENTO_CUSTO / 2) / ARREDONDAMENTO_CUSTO * ARREDONDAMENTO_CUSTO;
+    i32::try_from(arredondada).unwrap_or(i32::MAX).max(50_000)
+}
 
 /// Quantos jogadores do Relatório já apareceram com o progresso `fracao`
 /// (0–1): `ceil(fracao × alvo)`, nunca mais que os `encontrados` pela
@@ -3046,6 +3076,31 @@ mod tests {
         assert!(extremos * 100 / todas.len() >= 25, "extremos: {extremos}/{}", todas.len());
         // o equilibrado continua com um foco, então com Tier e preço
         assert!(todas.iter().filter(|o| abertura(o) <= 2).any(|o| o.perfil.tier() == Tier::Experiente));
+    }
+
+    #[test]
+    fn the_twelve_month_contract_costs_more_than_one_search_and_far_less_than_twelve() {
+        for fixo in [70_000, 170_000, 700_000, 2_400_000] {
+            let contrato = custo_do_contrato(fixo);
+            assert!(contrato > fixo, "{fixo}: {contrato}");
+            assert!(i64::from(contrato) < 12 * i64::from(fixo) / 2, "bem menos que 12 pesquisas: {fixo}: {contrato}");
+            assert_eq!(contrato % 10_000, 0, "arredondado como os outros custos");
+        }
+        assert_eq!(custo_do_contrato(170_000), 510_000);
+        assert_eq!(DIAS_CONTRATO_CONTINUO, 365);
+    }
+
+    #[test]
+    fn the_rescission_fine_is_fixed_per_olheiro_and_grows_with_his_quality() {
+        let junior = PerfilOlheiro::v1(Especializacao::Tatico, Tier::Junior);
+        let elite = PerfilOlheiro::v1(Especializacao::Tatico, Tier::Elite);
+        let multa = |p: &PerfilOlheiro| multa_de_rescisao(p, Some(Confederacao::Africa), 1);
+        assert!(multa(&junior) >= 50_000, "tem piso");
+        assert!(multa(&elite) > multa(&junior) * 3, "{} contra {}", multa(&elite), multa(&junior));
+        assert_eq!(multa(&elite), multa(&elite), "fixa: não muda entre chamadas");
+        // um quinto do que custou contratá-lo (acima do piso)
+        let contratar = i64::from(custo_contratacao(&elite, Some(Confederacao::Africa), 1));
+        assert!((i64::from(multa(&elite)) - contratar / 5).abs() <= 10_000);
     }
 
     #[test]

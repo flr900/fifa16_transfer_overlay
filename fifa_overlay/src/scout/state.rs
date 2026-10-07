@@ -301,6 +301,12 @@ impl Olheiro {
         self.acompanhando_desde.is_some()
     }
 
+    /// O que ele cobra para ser tirado de um contrato no meio (fixo para
+    /// ele: um quinto do que custou contratá-lo).
+    pub fn multa_de_rescisao(&self) -> i32 {
+        quality::multa_de_rescisao(&self.perfil(), self.nacao.as_ref().map(|n| n.continente), self.mercados.len())
+    }
+
     /// Só Generalistas mantêm a Lista de Escolhidos (pedido do Felipe).
     pub fn pode_acompanhar(&self) -> bool {
         self.perfil().foco() == Especializacao::Generalista
@@ -354,12 +360,38 @@ pub struct OlheiroContratado {
     pub relatorio_atual: Option<Uuid>,
     /// Relatórios que este Olheiro já entregou (inclui o atual).
     pub relatorios: usize,
+    /// Está num contrato de Missão contínua que pode ser deixado para uma
+    /// Missão nova (com multa, se ainda não venceu).
+    pub rescisao: Option<Rescisao>,
+}
+
+/// O contrato de Missão contínua de um Olheiro, visto de quem quer tirá-lo
+/// dele (2026-10-07). A multa só existe nos 12 primeiros meses: depois deles
+/// (e nas renovações) ele pode mudar de localidade sem multa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rescisao {
+    /// A Missão contínua que acabaria.
+    pub missao: Uuid,
+    /// Fim do contrato.
+    pub ate: Date,
+    /// O que o Olheiro cobra para sair agora (`Olheiro::multa_de_rescisao`).
+    /// Só vale nos 12 primeiros meses, a carência do primeiro contrato: com
+    /// o contrato vencido, ou num contrato já renovado, é 0.
+    pub multa: i32,
+    /// O contrato já acabou (espera a renovação).
+    pub vencido: bool,
 }
 
 impl OlheiroContratado {
     /// Não aceita Missão nova (em Missão ou acompanhando os Escolhidos).
     pub fn ocupado(&self) -> bool {
         self.em_missao || self.acompanhando
+    }
+
+    /// Pode receber uma Missão nova: livre, ou num contrato que dá para
+    /// rescindir (a multa, se houver, entra no preço da Missão nova).
+    pub fn aceita_missao_nova(&self) -> bool {
+        !self.acompanhando && (!self.em_missao || self.rescisao.is_some())
     }
 }
 
@@ -737,9 +769,68 @@ pub struct PreviaMissao {
     pub fora_do_foco: bool,
     /// Custo da Missão em cada verba, para a linha "Verba da viagem".
     pub custos_por_verba: Vec<(quality::Investimento, i32)>,
+    /// O que a pesquisa nova custa: o preço da Missão de prazo fixo, ou o do
+    /// contrato de 12 meses numa contínua (`quality::custo_do_contrato`).
+    pub custo: i32,
+    /// O Olheiro está num contrato de Missão contínua que esta Missão
+    /// encerra (sem multa, se venceu ou se a localidade é a mesma).
+    pub rescindindo: Option<Uuid>,
+    /// A multa que ele cobra por sair do contrato para outra localidade.
+    pub multa: Option<MultaDeContrato>,
+}
+
+/// Multa de rescisão a pagar junto com uma Missão nova (2026-10-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MultaDeContrato {
+    pub valor: i32,
+    /// A Missão contínua que acaba.
+    pub missao: Uuid,
+    /// Quando o contrato dela acabaria.
+    pub ate: Date,
+}
+
+/// Encerra uma Missão contínua: os jogadores JÁ REVELADOS em `hoje` viram o
+/// Relatório final (os que ainda não tinham aparecido são descartados) e o
+/// Olheiro fica livre. Não mexe no orçamento.
+fn encerrar_na(dados: &mut persistence::ScoutStateFile, id: Uuid, hoje: Option<Date>) {
+    let revelados = dados.missoes.iter().find(|m| m.id == id).map(|m| {
+        let encontrados = dados.relatorios.iter().find(|r| r.missao_id == id).map_or(0, |r| r.jogadores.len());
+        m.revelados(encontrados, hoje)
+    });
+    if let Some(r) = dados.relatorios.iter_mut().find(|r| r.missao_id == id) {
+        r.jogadores.truncate(revelados.unwrap_or(0));
+    }
+    if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
+        m.status = StatusMissao::Concluida;
+        m.prazo_estimado = hoje.map_or(m.prazo_estimado, |h| h.min(m.prazo_estimado));
+    }
+}
+
+/// Duas Missões olham para o mesmo lugar? (Os mesmos continentes, países e
+/// ligas, em qualquer ordem; tudo vazio é "o mundo todo".)
+pub fn mesma_localidade(a: &FiltrosMissao, b: &FiltrosMissao) -> bool {
+    fn ordenado<T: Ord + Clone>(v: &[T]) -> Vec<T> {
+        let mut v = v.to_vec();
+        v.sort();
+        v.dedup();
+        v
+    }
+    ordenado(&a.continentes) == ordenado(&b.continentes)
+        && ordenado(&a.paises_dos_clubes) == ordenado(&b.paises_dos_clubes)
+        && ordenado(&a.ligas) == ordenado(&b.ligas)
 }
 
 impl PreviaMissao {
+    /// O que sai do orçamento ao confirmar: a pesquisa nova e a multa.
+    pub fn custo_total(&self) -> i32 {
+        self.custo.saturating_add(self.multa.map_or(0, |m| m.valor))
+    }
+
+    /// Onde o contrato acabaria, se a Missão é contínua e confirmada agora.
+    pub fn fim_do_contrato(&self) -> Option<Date> {
+        self.rascunho.continua.then(|| self.data_atual.mais_dias(quality::DIAS_CONTRATO_CONTINUO))
+    }
+
     /// Dias até o prazo (ou até o fim do primeiro bloco, se contínua).
     pub fn duracao_dias(&self) -> Option<u32> {
         let e = self.estimativa?;
@@ -903,13 +994,67 @@ pub struct Missao {
     /// Verba da viagem escolhida (Épico 5; Padrão nas Missões de antes).
     #[serde(default)]
     pub investimento: quality::Investimento,
+    /// Contratos de 12 meses de uma Missão contínua: a data em que cada um
+    /// começou (2026-10-07). Vazio nas contínuas de antes, que eram pagas
+    /// bloco a bloco e seguem sendo renovadas à mão.
+    #[serde(default)]
+    pub contratos: Vec<Date>,
+    /// Renova o contrato sozinho quando ele acaba, havendo verba.
+    #[serde(default = "verdadeiro")]
+    pub renovar_sozinho: bool,
 }
 
 fn um_bloco() -> u16 {
     1
 }
 
+fn verdadeiro() -> bool {
+    true
+}
+
 impl Missao {
+    /// Onde o contrato de 12 meses em vigor acaba. Nas contínuas de antes
+    /// (sem contrato), é o fim do bloco pago.
+    pub fn fim_do_contrato(&self) -> Date {
+        self.contratos.last().map_or(self.prazo_estimado, |inicio| inicio.mais_dias(quality::DIAS_CONTRATO_CONTINUO))
+    }
+
+    /// A Missão contínua tem contrato de 12 meses (as de antes não têm).
+    pub fn tem_contrato(&self) -> bool {
+        self.continua && !self.contratos.is_empty()
+    }
+
+    /// O contrato (ou o bloco, nas de antes) já acabou em `hoje`: a Missão
+    /// espera a renovação.
+    pub fn contrato_vencido(&self, hoje: Date) -> bool {
+        self.continua && self.status == StatusMissao::Pendente && hoje >= self.fim_do_contrato()
+    }
+
+    /// Abre os blocos de busca do contrato que já começaram em `hoje` (o
+    /// contrato está pago): cada um estende o prazo em
+    /// `DIAS_BLOCO_CONTINUO` dias, e o último vai até o fim do contrato.
+    /// Cada bloco entra em `renovacoes`, para voltar no tempo desfazê-lo.
+    /// Devolve quantos blocos abriu.
+    pub fn avancar_blocos(&mut self, hoje: Date) -> u16 {
+        if !self.tem_contrato() {
+            return 0;
+        }
+        let fim = self.fim_do_contrato();
+        let bloco = i64::from(quality::DIAS_BLOCO_CONTINUO);
+        let mut abertos = 0;
+        while hoje >= self.prazo_estimado && self.prazo_estimado < fim {
+            let anterior = self.prazo_estimado;
+            let proximo = anterior.mais_dias(quality::DIAS_BLOCO_CONTINUO);
+            // o que sobra depois deste bloco não dá outro inteiro: vai junto
+            let novo = if fim.day_number() - proximo.day_number() < bloco { fim } else { proximo };
+            self.renovacoes.push((hoje, anterior));
+            self.blocos = self.blocos.saturating_add(1);
+            self.prazo_estimado = novo;
+            abertos += 1;
+        }
+        abertos
+    }
+
     /// Jogadores que o Relatório terá ao fim dos blocos pagos.
     pub fn alvo_total(&self) -> usize {
         usize::from(self.estimativa.alvo_jogadores) * usize::from(self.blocos.max(1))
@@ -956,6 +1101,8 @@ impl Missao {
             blocos: 1,
             blocos_buscados: 0,
             renovacoes: Vec::new(),
+            contratos: Vec::new(),
+            renovar_sozinho: true,
             investimento: quality::Investimento::Padrao,
         }
     }
@@ -2715,6 +2862,7 @@ impl ScoutState {
         let Some(estado) = self.estado_ativo() else {
             return Vec::new();
         };
+        let hoje = self.data_progresso;
         estado.ler(|dados| {
             dados
                 .olheiros
@@ -2733,6 +2881,23 @@ impl ScoutState {
                         .iter()
                         .filter(|r| dados.missoes.iter().any(|m| m.id == r.missao_id && m.olheiro_id == olheiro.id))
                         .count();
+                    // um contrato de Missão contínua, parado (sem busca rodando),
+                    // dá para rescindir; vencido, sai sem multa
+                    let rescisao = missao
+                        .as_ref()
+                        .filter(|m| m.continua && m.status == StatusMissao::Pendente && !olheiro.acompanhando())
+                        .map(|m| {
+                            let vencido = hoje.is_some_and(|h| m.contrato_vencido(h));
+                            // a multa é a carência dos 12 primeiros meses: depois
+                            // deles (vencido, ou já renovado), o Olheiro sai sem multa
+                            let na_carencia = !vencido && m.contratos.len() == 1;
+                            Rescisao {
+                                missao: m.id,
+                                ate: m.fim_do_contrato(),
+                                multa: if na_carencia { olheiro.multa_de_rescisao() } else { 0 },
+                                vencido,
+                            }
+                        });
                     OlheiroContratado {
                         olheiro: olheiro.clone(),
                         em_missao: missao.is_some(),
@@ -2740,6 +2905,7 @@ impl ScoutState {
                         missao,
                         relatorio_atual,
                         relatorios,
+                        rescisao,
                     }
                 })
                 .collect()
@@ -2909,7 +3075,7 @@ impl ScoutState {
     /// Especialização dele (`quality::filtros_ideais`). Olheiro em Missão
     /// ou inexistente: nada abre.
     pub fn abrir_nova_missao(&mut self, olheiro_id: Uuid) {
-        let Some(contratado) = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == olheiro_id && !c.ocupado())
+        let Some(contratado) = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == olheiro_id && c.aceita_missao_nova())
         else {
             return;
         };
@@ -3466,10 +3632,8 @@ impl ScoutState {
             _ => return None,
         };
         let olheiros = self.olheiros_contratados();
-        let escolhido = rascunho
-            .olheiro_id
-            .and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && !c.ocupado()))
-            .map(|c| c.olheiro.clone());
+        let contratado = rascunho.olheiro_id.and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && c.aceita_missao_nova()));
+        let escolhido = contratado.map(|c| c.olheiro.clone());
         let tipo = quality::tipo_por_filtros(&rascunho.filtros);
         let amplitude = self.amplitude_da_geografia(&rascunho.filtros);
         let (penalidade, distancia_mercado) =
@@ -3483,10 +3647,21 @@ impl ScoutState {
             investimento,
         };
         let estimativa = escolhido.as_ref().map(|o| quality::estimar_missao(&pedido(o, rascunho.investimento)));
+        // numa contínua o jogador paga o contrato de 12 meses, não a pesquisa
+        let preco = |custo_fixo: i32| if rascunho.continua { quality::custo_do_contrato(custo_fixo) } else { custo_fixo };
         let custos_por_verba = escolhido
             .as_ref()
-            .map(|o| quality::Investimento::TODOS.iter().map(|&i| (i, quality::estimar_missao(&pedido(o, i)).custo)).collect())
+            .map(|o| quality::Investimento::TODOS.iter().map(|&i| (i, preco(quality::estimar_missao(&pedido(o, i)).custo))).collect())
             .unwrap_or_default();
+        let custo = estimativa.map_or(0, |e| preco(e.custo));
+        // tirar o Olheiro de um contrato em curso para outra localidade tem
+        // multa; a mesma localidade (só outros filtros) e o contrato vencido, não
+        let rescindindo = contratado.and_then(|c| c.rescisao).map(|r| r.missao);
+        let multa = contratado
+            .and_then(|c| Some((c.rescisao.filter(|r| r.multa > 0)?, c.missao.as_ref()?)))
+            .filter(|(_, antiga)| !mesma_localidade(&antiga.filtros, &rascunho.filtros))
+            .map(|(r, _)| MultaDeContrato { valor: r.multa, missao: r.missao, ate: r.ate });
+        let total = custo.saturating_add(multa.map_or(0, |m| m.valor));
         let fora_do_foco = escolhido.as_ref().is_some_and(|o| {
             let foco = o.perfil().foco();
             tipo != quality::TipoMissao::Geral && foco != Especializacao::Generalista && !quality::combina(foco, tipo)
@@ -3505,11 +3680,10 @@ impl ScoutState {
             Some(BloqueioMissao::FaixaInvalida { campo: CampoFaixa::DribleMin })
         } else {
             estimativa
-                .filter(|e| orcamento_atual < e.custo)
-                .map(|e| BloqueioMissao::OrcamentoInsuficiente { faltam: e.custo.saturating_sub(orcamento_atual) })
+                .filter(|_| orcamento_atual < total)
+                .map(|_| BloqueioMissao::OrcamentoInsuficiente { faltam: total.saturating_sub(orcamento_atual) })
         };
-        let custo = estimativa.map_or(0, |e| e.custo);
-        let orcamento_apos_missao = Some(i64::from(orcamento_atual) - i64::from(custo));
+        let orcamento_apos_missao = Some(i64::from(orcamento_atual) - i64::from(total));
         let folha_disponivel = self.folha_salarial().map(i64::from);
         Some(PreviaMissao {
             teto: rascunho.filtros.limite_valor.teto(orcamento_apos_missao),
@@ -3521,6 +3695,9 @@ impl ScoutState {
             distancia_mercado,
             fora_do_foco,
             custos_por_verba,
+            custo,
+            rescindindo,
+            multa,
             rascunho,
             olheiros,
             tipo,
@@ -3562,15 +3739,26 @@ impl ScoutState {
             blocos_buscados: 0,
             renovacoes: Vec::new(),
             investimento: previa.rascunho.investimento,
+            // uma contínua nasce com o primeiro contrato de 12 meses
+            contratos: if previa.rascunho.continua { vec![previa.data_atual] } else { Vec::new() },
+            renovar_sozinho: true,
         };
         let nova = missao.clone();
-        match self.comprar(estimativa.custo, move |dados| dados.missoes.push(nova)) {
+        // a multa e a pesquisa nova saem juntas; o contrato antigo acaba na
+        // mesma gravação (ou nada acontece)
+        let (total, rescindindo, hoje) = (previa.custo_total(), previa.rescindindo, previa.data_atual);
+        match self.comprar(total, move |dados| {
+            if let Some(antiga) = rescindindo {
+                encerrar_na(dados, antiga, Some(hoje));
+            }
+            dados.missoes.push(nova);
+        }) {
             Ok(()) => {
                 tracing::info!(
                     "[scout::state] Missão encomendada: {:?} {:?} ({}), prazo {}, id {}.",
                     missao.tipo,
                     missao.modo_busca,
-                    estimativa.custo,
+                    total,
                     missao.prazo_estimado.0,
                     missao.id
                 );
@@ -3615,7 +3803,11 @@ impl ScoutState {
                     MissaoNaLista {
                         missao: m.clone(),
                         olheiro: dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned(),
-                        progresso: hoje.map(|data| progresso_missao(m.criada_em, m.prazo_estimado, data)),
+                        // contrato de 12 meses: a barra anda o contrato inteiro
+                        progresso: hoje.map(|data| match m.contratos.last() {
+                            Some(inicio) if m.continua => progresso_missao(*inicio, m.fim_do_contrato(), data),
+                            _ => progresso_missao(m.criada_em, m.prazo_estimado, data),
+                        }),
                         falha: self.falhas_busca.get(&m.id).cloned(),
                         relatorio_id: relatorio.filter(|_| revelados > 0 || m.status == StatusMissao::Concluida).map(|r| r.id),
                         relatorio_novo: relatorio.is_some_and(|r| revelados > usize::from(r.vistos) || (!r.aberto && revelados > 0)),
@@ -3702,6 +3894,8 @@ impl ScoutState {
                     m.blocos_buscados = m.blocos_buscados.min(m.blocos);
                     m.prazo_estimado = prazo_anterior;
                 }
+                // contratos de 12 meses que começaram depois do save também saem
+                m.contratos.retain(|inicio| !depois(*inicio));
                 if !m.continua && m.status == StatusMissao::Concluida && depois(m.prazo_estimado) {
                     m.status = StatusMissao::Pendente;
                 }
@@ -3747,6 +3941,7 @@ impl ScoutState {
     ///
     /// Ordem da fila: `prazo_estimado`, depois `criada_em` (AD-9).
     fn despachar_missoes(&mut self, hoje: Date) {
+        self.avancar_contratos(hoje);
         let (Some(id_save), Some(estado)) = (self.save_ativo.clone(), self.estado_ativo().cloned()) else {
             return;
         };
@@ -4143,48 +4338,59 @@ impl ScoutState {
         self.avisar(TipoAviso::RelatorioAtualizado { tipo, novos: total });
     }
 
-    /// Custo de mais um bloco de uma Missão contínua (o mesmo do primeiro).
-    pub fn custo_do_bloco(missao: &Missao) -> i32 {
-        missao.estimativa.custo
+    /// Custo do contrato de 12 meses de uma Missão contínua (o que a
+    /// renovação cobra): `quality::custo_do_contrato` sobre o preço de prazo
+    /// fixo guardado na Missão.
+    pub fn custo_do_contrato(missao: &Missao) -> i32 {
+        quality::custo_do_contrato(missao.estimativa.custo)
     }
 
-    /// O bloco pago de uma Missão contínua acabou (na data do painel).
-    pub fn bloco_encerrado(&self, missao: &Missao) -> bool {
-        missao.continua
-            && missao.status == StatusMissao::Pendente
-            && self.data_progresso.is_some_and(|hoje| hoje >= missao.prazo_estimado)
+    /// O contrato (ou o bloco pago, nas contínuas de antes) acabou na data
+    /// do painel: a Missão espera a renovação.
+    pub fn contrato_vencido(&self, missao: &Missao) -> bool {
+        self.data_progresso.is_some_and(|hoje| missao.contrato_vencido(hoje))
     }
 
-    /// "Renovar": paga mais um bloco de `DIAS_BLOCO_CONTINUO` dias, com
-    /// as garantias de toda compra (débito confirmado + gravação; nada
-    /// automático — FR-3/NFR1). O novo bloco busca mais jogadores na
-    /// próxima abertura do painel.
+    /// "Renovar" à mão: paga mais um contrato de 12 meses, com as garantias
+    /// de toda compra (débito confirmado + gravação). Só com o contrato
+    /// vencido; antes disso ele renova sozinho, se houver verba (ver
+    /// `avancar_contratos`). O bloco novo busca mais jogadores já.
     pub fn renovar_missao(&mut self, id: Uuid) -> bool {
+        let renovou = self.renovar_contrato(id);
+        if renovou {
+            // a busca do bloco novo roda já (o painel está aberto)
+            if let Some(hoje) = self.data_progresso {
+                self.despachar_missoes(hoje);
+            }
+        }
+        renovou
+    }
+
+    /// A compra do contrato novo (à mão ou sozinha). `false` = não venceu, ou
+    /// não deu (a falha fica em `erro_da_missao`).
+    fn renovar_contrato(&mut self, id: Uuid) -> bool {
         let Some(missao) = self.estado_ativo().and_then(|e| e.ler(|d| d.missoes.iter().find(|m| m.id == id).cloned())) else {
             return false;
         };
-        if !self.bloco_encerrado(&missao) {
+        if !self.contrato_vencido(&missao) {
             return false;
         }
         let hoje = self.data_progresso.unwrap_or(missao.prazo_estimado);
-        let resultado = self.comprar(Self::custo_do_bloco(&missao), move |dados| {
+        let resultado = self.comprar(Self::custo_do_contrato(&missao), move |dados| {
             if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
                 m.renovacoes.push((hoje, m.prazo_estimado));
                 m.blocos = m.blocos.saturating_add(1);
-                // o bloco novo começa hoje (ou no fim do anterior, se antes)
+                // o contrato novo começa hoje (ou no fim do anterior, se antes)
                 let inicio = hoje.max(m.prazo_estimado);
+                m.contratos.push(inicio);
                 m.prazo_estimado = inicio.mais_dias(quality::DIAS_BLOCO_CONTINUO);
             }
         });
         match resultado {
             Ok(()) => {
-                tracing::info!("[scout::state] Missão contínua {id} renovada por mais um bloco.");
+                tracing::info!("[scout::state] Missão contínua {id} renovada por mais 12 meses.");
                 self.erros_missao.remove(&id);
                 self.reler();
-                // a busca do bloco novo roda já (o painel está aberto)
-                if let Some(hoje) = self.data_progresso {
-                    self.despachar_missoes(hoje);
-                }
                 true
             }
             Err(erro) => {
@@ -4193,6 +4399,61 @@ impl ScoutState {
                     self.reler();
                 }
                 self.erros_missao.insert(id, erro);
+                false
+            }
+        }
+    }
+
+    /// Na abertura do painel (antes de despachar as buscas): abre os blocos
+    /// de busca dos contratos de 12 meses que já começaram — o contrato está
+    /// pago, então os jogadores do mês seguem chegando — e renova sozinho o
+    /// contrato que acabou, se a Missão tem a renovação ligada e há verba.
+    /// Sem verba, o contrato fica vencido (a Missão mostra o que falta e o
+    /// jogador renova à mão quando puder, ou encerra).
+    fn avancar_contratos(&mut self, hoje: Date) {
+        let Some(estado) = self.estado_ativo().cloned() else {
+            return;
+        };
+        let a_avancar = estado.ler(|d| {
+            d.missoes.iter().any(|m| m.status == StatusMissao::Pendente && m.tem_contrato() && hoje >= m.prazo_estimado && m.prazo_estimado < m.fim_do_contrato())
+        });
+        if a_avancar {
+            if let Err(err) = estado.mutar(|d| {
+                for m in d.missoes.iter_mut().filter(|m| m.status == StatusMissao::Pendente) {
+                    m.avancar_blocos(hoje);
+                }
+            }) {
+                tracing::warn!("[scout::state] Blocos dos contratos não foram abertos: {err:?}");
+            }
+        }
+        let a_renovar: Vec<Uuid> = estado.ler(|d| {
+            d.missoes.iter().filter(|m| m.tem_contrato() && m.renovar_sozinho && m.contrato_vencido(hoje)).map(|m| m.id).collect()
+        });
+        for id in a_renovar {
+            if self.renovar_contrato(id) {
+                tracing::info!("[scout::state] Contrato da Missão {id} renovado sozinho.");
+            }
+        }
+    }
+
+    /// Liga ou desliga a renovação sozinha do contrato de uma Missão
+    /// contínua. `false` = não existe, ou não salvou.
+    pub fn definir_renovar_sozinho(&mut self, id: Uuid, ligado: bool) -> bool {
+        let Some(estado) = self.estado_ativo().cloned() else {
+            return false;
+        };
+        let existe = estado.ler(|d| d.missoes.iter().any(|m| m.id == id && m.continua));
+        if !existe {
+            return false;
+        }
+        match estado.mutar(|d| {
+            for m in d.missoes.iter_mut().filter(|m| m.id == id) {
+                m.renovar_sozinho = ligado;
+            }
+        }) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!("[scout::state] Renovação sozinha não foi salva: {err:?}");
                 false
             }
         }
@@ -4210,19 +4471,7 @@ impl ScoutState {
         if !pode {
             return false;
         }
-        match estado.mutar(|dados| {
-            let revelados = dados.missoes.iter().find(|m| m.id == id).map(|m| {
-                let encontrados = dados.relatorios.iter().find(|r| r.missao_id == id).map_or(0, |r| r.jogadores.len());
-                m.revelados(encontrados, hoje)
-            });
-            if let Some(r) = dados.relatorios.iter_mut().find(|r| r.missao_id == id) {
-                r.jogadores.truncate(revelados.unwrap_or(0));
-            }
-            if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
-                m.status = StatusMissao::Concluida;
-                m.prazo_estimado = hoje.map_or(m.prazo_estimado, |h| h.min(m.prazo_estimado));
-            }
-        }) {
+        match estado.mutar(|dados| encerrar_na(dados, id, hoje)) {
             Ok(()) => {
                 tracing::info!("[scout::state] Missão contínua {id} encerrada.");
                 self.erros_missao.remove(&id);
@@ -5783,13 +6032,13 @@ mod tests {
         // fim do bloco: segue Pendente (sem cobrança automática), todos do bloco à mostra
         assert_eq!(status_de(&st, m.id), Some(StatusMissao::Pendente));
         let atual = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("missão");
-        assert!(st.bloco_encerrado(&atual));
+        assert!(st.contrato_vencido(&atual));
         assert_eq!(st.missoes()[0].revelados, alvo);
         assert!(escritas_de(&escritas).is_empty(), "nada cobrado sem confirmar");
 
         // renovar = compra confirmada; o bloco novo busca mais jogadores
         assert!(st.renovar_missao(m.id));
-        assert_eq!(escritas_de(&escritas), vec![(63_999_988, 63_999_988 - m.estimativa.custo)]);
+        assert_eq!(escritas_de(&escritas), vec![(63_999_988, 63_999_988 - ScoutState::custo_do_contrato(&m))]);
         ticks_ate_buscar(&mut st);
         assert_eq!(busca.buscas.load(Ordering::SeqCst), 2);
         let (blocos, prazo, encontrados) = st
@@ -5812,6 +6061,243 @@ mod tests {
         let final_ = st.estado_ativo().map(|e| e.ler(|d| d.relatorios[0].jogadores.len())).expect("estado");
         assert_eq!(final_, revelados);
         assert!(!st.renovar_missao(m.id), "encerrada não renova");
+    }
+
+    /// Contínua com contrato de 12 meses a partir de `inicio`.
+    fn missao_com_contrato(olheiro: &Olheiro, inicio: i32) -> Missao {
+        let mut m = missao_com_prazo(olheiro, inicio, Date(inicio).mais_dias(30).0);
+        m.continua = true;
+        m.contratos = vec![Date(inicio)];
+        m
+    }
+
+    #[test]
+    fn a_contract_opens_a_search_block_every_month_and_the_last_one_reaches_the_end() {
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let mut m = missao_com_contrato(&o, 20260701);
+        assert_eq!(m.fim_do_contrato(), Date(20270701));
+        assert!(m.tem_contrato() && !m.contrato_vencido(Date(20270630)) && m.contrato_vencido(Date(20270701)));
+        // ainda no primeiro bloco: nada a abrir
+        assert_eq!(m.avancar_blocos(Date(20260720)), 0);
+        // um ano depois: todos os blocos, o último até o fim do contrato
+        assert_eq!(m.avancar_blocos(Date(20270710)), 11);
+        assert_eq!((m.blocos, m.prazo_estimado), (12, Date(20270701)), "12 blocos, 12 pesquisas");
+        assert_eq!(m.renovacoes.len(), 11, "cada bloco aberto pode ser desfeito");
+        assert_eq!(m.avancar_blocos(Date(20270710)), 0, "nada além do contrato");
+        // sem contrato (as de antes), nada anda sozinho
+        let mut antiga = missao_com_prazo(&o, 20260701, 20260731);
+        antiga.continua = true;
+        assert_eq!((antiga.avancar_blocos(Date(20270710)), antiga.fim_do_contrato()), (0, Date(20260731)));
+    }
+
+    #[test]
+    fn a_contract_renews_itself_after_twelve_months_when_there_is_money_and_charges_the_contract_price() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_contrato(&o, 20260701);
+        let preco = ScoutState::custo_do_contrato(&m);
+        let (mut st, _busca, escritas) = estado_com_datas(&pasta, &[20260801, 20270710], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+
+        // mês 2: o bloco novo abre sem cobrar nada (o contrato já foi pago)
+        let atual = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("missão");
+        assert_eq!(atual.blocos, 2);
+        assert!(escritas_de(&escritas).is_empty(), "nada cobrado dentro do contrato");
+
+        // um ano e 9 dias depois: o contrato venceu e renovou sozinho
+        reabrir(&mut st);
+        let atual = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("missão");
+        assert_eq!(atual.contratos, vec![Date(20260701), Date(20270710)]);
+        assert_eq!(atual.blocos, 13, "12 blocos do primeiro contrato + o primeiro do segundo");
+        assert_eq!(atual.fim_do_contrato(), Date(20280709), "365 dias (2028 é bissexto)");
+        assert_eq!(escritas_de(&escritas), vec![(63_999_988, 63_999_988 - preco)], "um só débito, o do contrato");
+        assert!(st.erro_da_missao(m.id).is_none());
+        assert!(!st.contrato_vencido(&atual));
+    }
+
+    #[test]
+    fn without_money_the_contract_does_not_renew_and_waits_for_the_player() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let mut m = missao_com_contrato(&o, 20260701);
+        m.estimativa.custo = 100_000_000; // o contrato (300 M) não cabe no caixa
+        let (mut st, _busca, escritas) = estado_com_datas(&pasta, &[20270710], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+
+        let atual = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("missão");
+        assert_eq!(atual.contratos.len(), 1, "não renovou");
+        assert!(st.contrato_vencido(&atual));
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Pendente), "o Olheiro segue na Missão, esperando");
+        assert!(matches!(st.erro_da_missao(m.id), Some(ErroCompra::OrcamentoInsuficiente { .. })));
+        assert!(escritas_de(&escritas).is_empty(), "nada debitado");
+        assert!(!st.renovar_missao(m.id), "à mão também não, sem verba");
+        // vencido: o Olheiro já pode receber uma Missão nova, sem multa
+        let c = st.olheiros_contratados().remove(0);
+        assert_eq!(c.rescisao.map(|r| r.multa), Some(0));
+        assert!(c.aceita_missao_nova());
+    }
+
+    #[test]
+    fn the_automatic_renewal_can_be_turned_off_and_then_the_contract_just_ends() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_contrato(&o, 20260701);
+        let (mut st, _busca, escritas) = estado_com_datas(&pasta, &[20260710, 20270710], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        assert!(st.definir_renovar_sozinho(m.id, false));
+        assert!(!st.definir_renovar_sozinho(Uuid::new_v4(), false), "Missão que não existe");
+        reabrir(&mut st);
+        let atual = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("missão");
+        assert_eq!((atual.contratos.len(), atual.renovar_sozinho), (1, false));
+        assert!(st.contrato_vencido(&atual));
+        assert!(escritas_de(&escritas).is_empty() && st.erro_da_missao(m.id).is_none(), "sem tentativa, sem erro");
+        // à mão ainda dá
+        assert!(st.renovar_missao(m.id));
+        assert_eq!(escritas_de(&escritas).len(), 1);
+    }
+
+    #[test]
+    fn leaving_a_contract_for_another_place_costs_the_fine_but_the_same_place_or_an_expired_contract_is_free() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Elite);
+        let m = missao_com_contrato(&o, 20260701);
+        let multa = o.multa_de_rescisao();
+        assert!(multa >= 50_000);
+        let (mut st, _busca, escritas) = estado_com_datas(&pasta, &[20260801], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let c = st.olheiros_contratados().remove(0);
+        assert!(c.em_missao && c.aceita_missao_nova(), "em contrato, pode ser escolhido");
+        assert_eq!(c.rescisao.map(|r| (r.missao, r.multa, r.ate)), Some((m.id, multa, Date(20270701))));
+
+        // mesma localidade (o mundo todo nas duas): troca de filtros sem multa
+        st.abrir_nova_missao(o.id);
+        let previa = st.previa_missao().expect("formulário");
+        assert_eq!((previa.rescindindo, previa.multa), (Some(m.id), None));
+
+        // outra localidade: a multa entra no preço
+        if let Some(r) = st.rascunho_missao.as_mut() {
+            r.filtros.continentes = vec![Confederacao::Asia];
+        }
+        let previa = st.previa_missao().expect("formulário");
+        assert_eq!(previa.multa.map(|x| (x.valor, x.missao)), Some((multa, m.id)));
+        assert_eq!(previa.custo_total(), previa.custo + multa);
+        assert_eq!(previa.orcamento_apos_missao, Some(i64::from(previa.orcamento_atual) - i64::from(previa.custo_total())));
+
+        // confirmar: a pesquisa nova e a multa saem juntas e o contrato antigo acaba
+        assert!(st.confirmar_nova_missao());
+        assert_eq!(escritas_de(&escritas), vec![(63_999_988, 63_999_988 - previa.custo_total())]);
+        let (antiga, nova) = st
+            .estado_ativo()
+            .map(|e| e.ler(|d| (d.missoes.iter().find(|x| x.id == m.id).cloned(), d.missoes.iter().find(|x| x.id != m.id).cloned())))
+            .expect("estado");
+        assert_eq!(antiga.map(|x| x.status), Some(StatusMissao::Concluida));
+        assert_eq!(nova.map(|x| x.filtros.continentes), Some(vec![Confederacao::Asia]));
+    }
+
+    #[test]
+    fn the_fine_is_only_a_twelve_month_grace_period_after_it_there_is_no_fine_even_on_a_renewed_contract() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Elite);
+        let mut m = missao_com_contrato(&o, 20250601);
+        m.renovar_sozinho = false;
+        let (mut st, _busca, escritas) = estado_com_datas(&pasta, &[20270801], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        // ainda no primeiro contrato (vencido): sem multa, porque já acabou
+        assert_eq!(st.olheiros_contratados()[0].rescisao.map(|r| (r.multa, r.vencido)), Some((0, true)));
+
+        // um segundo contrato, em vigor (renovado em 01/07/2027)
+        st.estado_ativo()
+            .map(|e| {
+                e.mutar(|d| {
+                    let m = &mut d.missoes[0];
+                    m.contratos = vec![Date(20250601), Date(20270701)];
+                    m.prazo_estimado = Date(20270731);
+                })
+            })
+            .expect("estado")
+            .expect("gravou");
+        let c = st.olheiros_contratados().remove(0);
+        assert!(c.aceita_missao_nova());
+        assert_eq!(c.rescisao.map(|r| (r.multa, r.vencido)), Some((0, false)), "renovado: já passou da carência");
+        assert!(o.multa_de_rescisao() > 0, "a multa existe; só não vale mais");
+
+        // outra localidade, sem multa; o contrato em curso acaba e não é devolvido
+        st.abrir_nova_missao(o.id);
+        if let Some(r) = st.rascunho_missao.as_mut() {
+            r.filtros.continentes = vec![Confederacao::Asia];
+        }
+        let previa = st.previa_missao().expect("formulário");
+        assert_eq!((previa.rescindindo, previa.multa), (Some(m.id), None));
+        assert_eq!(previa.custo_total(), previa.custo);
+        assert!(st.confirmar_nova_missao());
+        assert_eq!(escritas_de(&escritas), vec![(63_999_988, 63_999_988 - previa.custo)]);
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Concluida));
+    }
+
+    #[test]
+    fn a_continuous_mission_is_confirmed_with_the_contract_price_and_a_first_contract() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, _busca, escritas) = estado_com_datas(&pasta, &[20260801], vec![], &o);
+        st.ao_abrir_painel();
+        st.abrir_nova_missao(o.id);
+        let fixa = st.previa_missao().expect("formulário");
+        st.definir_continua_da_missao(true);
+        let continua = st.previa_missao().expect("formulário");
+        let base = fixa.estimativa.map(|e| e.custo).unwrap_or_default();
+        assert_eq!(fixa.custo, base);
+        assert_eq!(continua.custo, quality::custo_do_contrato(base), "contínua: o preço do contrato");
+        assert!(continua.custo > fixa.custo);
+        assert_eq!(continua.fim_do_contrato(), Some(Date(20270801)));
+        assert!(continua.custos_por_verba.iter().all(|(_, c)| *c >= continua.custo / 2), "as verbas também mostram o contrato");
+        assert!(st.confirmar_nova_missao());
+        assert_eq!(escritas_de(&escritas), vec![(63_999_988, 63_999_988 - continua.custo)]);
+        let m = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("Missão");
+        assert_eq!((m.contratos.clone(), m.renovar_sozinho, m.blocos), (vec![Date(20260801)], true, 1));
+        assert_eq!(m.estimativa.custo, base, "guarda o preço da pesquisa; o contrato se deriva dele");
+    }
+
+    #[test]
+    fn loading_an_older_save_undoes_a_contract_renewed_after_it() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        // o save carregado é de 03/07/2026; o contrato novo é de 10/07/2026
+        let mut m = missao_com_prazo(&o, 20250601, 20260809);
+        m.continua = true;
+        m.renovar_sozinho = false; // para o contrato desfeito não renovar de novo na abertura
+        m.contratos = vec![Date(20250601), Date(20260710)];
+        m.blocos = 13;
+        m.blocos_buscados = 13;
+        m.renovacoes = vec![(Date(20260710), Date(20260601))];
+        let id = m.id;
+        let (mut st, _busca, _) = estado_com_datas(&pasta, &[20260715], vec![m], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let m = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.iter().find(|m| m.id == id).cloned())).expect("missão");
+        assert_eq!((m.contratos.clone(), m.blocos, m.prazo_estimado), (vec![Date(20250601)], 12, Date(20260601)));
+        assert_eq!(m.fim_do_contrato(), Date(20260601), "o contrato novo foi desfeito");
+    }
+
+    #[test]
+    fn two_missoes_are_in_the_same_place_when_they_share_continents_countries_and_leagues() {
+        let mut a = FiltrosMissao::default();
+        let mut b = FiltrosMissao::default();
+        assert!(mesma_localidade(&a, &b), "o mundo todo nas duas");
+        a.continentes = vec![Confederacao::Europa, Confederacao::Asia];
+        assert!(!mesma_localidade(&a, &b));
+        b.continentes = vec![Confederacao::Asia, Confederacao::Europa];
+        assert!(mesma_localidade(&a, &b), "a ordem não conta");
+        b.ligas = vec![13];
+        assert!(!mesma_localidade(&a, &b));
+        // outros filtros não mudam a localidade
+        b.ligas.clear();
+        b.idade = FaixaAtributo { min: 18, max: 22 };
+        assert!(mesma_localidade(&a, &b));
     }
 
     #[test]

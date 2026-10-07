@@ -119,6 +119,9 @@ pub fn texto_status(contratado: &OlheiroContratado) -> &'static str {
 /// ou, livre, o convite.
 pub fn texto_missao(contratado: &OlheiroContratado) -> String {
     match &contratado.missao {
+        Some(m) if m.continua && m.tem_contrato() => {
+            format!("Missão contínua {} · contrato até {}", super::nova_missao::nome_tipo(m.tipo), formatar_data(m.fim_do_contrato()))
+        }
         Some(m) if m.continua => {
             format!("Missão contínua {} · bloco até {}", super::nova_missao::nome_tipo(m.tipo), formatar_data(m.prazo_estimado))
         }
@@ -808,7 +811,7 @@ mod tests {
     }
 
     fn contratado(olheiro: Olheiro) -> OlheiroContratado {
-        OlheiroContratado { olheiro, em_missao: false, acompanhando: false, missao: None, relatorio_atual: None, relatorios: 2 }
+        OlheiroContratado { olheiro, em_missao: false, acompanhando: false, missao: None, relatorio_atual: None, relatorios: 2, rescisao: None }
     }
 
     #[test]

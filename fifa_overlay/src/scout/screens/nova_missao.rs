@@ -35,7 +35,7 @@ use crate::scout::state::{
     ScoutState,
 };
 
-const ALTURA_RODAPE: f32 = 176.0;
+const ALTURA_RODAPE: f32 = 194.0;
 /// O painel do Olheiro, à esquerda: um terço da tela, entre estes limites.
 const FRACAO_PAINEL_OLHEIRO: f32 = 0.30;
 const LARGURA_PAINEL_MIN: f32 = 250.0;
@@ -838,12 +838,26 @@ pub fn texto_penalidade(previa: &PreviaMissao) -> Option<String> {
 pub fn descricao_duracao(continua: bool) -> String {
     if continua {
         format!(
-            "O Olheiro fica na Missão até você encerrar. Cada bloco de {} dias de carreira é pago na confirmação; ao fim do bloco, você decide se renova.",
+            "Contrato de 12 meses com o Olheiro: pago uma vez, mais caro que a Missão de prazo fixo e bem mais barato que 12 pesquisas. Todo mês ele traz mais jogadores e, no fim, renova sozinho se houver verba. Mudar o Olheiro de localidade nos 12 primeiros meses (a carência) custa a multa dele; depois disso, não. Fica {} dias por pesquisa.",
             crate::scout::quality::DIAS_BLOCO_CONTINUO
         )
     } else {
         "O Relatório chega aos poucos e fica completo no prazo.".to_string()
     }
+}
+
+/// A linha do rodapé sobre o contrato anterior do Olheiro, se ele tem um
+/// que esta Missão encerra (2026-10-07): a multa, ou "sem multa".
+pub fn texto_rescisao(previa: &PreviaMissao) -> Option<String> {
+    previa.rescindindo?;
+    Some(match previa.multa {
+        Some(m) => format!(
+            "Multa de {}: ele deixa o contrato em curso (até {}) para outra localidade.",
+            formatar_milhar(m.valor),
+            formatar_data(m.ate)
+        ),
+        None => "O contrato anterior dele termina agora, sem multa (a localidade é a mesma, ou ele já passou da carência de 12 meses).".to_string(),
+    })
 }
 
 /// Rodapé fixo: resumo ao vivo, motivo do bloqueio e os botões.
@@ -874,16 +888,16 @@ pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
 
     let estimativa = previa.estimativa;
     let continua = previa.rascunho.continua;
-    let custo = estimativa.map_or("—".to_string(), |e| {
-        if continua {
-            format!("{} por bloco", formatar_milhar(e.custo))
-        } else {
-            formatar_milhar(e.custo)
+    let custo = estimativa.map_or("—".to_string(), |_| {
+        let base = if continua { format!("{} por 12 meses", formatar_milhar(previa.custo)) } else { formatar_milhar(previa.custo) };
+        match previa.multa {
+            Some(m) => format!("{base} + multa {}", formatar_milhar(m.valor)),
+            None => base,
         }
     });
-    let prazo = match (previa.duracao_dias(), previa.prazo()) {
-        (Some(dias), Some(data)) if continua => format!("blocos de {dias} dias (o 1º termina em {})", formatar_data(data)),
-        (Some(dias), Some(data)) => format!("~{dias} dias de carreira (pronta em {})", formatar_data(data)),
+    let prazo = match (previa.duracao_dias(), previa.prazo(), previa.fim_do_contrato()) {
+        (Some(_), Some(_), Some(fim)) if continua => format!("contrato até {}", formatar_data(fim)),
+        (Some(dias), Some(data), _) => format!("~{dias} dias de carreira (pronta em {})", formatar_data(data)),
         _ => "—".to_string(),
     };
 
@@ -915,11 +929,16 @@ pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
                 format!(
                     "Relatório: até {} jogadores{}, {} atributos por jogador, precisão de ±{}.",
                     e.alvo_jogadores,
-                    if continua { " por bloco" } else { "" },
+                    if continua { " por mês" } else { "" },
                     e.atributos_revelados,
                     e.precisao_mais_menos
                 ),
             );
+        }
+        // sempre uma linha, para o rodapé não pular quando a multa aparece
+        match texto_rescisao(previa) {
+            Some(texto) => ui.text_colored(theme::WARNING, texto),
+            None => ui.dummy([0.0, ui.text_line_height()]),
         }
     });
 
@@ -935,7 +954,7 @@ pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
 }
 
 /// Altura reservada para o resumo no rodapé de um painel de campo.
-pub const ALTURA_RESUMO: f32 = 120.0;
+pub const ALTURA_RESUMO: f32 = 138.0;
 
 #[cfg(test)]
 mod tests {
@@ -969,6 +988,9 @@ mod tests {
             distancia_mercado: 0,
             fora_do_foco: false,
             custos_por_verba: Vec::new(),
+            custo: 0,
+            rescindindo: None,
+            multa: None,
         }
     }
 

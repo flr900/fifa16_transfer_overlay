@@ -43,7 +43,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) -> Acao {
     let contratados = state.olheiros_contratados();
     let aviso = if contratados.is_empty() {
         Some(MSG_SEM_OLHEIROS)
-    } else if contratados.iter().all(OlheiroContratado::ocupado) {
+    } else if contratados.iter().all(|c| !c.aceita_missao_nova()) {
         Some(MSG_TODOS_OCUPADOS)
     } else {
         None
@@ -54,7 +54,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) -> Acao {
     }
     olheiros::com_nacoes(state, |nacoes| {
         for c in &contratados {
-            if linha(ui, fonts, c, nacoes) && !c.ocupado() {
+            if linha(ui, fonts, c, nacoes) && c.aceita_missao_nova() {
                 acao = Acao::Escolheu(c.olheiro.id);
             }
         }
@@ -62,10 +62,32 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) -> Acao {
     acao
 }
 
+/// O que custa escolher um Olheiro que está num contrato de Missão contínua:
+/// a multa de rescisão (para outra localidade) ou nada, se o contrato venceu.
+pub fn texto_rescisao(c: &OlheiroContratado) -> Option<String> {
+    let r = c.rescisao?;
+    Some(if r.multa > 0 {
+        format!(
+            "Carência até {}. Tirá-lo para outra localidade antes disso custa uma multa de {}.",
+            super::formatar_data(r.ate),
+            super::formatar_milhar(r.multa)
+        )
+    } else if r.vencido {
+        "Contrato encerrado: ele pode receber uma Missão nova sem multa.".to_string()
+    } else {
+        format!(
+            "Fora da carência de 12 meses: pode mudar de localidade sem multa (o contrato em curso, até {}, não é devolvido).",
+            super::formatar_data(r.ate)
+        )
+    })
+}
+
 fn linha(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado, nacoes: &olheiros::Nacoes<'_>) -> bool {
     let c_card = card(ui, &c.olheiro.id.to_string(), ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
     let dl = ui.get_window_draw_list();
-    let ocupado = c.ocupado();
+    // quem está num contrato de Missão contínua que dá para rescindir pode ser
+    // escolhido: o texto diz o que custa
+    let ocupado = !c.aceita_missao_nova();
     let cor = if ocupado { theme::TEXT_DISABLED } else { theme::TEXT_PRIMARY };
     let x = c_card.min[0] + theme::ESPACO_4;
     let y = c_card.min[1] + theme::ESPACO_2;
@@ -86,13 +108,21 @@ fn linha(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado, nacoes: &olheiro
     let foco = format!("{} · {} estrelas", perfil.foco().nome(), perfil.principal().texto());
     texto_em(ui, fonts.map(|f| f.meta), &dl, [x_nome + w + badge[0] + theme::ESPACO_4, y + 2.0], theme::TEXT_SECONDARY, &foco);
     let y_detalhe = y + h + theme::ESPACO_1;
-    if ocupado {
+    if let Some(texto) = texto_rescisao(c) {
+        texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y_detalhe], theme::WARNING, &texto);
+    } else if ocupado {
         texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y_detalhe], theme::TEXT_SECONDARY, &olheiros::texto_missao(c));
     } else {
         let largura = c_card.max[0] - theme::ESPACO_4 - 120.0 - x;
         olheiros::desenhar_chips(ui, fonts, &dl, [x, y_detalhe], largura, 1, &olheiros::chips_do_olheiro(&c.olheiro, nacoes, false));
     }
-    let (status, cor_status) = if c.em_missao {
+    let (status, cor_status) = if let Some(r) = c.rescisao {
+        if r.multa > 0 {
+            ("Em carência", theme::WARNING)
+        } else {
+            ("Escolher", theme::FIELD_GREEN)
+        }
+    } else if c.em_missao {
         ("Em Missão", theme::WARNING)
     } else if c.acompanhando {
         ("Acompanhando", theme::ACCENT_PRIMARY)
@@ -108,6 +138,40 @@ fn linha(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado, nacoes: &olheiro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_contract_in_force_shows_the_fine_and_an_expired_one_is_free() {
+        use crate::save_repo::Date;
+        use crate::scout::state::{Olheiro, Rescisao};
+        let base = OlheiroContratado {
+            olheiro: Olheiro::default(),
+            em_missao: true,
+            acompanhando: false,
+            missao: None,
+            relatorio_atual: None,
+            relatorios: 0,
+            rescisao: None,
+        };
+        assert_eq!(texto_rescisao(&base), None, "numa Missão comum, sem texto");
+        assert!(!base.aceita_missao_nova());
+        let em_curso = OlheiroContratado { rescisao: Some(Rescisao { missao: Uuid::nil(), ate: Date(20270903), multa: 90_000, vencido: false }), ..base.clone() };
+        let texto = texto_rescisao(&em_curso).unwrap_or_default();
+        assert!(texto.contains("03/09/2027") && texto.contains("multa de 90.000"), "{texto}");
+        assert!(em_curso.aceita_missao_nova());
+        assert!(texto.contains("Carência até 03/09/2027"), "{texto}");
+        let renovado = OlheiroContratado {
+            rescisao: Some(Rescisao { missao: Uuid::nil(), ate: Date(20280903), multa: 0, vencido: false }),
+            ..base.clone()
+        };
+        let texto = texto_rescisao(&renovado).unwrap_or_default();
+        assert!(texto.contains("Fora da carência") && texto.contains("sem multa"), "{texto}");
+        assert!(renovado.aceita_missao_nova());
+        let vencido = OlheiroContratado {
+            rescisao: Some(Rescisao { missao: Uuid::nil(), ate: Date(20270903), multa: 0, vencido: true }),
+            ..base
+        };
+        assert!(texto_rescisao(&vencido).unwrap_or_default().contains("encerrado"));
+    }
 
     #[test]
     fn empty_states_point_to_the_olheiros_tab() {
