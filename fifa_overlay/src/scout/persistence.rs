@@ -107,11 +107,24 @@ pub struct UiPrefs {
     pub densidade: Densidade,
     /// Visão da aba Olheiros (2026-10-03); Cards por padrão.
     pub densidade_olheiros: Densidade,
+    /// Épico 7: "Sincronizar com o FIFA". Ligado por padrão (decisão de
+    /// 2026-10-06); só vai para o arquivo quando desligado.
+    #[serde(skip_serializing_if = "e_verdadeiro")]
+    pub sincronizar_com_o_jogo: bool,
+}
+
+fn e_verdadeiro(valor: &bool) -> bool {
+    *valor
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        UiPrefs { aba_ativa: Aba::Olheiros, densidade: Densidade::Tabular, densidade_olheiros: Densidade::Cards }
+        UiPrefs {
+            aba_ativa: Aba::Olheiros,
+            densidade: Densidade::Tabular,
+            densidade_olheiros: Densidade::Cards,
+            sincronizar_com_o_jogo: true,
+        }
     }
 }
 
@@ -583,5 +596,19 @@ pub(crate) mod tests {
         let estado = EstadoPersistido::carregar(Some(&funda), ID_A);
         assert!(estado.gravavel());
         assert!(funda.join(format!("{ID_A}.json")).is_file());
+    }
+
+    #[test]
+    fn the_sync_switch_defaults_to_on_is_saved_only_when_off_and_old_files_load() {
+        let padrao = UiPrefs::default();
+        assert!(padrao.sincronizar_com_o_jogo);
+        assert!(!serde_json::to_string(&padrao).expect("serializa").contains("sincronizar"), "ligado não vai para o arquivo");
+        let desligado = UiPrefs { sincronizar_com_o_jogo: false, ..UiPrefs::default() };
+        let json = serde_json::to_string(&desligado).expect("serializa");
+        assert!(json.contains("\"sincronizar_com_o_jogo\":false"));
+        assert!(!serde_json::from_str::<UiPrefs>(&json).expect("recarrega").sincronizar_com_o_jogo);
+        // arquivo de antes do Épico 7 (sem o campo): ligado
+        let antigo: UiPrefs = serde_json::from_str(r#"{"aba_ativa":"olheiros","densidade":"tabular","densidade_olheiros":"cards"}"#).expect("carrega");
+        assert!(antigo.sincronizar_com_o_jogo);
     }
 }

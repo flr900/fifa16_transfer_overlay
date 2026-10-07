@@ -83,6 +83,21 @@ pub enum TipoAviso {
     RelatorioAtualizado { tipo: quality::TipoMissao, novos: usize },
     /// A busca de uma Missão falhou; ela volta a `Pendente`.
     BuscaFalhou,
+    /// A Central atualizou o conhecimento dos jogadores no jogo (Épico 7).
+    JogoAtualizado { jogadores: usize },
+    /// A sincronização está ligada mas o scout do jogo não foi localizado.
+    JogoNaoLocalizado,
+}
+
+/// O que a aba Escolhidos mostra sobre a sincronização com o jogo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusNativo {
+    pub ligada: bool,
+    pub localizando: bool,
+    pub escolhidos: bool,
+    pub conhecimento: bool,
+    /// Último erro de escrita (já traduzido), se o último ciclo falhou.
+    pub erro: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1527,6 +1542,11 @@ pub struct ScoutState {
     ultima_sync_nativa: Option<Instant>,
     /// Último erro de escrita já registrado no log (não repete a mesma linha).
     ultimo_erro_nativo: Option<String>,
+    /// Localização do scout do jogo pedida pelo "Tentar de novo".
+    tarefa_nativo: AsyncTask<()>,
+    nativo_localizando: bool,
+    /// O aviso "não localizado" já foi dado nesta sessão.
+    avisou_nativo_ausente: bool,
     /// Há uma atualização disparada e ainda não tratada.
     atualizacao_escolhidos_pendente: bool,
     /// Pediram outra atualização enquanto uma rodava: roda de novo no fim.
@@ -1599,6 +1619,9 @@ impl ScoutState {
             times_pendente: false,
             ultima_sync_nativa: None,
             ultimo_erro_nativo: None,
+            tarefa_nativo: AsyncTask::new(),
+            nativo_localizando: false,
+            avisou_nativo_ausente: false,
             atualizacao_escolhidos_pendente: false,
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
@@ -2058,6 +2081,7 @@ impl ScoutState {
                     resumo.subiram,
                     resumo.desceram
                 );
+                self.avisar(TipoAviso::JogoAtualizado { jogadores: resumo.criados + resumo.subiram + resumo.desceram });
                 if !resumo.primeiro_toque.is_empty() {
                     if let Err(err) = estado.mutar(|d| {
                         for (jogador, antes) in &resumo.primeiro_toque {
@@ -2071,10 +2095,95 @@ impl ScoutState {
                 }
             }
             Err(err) => {
+                if matches!(err, crate::save_repo::SaveRepoError::NaoLocalizado) && !self.avisou_nativo_ausente && !self.nativo_localizando {
+                    self.avisou_nativo_ausente = true;
+                    self.avisar(TipoAviso::JogoNaoLocalizado);
+                }
                 let msg = err.to_string();
                 if self.ultimo_erro_nativo.as_deref() != Some(msg.as_str()) {
                     tracing::warn!("[scout::state] Conhecimento do jogo não foi atualizado: {msg}");
                     self.ultimo_erro_nativo = Some(msg);
+                }
+            }
+        }
+    }
+
+    /// "Sincronizar com o FIFA" ligado?
+    pub fn sincronizacao_nativa(&self) -> bool {
+        crate::save_repo::nativo::sincronizacao_ligada()
+    }
+
+    /// Liga/desliga a sincronização (vale para a sessão e é salvo na
+    /// carreira). Desligar não desfaz nada no jogo; ligar de novo reconcilia
+    /// na hora e põe na lista do jogo os Escolhidos que ainda não estão.
+    pub fn alternar_sincronizacao_nativa(&mut self) {
+        use crate::save_repo::nativo;
+        let ligada = !nativo::sincronizacao_ligada();
+        nativo::definir_sincronizacao(ligada);
+        tracing::info!("[scout::state] Sincronizar com o FIFA: {}.", if ligada { "ligado" } else { "desligado" });
+        if let Some(estado) = self.estado_ativo().cloned() {
+            if let Err(err) = estado.mutar(|d| d.ui_prefs.sincronizar_com_o_jogo = ligada) {
+                tracing::warn!("[scout::state] Preferência de sincronização não foi salva: {err:?}");
+            }
+            if ligada {
+                self.ultima_sync_nativa = None;
+                self.ultimo_erro_nativo = None;
+                let pendentes: Vec<JogadorEncontrado> =
+                    estado.ler(|d| d.escolhidos.iter().filter(|e| !e.no_jogo).map(|e| e.jogador.clone()).collect());
+                for jogador in pendentes {
+                    if jogador.clube_id.is_none() {
+                        self.ids_sem_time.push(jogador.player_id);
+                    } else if adicionar_na_lista_do_jogo(&jogador) {
+                        let id = jogador.player_id;
+                        if let Err(err) = estado.mutar(|d| {
+                            for e in d.escolhidos.iter_mut().filter(|e| e.jogador.player_id == id) {
+                                e.no_jogo = true;
+                            }
+                        }) {
+                            tracing::warn!("[scout::state] Marca \"no jogo\" não foi salva: {err:?}");
+                        }
+                    }
+                }
+                self.buscar_times();
+            }
+        }
+    }
+
+    /// O que a aba Escolhidos mostra sobre a sincronização.
+    pub fn status_nativo(&self) -> StatusNativo {
+        let local = crate::save_repo::nativo::localizacao();
+        StatusNativo {
+            ligada: crate::save_repo::nativo::sincronizacao_ligada(),
+            localizando: self.nativo_localizando,
+            escolhidos: local.escolhidos,
+            conhecimento: local.conhecimento,
+            erro: self.ultimo_erro_nativo.clone(),
+        }
+    }
+
+    /// "Tentar de novo": localiza o scout do jogo outra vez (em background).
+    pub fn localizar_nativo_de_novo(&mut self) {
+        if self.nativo_localizando {
+            return;
+        }
+        self.nativo_localizando = crate::save_repo::nativo::start_locating(&self.tarefa_nativo);
+    }
+
+    /// Trata a localização do scout do jogo que terminou (roda a cada frame).
+    fn processar_nativo(&mut self) {
+        if !self.nativo_localizando {
+            return;
+        }
+        match self.tarefa_nativo.poll() {
+            TaskState::Running | TaskState::Idle => {}
+            TaskState::Done(()) | TaskState::Failed(_) => {
+                self.nativo_localizando = false;
+                self.tarefa_nativo.reset();
+                let local = crate::save_repo::nativo::localizacao();
+                if local.escolhidos || local.conhecimento {
+                    self.avisou_nativo_ausente = false;
+                    self.ultimo_erro_nativo = None;
+                    self.ultima_sync_nativa = None; // reconcilia já
                 }
             }
         }
@@ -2207,6 +2316,7 @@ impl ScoutState {
         self.processar_buscas();
         self.processar_escolhidos();
         self.processar_times();
+        self.processar_nativo();
         self.minifaces.tick();
 
         match self.tarefa_localizar.poll() {
@@ -2340,6 +2450,7 @@ impl ScoutState {
             destravar_missoes(estado);
         }
         self.aba_restaurada = Some(estado.ler(|dados| dados.ui_prefs.aba_ativa));
+        crate::save_repo::nativo::definir_sincronizacao(estado.ler(|dados| dados.ui_prefs.sincronizar_com_o_jogo));
         tracing::info!("[scout::state] Carreira ativa: estado {}…", id_save.get(..8).unwrap_or(&id_save));
         self.ultimo_save = Some(id_save.clone());
         self.save_ativo = Some(id_save);

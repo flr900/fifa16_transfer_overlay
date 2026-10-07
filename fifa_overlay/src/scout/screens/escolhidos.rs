@@ -21,7 +21,7 @@ use super::{com_fonte, formatar_data};
 use crate::save_repo::{nome_posicao, Date};
 use crate::scout::minifaces::Rosto;
 use crate::scout::quality::Frescor;
-use crate::scout::state::{EscolhidoNaLista, ResumoAcompanhamento, ScoutState};
+use crate::scout::state::{EscolhidoNaLista, ResumoAcompanhamento, ScoutState, StatusNativo};
 
 const ALTURA_CARD: f32 = 92.0;
 const LADO_ROSTO: f32 = 68.0;
@@ -52,6 +52,22 @@ pub fn texto_resumo(r: &ResumoAcompanhamento) -> String {
             r.vagas,
             if r.vagas == 1 { "vaga" } else { "vagas" }
         ),
+    }
+}
+
+/// A linha de situação da sincronização com o FIFA (Épico 7).
+pub fn texto_sincronizacao(s: &StatusNativo) -> String {
+    let base = match (s.ligada, s.localizando, s.escolhidos && s.conhecimento) {
+        (false, _, _) => "Desligada: a Central não escreve no jogo. O que já foi escrito continua lá.".to_string(),
+        (true, true, _) => "Localizando o scout do jogo…".to_string(),
+        (true, false, true) => {
+            "Ligada: os Escolhidos entram na lista do jogo e o que os Olheiros descobrem aparece nas telas do FIFA.".to_string()
+        }
+        (true, false, false) => "Ligada, mas o scout do jogo não foi localizado (carreira recém-carregada?).".to_string(),
+    };
+    match (&s.erro, s.ligada) {
+        (Some(erro), true) => format!("{base} Último problema: {erro}"),
+        _ => base,
     }
 }
 
@@ -102,6 +118,9 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     });
     com_fonte(ui, fonts.map(|f| f.meta), || ui.text_wrapped(MSG_REGRAS));
     ui.dummy([0.0, theme::ESPACO_2]);
+    // depois do 1º botão: o foco inicial do controle não liga/desliga a sincronização
+    sincronizacao(ui, fonts, state);
+    ui.dummy([0.0, theme::ESPACO_2]);
 
     let escolhidos = state.escolhidos();
     if escolhidos.is_empty() {
@@ -115,6 +134,26 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         }
     }
     acao
+}
+
+/// Interruptor "Sincronizar com o FIFA", "Tentar de novo" e a situação.
+fn sincronizacao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
+    let status = state.status_nativo();
+    let (rotulo, estilo) = if status.ligada {
+        ("Sincronizar com o FIFA: ligado", EstiloBotao::Selecionado)
+    } else {
+        ("Sincronizar com o FIFA: desligado", EstiloBotao::Secundario)
+    };
+    if componentes::botao(ui, fonts, rotulo, estilo, true) {
+        state.alternar_sincronizacao_nativa();
+    }
+    if status.ligada && !status.localizando && !(status.escolhidos && status.conhecimento) {
+        ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+        if componentes::botao(ui, fonts, "Tentar de novo", EstiloBotao::Secundario, true) {
+            state.localizar_nativo_de_novo();
+        }
+    }
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_wrapped(texto_sincronizacao(&status)));
 }
 
 fn badge_prioridade() -> EstiloBadge {
@@ -191,6 +230,22 @@ fn card_escolhido(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, e: &Escolh
 mod tests {
     use super::*;
     use crate::scout::state::{escolhido_em, Acompanhamento, Escolhido, FaixaAtributo, JogadorEncontrado};
+
+    fn status(ligada: bool, localizando: bool, escolhidos: bool, conhecimento: bool, erro: Option<&str>) -> StatusNativo {
+        StatusNativo { ligada, localizando, escolhidos, conhecimento, erro: erro.map(str::to_string) }
+    }
+
+    #[test]
+    fn the_sync_line_says_what_is_going_on() {
+        assert!(texto_sincronizacao(&status(false, false, true, true, None)).starts_with("Desligada"));
+        assert!(texto_sincronizacao(&status(true, false, true, true, None)).starts_with("Ligada: os Escolhidos"));
+        assert!(texto_sincronizacao(&status(true, false, true, false, None)).contains("não foi localizado"));
+        assert_eq!(texto_sincronizacao(&status(true, true, false, false, None)), "Localizando o scout do jogo…");
+        let com_erro = texto_sincronizacao(&status(true, false, true, true, Some("O scout do jogo mudou; nada foi escrito.")));
+        assert!(com_erro.ends_with("Último problema: O scout do jogo mudou; nada foi escrito."));
+        // desligada não repete um erro velho
+        assert!(!texto_sincronizacao(&status(false, false, true, true, Some("x"))).contains("problema"));
+    }
 
     fn jogador() -> JogadorEncontrado {
         JogadorEncontrado {

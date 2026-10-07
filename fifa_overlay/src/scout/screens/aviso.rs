@@ -62,6 +62,16 @@ pub fn textos(aviso: &TipoAviso) -> (String, String, [f32; 4]) {
             ),
             theme::WARNING,
         ),
+        TipoAviso::JogoAtualizado { jogadores } => (
+            format!("Jogo atualizado: {}", texto_jogadores(*jogadores)),
+            "O conhecimento dos jogadores no FIFA acompanha a Central.".to_string(),
+            theme::FIELD_GREEN,
+        ),
+        TipoAviso::JogoNaoLocalizado => (
+            "Scout do jogo não localizado.".to_string(),
+            "Aba Escolhidos: Tentar de novo, ou desligue a sincronização.".to_string(),
+            theme::WARNING,
+        ),
         TipoAviso::BuscaFalhou => (
             "A busca de uma Missão falhou.".to_string(),
             "Ela roda de novo quando o painel abrir.".to_string(),
@@ -140,7 +150,18 @@ mod tests {
         let atualizado = TipoAviso::RelatorioAtualizado { tipo: crate::scout::quality::TipoMissao::Jovens, novos: 2 };
         assert_eq!(textos(&atualizado).0, "Relatório atualizado: +2 jogadores · Missão Jovens");
         assert_eq!(textos(&relatorio).1, "Missão Jovens: 12 jogadores · F10 abre o painel.");
-        for aviso in [TipoAviso::Injetado, TipoAviso::Carregando, pronta, TipoAviso::Falhou, relatorio, atualizado, TipoAviso::BuscaFalhou] {
+        assert_eq!(textos(&TipoAviso::JogoAtualizado { jogadores: 8 }).0, "Jogo atualizado: 8 jogadores");
+        for aviso in [
+            TipoAviso::Injetado,
+            TipoAviso::Carregando,
+            pronta,
+            TipoAviso::Falhou,
+            relatorio,
+            atualizado,
+            TipoAviso::BuscaFalhou,
+            TipoAviso::JogoAtualizado { jogadores: 1 },
+            TipoAviso::JogoNaoLocalizado,
+        ] {
             let (titulo, detalhe, _) = textos(&aviso);
             assert!(!titulo.contains('!') && !detalhe.contains('!'), "{titulo} / {detalhe}");
         }

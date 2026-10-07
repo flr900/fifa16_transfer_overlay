@@ -811,6 +811,31 @@ pub fn write_native_knowledge(pedidos: &[PedidoNivel], hoje: Date) -> Result<Res
     resultado
 }
 
+/// O que já foi localizado do scout nativo (só olha o cache; nenhuma
+/// leitura de memória).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Localizacao {
+    pub escolhidos: bool,
+    pub conhecimento: bool,
+}
+
+pub fn localizacao() -> Localizacao {
+    let cache = lock_cache();
+    Localizacao {
+        escolhidos: cache.as_ref().is_some_and(|l| l.escolhidos.is_some()),
+        conhecimento: cache.as_ref().is_some_and(|l| l.conhecimento.is_some()),
+    }
+}
+
+/// Localiza de novo em background ("Tentar de novo" da aba Escolhidos).
+/// `false` se já houver uma em andamento.
+pub fn start_locating(task: &crate::async_task::AsyncTask<()>) -> bool {
+    task.start(|| {
+        localizar_e_guardar();
+        Ok(())
+    })
+}
+
 /// Descarta o cache (outra carreira carregada).
 pub(super) fn esquecer() {
     *lock_cache() = None;
