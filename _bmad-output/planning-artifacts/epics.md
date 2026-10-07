@@ -31,7 +31,7 @@ FR11: The user can view a Sonar de Cobertura map (per country) distinguishing ac
 
 ### NonFunctional Requirements
 
-NFR1 (derived): The only save field written by this feature is `dqXv.transferbudget`; no player attribute writes, no writes to `zlrC`/`apoo`, and no real transfers (PRD §5).
+NFR1 (derived, amended 2026-10-06 by Felipe): The game memory written by this feature is limited to (a) `dqXv.transferbudget` (explicit confirmation, Story 1.5) and (b) the **native-scout sync** of Epic 7: the native shortlist vector and the native per-player knowledge array, only through `save_repo`, only while the "Sincronizar com o FIFA" setting is on (on by default), always compare-and-write with read-back, and lowering a knowledge level only for what the Central itself raised, never below the level the game had before (Story 7.3). Still forbidden: player attribute writes, writes to `zlrC`/`apoo`, and real transfers (PRD §5). See `integracao-scout-nativo.md`.
 NFR2 (derived): The panel must respond instantly (no long transition animations) over a game running at ~60fps; heavy `CZUM` scans (~32k records, ~17s) must never block the render thread (AD-4).
 NFR3 (derived): Scout state persists in a per-save JSON file (write-through, single mutex) and survives overlay inject/eject and game crashes (AD-7, AD-11).
 NFR4 (derived): Supports only FIFA 16 build `16.0.2904053`, Career Mode single-player.
@@ -309,7 +309,7 @@ So that I have a scout ready to receive a Missão.
 
 **Given** the feature hires an Olheiro
 **When** I inspect what it writes to the save
-**Then** `dqXv.transferbudget` is the only save field written (NFR1).
+**Then** `dqXv.transferbudget` is the only game field written by hiring (NFR1; the native-scout sync of Epic 7 is separate and has its own setting).
 
 ### Story 1.6: Navigate the panel with a gamepad
 
@@ -861,6 +861,12 @@ Implemented 2026-10-04 as one story: [`5-1-olheiros-with-identity-stars-markets-
 ## Epic 6: Lista de Escolhidos
 
 Implemented 2026-10-04 as one story: [`6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists.md`](../implementation-artifacts/6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists.md).
+
+## Epic 7: Native scout integration (shortlist and knowledge level)
+
+Felipe's request (2026-10-05/06), after the memory experiment in [`integracao-scout-nativo.md`](integracao-scout-nativo.md): when a player enters the Central's Escolhidos (transfer value defined), add him to the game's native shortlist with the intermediate knowledge level (`b = 140`: value and wage shown by the game); when the Missão really finishes, raise him to complete (`b = 198`). The Central shows the game's exact transfer value (read from the focused-player row) when it has harvested one, and an estimate otherwise. Amended NFR1 above.
+
+Stories: 7.1 locate the native shortlist and knowledge vectors (read-only) — [`7-1-locate-the-native-shortlist-and-knowledge-vectors.md`](../implementation-artifacts/7-1-locate-the-native-shortlist-and-knowledge-vectors.md); 7.2 native shortlist add/remove; 7.3 knowledge level (Quality → `b`) on Escolhido/Missão end; 7.4 setting, banner and failure handling; 7.5 calibrate `b` and `a`; 7.6 exact transfer value harvested from the game; 7.7 native e-mail (optional).
 
 ## Future improvements (post-v1)
 

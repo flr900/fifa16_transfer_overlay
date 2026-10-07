@@ -205,6 +205,7 @@ mod tests {
             nacao_id: 54,
             nacao: "Brazil".to_string(),
             clube: "Clube".to_string(),
+            clube_id: None,
             contrato_ate: None,
             observacao: Default::default(),
             overall: FaixaAtributo { min: 70, max: 74 },

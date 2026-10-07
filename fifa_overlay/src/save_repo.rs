@@ -30,7 +30,9 @@
 //!   do disco não existe mais na memória → `CarreiraNaoCarregada` até
 //!   salvar.
 
+pub mod foco;
 pub mod jogadores;
+pub mod nativo;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -110,6 +112,13 @@ pub enum SaveRepoError {
     /// O orçamento vivo não é mais o valor que o usuário viu ao confirmar
     /// (o jogo mexeu nele no meio): nada foi escrito. Traz o valor atual.
     OrcamentoMudou(i32),
+    /// A lista de escolhidos nativa está cheia (100 jogadores).
+    ListaNativaCheia,
+    /// O array de conhecimento do jogo não tem espaço para mais registros.
+    ConhecimentoCheio,
+    /// O scout nativo não está mais como foi localizado (a estrutura se
+    /// moveu ou o conteúdo mudou): nada foi escrito.
+    NativoMudou,
     /// Falha inesperada, com descrição para o log.
     Interno(String),
 }
@@ -124,6 +133,9 @@ impl fmt::Display for SaveRepoError {
             SaveRepoError::CarreiraNaoCarregada => write!(f, "Nenhuma carreira carregada."),
             SaveRepoError::NaoLocalizado => write!(f, "Carreira ainda não localizada."),
             SaveRepoError::OrcamentoMudou(atual) => write!(f, "O orçamento mudou para {atual}."),
+            SaveRepoError::ListaNativaCheia => write!(f, "A lista de escolhidos do jogo está cheia."),
+            SaveRepoError::ConhecimentoCheio => write!(f, "O conhecimento do jogo está cheio."),
+            SaveRepoError::NativoMudou => write!(f, "O scout do jogo mudou; nada foi escrito."),
             SaveRepoError::Interno(msg) => write!(f, "Erro interno: {msg}"),
         }
     }
@@ -830,6 +842,9 @@ pub fn start_locating(task: &AsyncTask<()>) -> bool {
     task.start(|| {
         let live = locate()?;
         *lock_cache() = Some(live);
+        // Scout nativo (Épico 7): só registra no log; falhar aqui nunca
+        // atrapalha a localização da carreira.
+        nativo::localizar_e_guardar();
         Ok(())
     })
 }
@@ -906,6 +921,7 @@ fn with_live<R>(f: impl FnOnce(&LiveCareer) -> Result<R, SaveRepoError>) -> Resu
         },
         Err(LiveCheck::Gone(err)) => {
             *guard = None;
+            nativo::esquecer();
             Err(err)
         }
         Err(LiveCheck::NoCareer) => Err(SaveRepoError::CarreiraNaoCarregada),
@@ -1057,8 +1073,11 @@ pub fn read_transfer_budget() -> Result<i32, SaveRepoError> {
     with_live(|live| live_finances(live, &ProcessMemory).map(|(budget, _)| budget))
 }
 
-/// Escreve o `dqXv.transferbudget` VIVO (Story 1.5). É o ÚNICO campo do
-/// jogo que o Scout escreve (NFR1), e só quando o usuário confirma.
+/// Escreve o `dqXv.transferbudget` VIVO (Story 1.5), só quando o usuário
+/// confirma. Desde 2026-10-06 (NFR1 emendado) o Scout também escreve a
+/// lista de escolhidos e o conhecimento nativos (`save_repo::nativo`,
+/// Épico 7), mas essa sincronização tem interruptor próprio e nunca
+/// cobra nada.
 ///
 /// Compare-and-write: só escreve se o valor vivo ainda for `anterior` (o
 /// que o usuário viu no modal); senão devolve `OrcamentoMudou(atual)` sem

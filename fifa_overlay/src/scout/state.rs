@@ -55,6 +55,10 @@ use super::Aba;
 
 /// Com a carreira pronta, relê o estado vivo nesse intervalo.
 const INTERVALO_RELEITURA: Duration = Duration::from_secs(1);
+/// De quanto em quanto tempo a Central confere o conhecimento do jogo (Épico 7).
+const INTERVALO_SYNC_NATIVA: Duration = Duration::from_secs(5);
+/// De quanto em quanto tempo a Central olha o jogador em foco no jogo.
+const INTERVALO_COLHEITA: Duration = Duration::from_millis(500);
 
 /// Sem carreira pronta, pergunta "há carreira carregada?" nesse intervalo.
 const INTERVALO_SINAL: Duration = Duration::from_secs(2);
@@ -81,6 +85,67 @@ pub enum TipoAviso {
     RelatorioAtualizado { tipo: quality::TipoMissao, novos: usize },
     /// A busca de uma Missão falhou; ela volta a `Pendente`.
     BuscaFalhou,
+    /// A Central atualizou o conhecimento dos jogadores no jogo (Épico 7).
+    JogoAtualizado { jogadores: usize },
+    /// A sincronização está ligada mas o scout do jogo não foi localizado.
+    JogoNaoLocalizado,
+}
+
+/// O valor de transferência que o jogo calculou para um jogador, e quando a
+/// Central o leu (Épico 7, Story 7.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValorDoJogo {
+    pub valor: u32,
+    pub lido_em: Date,
+    /// O que a Central estimava para ele quando leu o valor exato (só quando
+    /// o Olheiro o tinha observado com precisão): vira uma leitura da
+    /// correção da estimativa dos outros jogadores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimativa: Option<u32>,
+}
+
+/// Depois de quantos dias de carreira o valor lido deixa de valer como
+/// "exato" (o mercado muda) e a Central volta a estimar.
+pub const VALIDADE_DO_VALOR_DIAS: i64 = 90;
+
+impl ValorDoJogo {
+    /// Ainda vale como exato em `hoje`?
+    pub fn vale_em(&self, hoje: Option<Date>) -> bool {
+        hoje.is_none_or(|h| {
+            let dias = h.day_number() - self.lido_em.day_number();
+            (0..=VALIDADE_DO_VALOR_DIAS).contains(&dias)
+        })
+    }
+}
+
+/// Correção da estimativa de valor a partir das leituras exatas que têm a
+/// estimativa da hora da leitura guardada (`quality::ajuste_de_valor`).
+fn ajuste_das_leituras(leituras: &std::collections::BTreeMap<u32, ValorDoJogo>) -> f64 {
+    let razoes: Vec<f64> = leituras
+        .values()
+        .filter_map(|v| v.estimativa.filter(|e| *e > 0).map(|e| (f64::from(v.valor) / f64::from(e)).ln()))
+        .collect();
+    quality::ajuste_de_valor(&razoes)
+}
+
+/// Os mesmos nomes? Compara só as letras ASCII, sem caixa, para o Latin-1 do
+/// banco e o UTF-8 não atrapalharem; aceita um nome contido no outro (o jogo
+/// às vezes mostra o nome comum).
+fn nomes_equivalentes(a: &str, b: &str) -> bool {
+    let limpar = |s: &str| s.chars().filter(char::is_ascii_alphabetic).map(|c| c.to_ascii_lowercase()).collect::<String>();
+    let (a, b) = (limpar(a), limpar(b));
+    a.len() >= 4 && b.len() >= 4 && (a == b || a.contains(&b) || b.contains(&a))
+}
+
+/// O que a aba Escolhidos mostra sobre a sincronização com o jogo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusNativo {
+    pub ligada: bool,
+    pub localizando: bool,
+    pub escolhidos: bool,
+    pub conhecimento: bool,
+    /// Último erro de escrita (já traduzido), se o último ciclo falhou.
+    pub erro: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -911,6 +976,10 @@ pub struct JogadorEncontrado {
     pub nacao_id: u16,
     pub nacao: String,
     pub clube: String,
+    /// Time de clube (`teamid`) quando o Olheiro o viu; `None` em Relatórios de
+    /// antes do Épico 7 ou sem clube. A lista de escolhidos do jogo guarda o time.
+    #[serde(default)]
+    pub clube_id: Option<u32>,
     /// Ano de fim do contrato (dado do save, não revelado por faixa).
     /// `None` em Relatórios antigos ou sem clube.
     #[serde(default)]
@@ -977,6 +1046,14 @@ impl JogadorEncontrado {
     /// a partir do meio das faixas reveladas e da idade.
     pub fn valor_estimado(&self) -> i64 {
         quality::valor_estimado(meio_da_faixa(self.overall), meio_da_faixa(self.potencial), self.idade, self.goleiro())
+    }
+
+    /// A estimativa só serve de leitura de calibração quando o Olheiro viu o
+    /// jogador com precisão (Overall e potencial em faixas de até 4 pontos):
+    /// com faixa larga o meio do intervalo erra, e esse erro não é do modelo.
+    pub fn estimativa_precisa(&self) -> Option<u32> {
+        let estreita = |f: FaixaAtributo| f.max.saturating_sub(f.min) <= 4;
+        (estreita(self.overall) && estreita(self.potencial)).then(|| u32::try_from(self.valor_estimado()).unwrap_or(u32::MAX))
     }
 
     /// Salário semanal estimado.
@@ -1089,6 +1166,10 @@ pub struct Escolhido {
     /// Relatório de onde ele veio.
     #[serde(default)]
     pub relatorio_id: Option<Uuid>,
+    /// A Central pôs este jogador na lista de escolhidos DO JOGO (Épico 7);
+    /// só quem ela pôs ela tira de lá quando ele sai dos Escolhidos.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_jogo: bool,
 }
 
 /// O acompanhamento de um Escolhido por um Generalista: de onde partiu e
@@ -1236,6 +1317,89 @@ pub fn avancar_escolhido(e: &Escolhido, pool: &crate::save_repo::PlayerPool, hoj
         precisao,
         acompanhamento: Some(acompanhamento),
         ..e.clone()
+    }
+}
+
+/// Épico 7: põe o jogador na lista de escolhidos DO JOGO. `true` só se a
+/// Central de fato o acrescentou (então ela pode tirá-lo depois). Qualquer
+/// falha só vai para o log: a Central nunca depende da escrita.
+fn adicionar_na_lista_do_jogo(jogador: &JogadorEncontrado) -> bool {
+    use crate::save_repo::nativo::{self, ResultadoLista};
+    if !nativo::sincronizacao_ligada() {
+        return false;
+    }
+    let (Some(time), Ok(id)) = (jogador.clube_id.and_then(|c| i32::try_from(c).ok()), i32::try_from(jogador.player_id)) else {
+        tracing::info!("[scout::state] {} sem time conhecido: não vai para a lista do jogo.", jogador.nome);
+        return false;
+    };
+    match nativo::write_native_shortlist_add(time, id) {
+        Ok(ResultadoLista::Adicionado) => {
+            tracing::info!("[scout::state] {} entrou na lista de escolhidos do jogo.", jogador.nome);
+            true
+        }
+        Ok(outro) => {
+            tracing::info!("[scout::state] Lista do jogo: {} → {outro:?}.", jogador.nome);
+            false
+        }
+        Err(err) => {
+            tracing::warn!("[scout::state] Lista do jogo não foi atualizada para {}: {err}", jogador.nome);
+            false
+        }
+    }
+}
+
+/// Épico 7: o que o conhecimento do jogo deve ser, hoje, segundo a Central.
+/// - Relatório de Missão concluída: todos os jogadores dele ao nível da
+///   precisão do Relatório (só sobe);
+/// - Escolhido: acompanha a observação dele (`quality::nivel_no_jogo`):
+///   140 enquanto a Missão de origem roda, depois pela precisão — que
+///   envelhece e melhora com o acompanhamento —, e volta ao que o jogo tinha
+///   quando a observação vence. É o único caso que REBAIXA, e só até o nível
+///   original guardado; o Escolhido vale mais que o Relatório do mesmo
+///   jogador.
+fn pedidos_de_nivel(dados: &persistence::ScoutStateFile, hoje: Date, cobre: impl Fn(u32) -> bool) -> Vec<crate::save_repo::nativo::PedidoNivel> {
+    use crate::save_repo::nativo::PedidoNivel;
+    use std::collections::BTreeMap;
+    let concluida = |missao_id: Uuid| dados.missoes.iter().find(|m| m.id == missao_id).map(|m| m.status == StatusMissao::Concluida);
+    let mut pedidos: BTreeMap<u32, PedidoNivel> = BTreeMap::new();
+    for relatorio in &dados.relatorios {
+        if concluida(relatorio.missao_id) != Some(true) {
+            continue;
+        }
+        let alvo = quality::nivel_no_jogo(relatorio.precisao_mais_menos, false, false, 0);
+        for jogador in &relatorio.jogadores {
+            let Ok(id) = i32::try_from(jogador.player_id) else { continue };
+            pedidos
+                .entry(jogador.player_id)
+                .and_modify(|p| p.alvo = p.alvo.max(alvo))
+                .or_insert(PedidoNivel { jogador: id, alvo, original: None });
+        }
+    }
+    for escolhido in &dados.escolhidos {
+        let Ok(id) = i32::try_from(escolhido.jogador.player_id) else { continue };
+        let agora = escolhido_em(escolhido, hoje, cobre(escolhido.jogador.player_id));
+        let parcial = escolhido
+            .relatorio_id
+            .and_then(|rid| dados.relatorios.iter().find(|r| r.id == rid))
+            .and_then(|r| concluida(r.missao_id))
+            .is_some_and(|concluida| !concluida);
+        let original = dados.nivel_original.get(&escolhido.jogador.player_id).map(|n| i32::from(*n));
+        let alvo = quality::nivel_no_jogo(agora.precisao, parcial, agora.frescor == quality::Frescor::Vencido, original.unwrap_or(0));
+        pedidos.insert(escolhido.jogador.player_id, PedidoNivel { jogador: id, alvo, original });
+    }
+    pedidos.into_values().collect()
+}
+
+/// Épico 7: tira da lista do jogo um jogador que a Central pôs lá.
+fn tirar_da_lista_do_jogo(player_id: u32) {
+    use crate::save_repo::nativo;
+    if !nativo::sincronizacao_ligada() {
+        return;
+    }
+    let Ok(id) = i32::try_from(player_id) else { return };
+    match nativo::write_native_shortlist_remove(id) {
+        Ok(resultado) => tracing::info!("[scout::state] Lista do jogo: jogador {player_id} → {resultado:?}."),
+        Err(err) => tracing::warn!("[scout::state] Lista do jogo não foi atualizada (remoção de {player_id}): {err}"),
     }
 }
 
@@ -1424,6 +1588,26 @@ pub struct ScoutState {
     tarefa_clube: AsyncTask<(String, Option<quality::PerfilClube>)>,
     /// Atualização dos Escolhidos acompanhados (Épico 6), com a carreira dona.
     tarefa_escolhidos: AsyncTask<(String, Vec<Escolhido>)>,
+    /// Descobre o time (`teamid`) de Escolhidos de Relatórios antigos (sem
+    /// `clube_id`) para pô-los na lista do jogo (Épico 7).
+    tarefa_times: AsyncTask<(String, Vec<(u32, Option<u32>)>)>,
+    /// Escolhidos esperando o time para entrar na lista do jogo.
+    ids_sem_time: Vec<u32>,
+    times_pendente: bool,
+    /// Última reconciliação do conhecimento do jogo (Épico 7), para espaçar as leituras.
+    ultima_sync_nativa: Option<Instant>,
+    /// Último erro de escrita já registrado no log (não repete a mesma linha).
+    ultimo_erro_nativo: Option<String>,
+    /// Localização do scout do jogo pedida pelo "Tentar de novo".
+    tarefa_nativo: AsyncTask<()>,
+    nativo_localizando: bool,
+    /// O aviso "não localizado" já foi dado nesta sessão.
+    avisou_nativo_ausente: bool,
+    /// Colheita do valor exato do jogador em foco no jogo (Story 7.6).
+    ultima_colheita: Option<Instant>,
+    ultimo_foco: Option<(u32, u32, String)>,
+    /// Correção da estimativa de valor aprendida com as leituras exatas (1 = nenhuma).
+    ajuste_valor: f64,
     /// Há uma atualização disparada e ainda não tratada.
     atualizacao_escolhidos_pendente: bool,
     /// Pediram outra atualização enquanto uma rodava: roda de novo no fim.
@@ -1491,6 +1675,17 @@ impl ScoutState {
             detalhes_da_missao: false,
             tarefa_clube: AsyncTask::new(),
             tarefa_escolhidos: AsyncTask::new(),
+            tarefa_times: AsyncTask::new(),
+            ids_sem_time: Vec::new(),
+            times_pendente: false,
+            ultima_sync_nativa: None,
+            ultimo_erro_nativo: None,
+            tarefa_nativo: AsyncTask::new(),
+            nativo_localizando: false,
+            avisou_nativo_ausente: false,
+            ultima_colheita: None,
+            ultimo_foco: None,
+            ajuste_valor: 1.0,
             atualizacao_escolhidos_pendente: false,
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
@@ -1752,10 +1947,25 @@ impl ScoutState {
             alvo: missao.and_then(|m| m.filtros.fit_posicional),
             referencia: missao.and_then(|m| m.filtros.referencia.clone()),
             relatorio_id: Some(r.id),
+            no_jogo: false,
         };
         match estado.mutar(move |d| d.escolhidos.push(escolhido)) {
             Ok(()) => {
                 tracing::info!("[scout::state] {} entrou na Lista de Escolhidos.", ficha.jogador.nome);
+                // Épico 7: põe também na lista do jogo (nunca falha a ação)
+                if ficha.jogador.clube_id.is_none() {
+                    self.ids_sem_time.push(ficha.jogador.player_id);
+                    self.buscar_times();
+                } else if adicionar_na_lista_do_jogo(&ficha.jogador) {
+                    let id = ficha.jogador.player_id;
+                    if let Err(err) = estado.mutar(|d| {
+                        for e in d.escolhidos.iter_mut().filter(|e| e.jogador.player_id == id) {
+                            e.no_jogo = true;
+                        }
+                    }) {
+                        tracing::warn!("[scout::state] Marca \"no jogo\" não foi salva: {err:?}");
+                    }
+                }
                 self.atualizar_escolhidos(hoje);
                 true
             }
@@ -1771,6 +1981,7 @@ impl ScoutState {
         let Some(estado) = self.estado_ativo().cloned() else {
             return false;
         };
+        let estava_no_jogo = estado.ler(|d| d.escolhidos.iter().any(|e| e.jogador.player_id == player_id && e.no_jogo));
         let resultado = estado.mutar(|d| {
             let antes = d.escolhidos.len();
             d.escolhidos.retain(|e| e.jogador.player_id != player_id);
@@ -1778,6 +1989,9 @@ impl ScoutState {
         });
         match resultado {
             Ok(saiu) => {
+                if saiu && estava_no_jogo {
+                    tirar_da_lista_do_jogo(player_id);
+                }
                 if let (true, Some(hoje)) = (saiu, self.data_progresso) {
                     // a vaga dele pode ir para outro
                     self.atualizar_escolhidos(hoje);
@@ -1899,6 +2113,256 @@ impl ScoutState {
         self.atualizacao_escolhidos_pendente = iniciou;
     }
 
+    /// Épico 7: alinha o conhecimento do jogo com o que a Central sabe
+    /// (ver `pedidos_de_nivel`). Roda de tempos em tempos (sem o jogo
+    /// localizado ou com a sincronização desligada não faz nada) e é
+    /// idempotente: sem mudança, nada é escrito. Falhas só vão para o log.
+    fn reconciliar_nativo(&mut self) {
+        use crate::save_repo::nativo;
+        if !nativo::sincronizacao_ligada() || self.ultima_sync_nativa.is_some_and(|t| t.elapsed() < INTERVALO_SYNC_NATIVA) {
+            return;
+        }
+        self.ultima_sync_nativa = Some(Instant::now());
+        let CarreiraStatus::Pronta(carreira) = &self.status else { return };
+        let hoje = carreira.data_atual;
+        let Some(estado) = self.estado_ativo().cloned() else { return };
+        let pedidos = estado.ler(|dados| {
+            let cobertos = Self::acompanhados(dados);
+            pedidos_de_nivel(dados, hoje, |id| cobertos.contains(&id))
+        });
+        if pedidos.is_empty() {
+            return;
+        }
+        match nativo::write_native_knowledge(&pedidos, hoje) {
+            Ok(resumo) => {
+                self.ultimo_erro_nativo = None;
+                if !resumo.mudou() {
+                    return;
+                }
+                tracing::info!(
+                    "[scout::state] Conhecimento do jogo: {} criado(s), {} subiu(ram), {} desceu(ram).",
+                    resumo.criados,
+                    resumo.subiram,
+                    resumo.desceram
+                );
+                self.avisar(TipoAviso::JogoAtualizado { jogadores: resumo.criados + resumo.subiram + resumo.desceram });
+                if !resumo.primeiro_toque.is_empty() {
+                    if let Err(err) = estado.mutar(|d| {
+                        for (jogador, antes) in &resumo.primeiro_toque {
+                            if let (Ok(id), Ok(antes)) = (u32::try_from(*jogador), u8::try_from(*antes)) {
+                                d.nivel_original.entry(id).or_insert(antes);
+                            }
+                        }
+                    }) {
+                        tracing::warn!("[scout::state] Nível original do jogo não foi salvo: {err:?}");
+                    }
+                }
+            }
+            Err(err) => {
+                if matches!(err, crate::save_repo::SaveRepoError::NaoLocalizado) && !self.avisou_nativo_ausente && !self.nativo_localizando {
+                    self.avisou_nativo_ausente = true;
+                    self.avisar(TipoAviso::JogoNaoLocalizado);
+                }
+                let msg = err.to_string();
+                if self.ultimo_erro_nativo.as_deref() != Some(msg.as_str()) {
+                    tracing::warn!("[scout::state] Conhecimento do jogo não foi atualizado: {msg}");
+                    self.ultimo_erro_nativo = Some(msg);
+                }
+            }
+        }
+    }
+
+    /// Valor exato lido do jogo para o jogador (`None` = nunca passou pela
+    /// tela do jogo com a Central olhando).
+    pub fn valor_do_jogo(&self, player_id: u32) -> Option<ValorDoJogo> {
+        self.estado_ativo()?.ler(|d| d.valores_do_jogo.get(&player_id).copied())
+    }
+
+    /// Estimativa de valor com a correção aprendida das leituras exatas.
+    pub fn valor_estimado(&self, j: &JogadorEncontrado) -> i64 {
+        quality::arredondar_mercado(j.valor_estimado() as f64 * self.ajuste_valor)
+    }
+
+    /// O valor que a Central mostra para o jogador: o exato do jogo, se
+    /// ainda vale, senão `None` (a tela estima).
+    pub fn valor_exato(&self, player_id: u32) -> Option<u32> {
+        self.valor_do_jogo(player_id).filter(|v| v.vale_em(self.data_da_carreira())).map(|v| v.valor)
+    }
+
+    /// Olha a linha de valor do jogador em foco no jogo e, se for um jogador
+    /// que a Central conhece (Escolhidos ou Relatórios, conferindo id E
+    /// nome), guarda o valor com a data. Leitura de 48 bytes, de meio em meio
+    /// segundo, e só grava no arquivo quando o jogador ou o valor mudam.
+    fn colher_valor_em_foco(&mut self) {
+        if self.ultima_colheita.is_some_and(|t| t.elapsed() < INTERVALO_COLHEITA) {
+            return;
+        }
+        self.ultima_colheita = Some(Instant::now());
+        let CarreiraStatus::Pronta(carreira) = &self.status else { return };
+        let hoje = carreira.data_atual;
+        let Some(estado) = self.estado_ativo().cloned() else { return };
+        let Ok(Some(foco)) = self.fonte.read_focused_value() else { return };
+        let leitura = (foco.jogador, foco.valor, foco.nome.clone());
+        if self.ultimo_foco.as_ref() == Some(&leitura) {
+            return;
+        }
+        self.ultimo_foco = Some(leitura);
+        let conhecido = estado.ler(|d| {
+            d.escolhidos
+                .iter()
+                .map(|e| &e.jogador)
+                .chain(d.relatorios.iter().flat_map(|r| r.jogadores.iter()))
+                .find(|j| j.player_id == foco.jogador)
+                .map(|j| (j.nome.clone(), j.estimativa_precisa()))
+        });
+        let Some((nome, estimativa)) = conhecido else { return };
+        if !nomes_equivalentes(&nome, &foco.nome) {
+            tracing::info!("[scout::state] Linha de valor do jogo ignorada: id {} é \"{}\" na Central e \"{}\" no jogo.", foco.jogador, nome, foco.nome);
+            return;
+        }
+        let novo = ValorDoJogo { valor: foco.valor, lido_em: hoje, estimativa };
+        if let Err(err) = estado.mutar(|d| {
+            d.valores_do_jogo.insert(foco.jogador, novo);
+        }) {
+            tracing::warn!("[scout::state] Valor do jogo não foi salvo: {err:?}");
+            return;
+        }
+        self.ajuste_valor = estado.ler(|d| ajuste_das_leituras(&d.valores_do_jogo));
+        tracing::info!("[scout::state] Valor exato de {} lido no jogo: {}.", nome, foco.valor);
+    }
+
+    /// Liga/desliga a sincronização (vale para a sessão e é salvo na
+    /// carreira). Desligar não desfaz nada no jogo; ligar de novo reconcilia
+    /// na hora e põe na lista do jogo os Escolhidos que ainda não estão.
+    pub fn alternar_sincronizacao_nativa(&mut self) {
+        use crate::save_repo::nativo;
+        let ligada = !nativo::sincronizacao_ligada();
+        nativo::definir_sincronizacao(ligada);
+        tracing::info!("[scout::state] Sincronizar com o FIFA: {}.", if ligada { "ligado" } else { "desligado" });
+        if let Some(estado) = self.estado_ativo().cloned() {
+            if let Err(err) = estado.mutar(|d| d.ui_prefs.sincronizar_com_o_jogo = ligada) {
+                tracing::warn!("[scout::state] Preferência de sincronização não foi salva: {err:?}");
+            }
+            if ligada {
+                self.ultima_sync_nativa = None;
+                self.ultimo_erro_nativo = None;
+                let pendentes: Vec<JogadorEncontrado> =
+                    estado.ler(|d| d.escolhidos.iter().filter(|e| !e.no_jogo).map(|e| e.jogador.clone()).collect());
+                for jogador in pendentes {
+                    if jogador.clube_id.is_none() {
+                        self.ids_sem_time.push(jogador.player_id);
+                    } else if adicionar_na_lista_do_jogo(&jogador) {
+                        let id = jogador.player_id;
+                        if let Err(err) = estado.mutar(|d| {
+                            for e in d.escolhidos.iter_mut().filter(|e| e.jogador.player_id == id) {
+                                e.no_jogo = true;
+                            }
+                        }) {
+                            tracing::warn!("[scout::state] Marca \"no jogo\" não foi salva: {err:?}");
+                        }
+                    }
+                }
+                self.buscar_times();
+            }
+        }
+    }
+
+    /// O que a aba Escolhidos mostra sobre a sincronização.
+    pub fn status_nativo(&self) -> StatusNativo {
+        let local = crate::save_repo::nativo::localizacao();
+        StatusNativo {
+            ligada: crate::save_repo::nativo::sincronizacao_ligada(),
+            localizando: self.nativo_localizando,
+            escolhidos: local.escolhidos,
+            conhecimento: local.conhecimento,
+            erro: self.ultimo_erro_nativo.clone(),
+        }
+    }
+
+    /// "Tentar de novo": localiza o scout do jogo outra vez (em background).
+    pub fn localizar_nativo_de_novo(&mut self) {
+        if self.nativo_localizando {
+            return;
+        }
+        self.nativo_localizando = crate::save_repo::nativo::start_locating(&self.tarefa_nativo);
+    }
+
+    /// Trata a localização do scout do jogo que terminou (roda a cada frame).
+    fn processar_nativo(&mut self) {
+        if !self.nativo_localizando {
+            return;
+        }
+        match self.tarefa_nativo.poll() {
+            TaskState::Running | TaskState::Idle => {}
+            TaskState::Done(()) | TaskState::Failed(_) => {
+                self.nativo_localizando = false;
+                self.tarefa_nativo.reset();
+                let local = crate::save_repo::nativo::localizacao();
+                if local.escolhidos || local.conhecimento {
+                    self.avisou_nativo_ausente = false;
+                    self.ultimo_erro_nativo = None;
+                    self.ultima_sync_nativa = None; // reconcilia já
+                }
+            }
+        }
+    }
+
+    /// Lê o save (fora do render, AD-4) para descobrir o time dos Escolhidos
+    /// de `ids_sem_time` e, ao terminar, pô-los na lista do jogo.
+    fn buscar_times(&mut self) {
+        if self.times_pendente || self.ids_sem_time.is_empty() || !crate::save_repo::nativo::sincronizacao_ligada() {
+            return;
+        }
+        let Some(id_save) = self.save_ativo.clone() else { return };
+        let ids = std::mem::take(&mut self.ids_sem_time);
+        let fonte = Arc::clone(&self.fonte);
+        self.times_pendente = self.tarefa_times.start(move || {
+            let pool = fonte.read_all_players()?;
+            let times = ids
+                .iter()
+                .map(|id| (*id, pool.jogadores.iter().find(|j| j.player_id == *id).and_then(|j| j.clube_id)))
+                .collect();
+            Ok((id_save, times))
+        });
+    }
+
+    /// Trata a descoberta de times que terminou (roda a cada frame).
+    fn processar_times(&mut self) {
+        if !self.times_pendente {
+            return;
+        }
+        match self.tarefa_times.poll() {
+            TaskState::Running | TaskState::Idle => {}
+            TaskState::Done((dono, times)) => {
+                self.times_pendente = false;
+                self.tarefa_times.reset();
+                if let Some(estado) = self.estados.get(&dono).cloned() {
+                    for (player_id, time) in times {
+                        let Some(time) = time else { continue };
+                        let jogador = estado.ler(|d| d.escolhidos.iter().find(|e| e.jogador.player_id == player_id).map(|e| (e.jogador.clone(), e.no_jogo)));
+                        let Some((mut jogador, ja_no_jogo)) = jogador else { continue };
+                        jogador.clube_id = Some(time);
+                        let entrou = !ja_no_jogo && adicionar_na_lista_do_jogo(&jogador);
+                        if let Err(err) = estado.mutar(|d| {
+                            for e in d.escolhidos.iter_mut().filter(|e| e.jogador.player_id == player_id) {
+                                e.jogador.clube_id = Some(time);
+                                e.no_jogo |= entrou;
+                            }
+                        }) {
+                            tracing::warn!("[scout::state] Time do Escolhido não foi salvo: {err:?}");
+                        }
+                    }
+                }
+                self.buscar_times();
+            }
+            TaskState::Failed(err) => {
+                self.times_pendente = false;
+                self.tarefa_times.reset();
+                tracing::warn!("[scout::state] Time dos Escolhidos não foi lido: {err:?}");
+            }
+        }
+    }
+
     /// Trata a atualização dos Escolhidos que terminou (roda a cada frame).
     fn processar_escolhidos(&mut self) {
         if !self.atualizacao_escolhidos_pendente {
@@ -1918,7 +2382,7 @@ impl ScoutState {
                     for novo in novos {
                         if let Some(e) = d.escolhidos.iter_mut().find(|e| e.jogador.player_id == novo.jogador.player_id) {
                             // prioridade pode ter mudado enquanto a leitura rodava
-                            *e = Escolhido { prioridade: e.prioridade, ..novo };
+                            *e = Escolhido { prioridade: e.prioridade, no_jogo: e.no_jogo, ..novo };
                         }
                     }
                 });
@@ -1969,6 +2433,8 @@ impl ScoutState {
         }
         self.processar_buscas();
         self.processar_escolhidos();
+        self.processar_times();
+        self.processar_nativo();
         self.minifaces.tick();
 
         match self.tarefa_localizar.poll() {
@@ -2000,6 +2466,9 @@ impl ScoutState {
             self.reler();
             self.avisar_jogadores_novos();
         }
+
+        self.reconciliar_nativo();
+        self.colher_valor_em_foco();
 
         if !matches!(self.status, CarreiraStatus::Pronta(_) | CarreiraStatus::Localizando) {
             self.vigiar_carreira();
@@ -2100,6 +2569,8 @@ impl ScoutState {
             destravar_missoes(estado);
         }
         self.aba_restaurada = Some(estado.ler(|dados| dados.ui_prefs.aba_ativa));
+        crate::save_repo::nativo::definir_sincronizacao(estado.ler(|dados| dados.ui_prefs.sincronizar_com_o_jogo));
+        self.ajuste_valor = estado.ler(|dados| ajuste_das_leituras(&dados.valores_do_jogo));
         tracing::info!("[scout::state] Carreira ativa: estado {}…", id_save.get(..8).unwrap_or(&id_save));
         self.ultimo_save = Some(id_save.clone());
         self.save_ativo = Some(id_save);
@@ -3780,7 +4251,17 @@ mod tests {
         liberar_busca: Arc<std::sync::atomic::AtomicBool>,
     }
 
+    thread_local! {
+        /// Jogador em foco no jogo, controlado pelo teste (cada teste roda na
+        /// própria thread e chama `tick` nela).
+        static FOCO_FALSO: std::cell::RefCell<Option<crate::save_repo::foco::ValorEmFoco>> = const { std::cell::RefCell::new(None) };
+    }
+
     impl CareerSource for FonteFalsa {
+        fn read_focused_value(&self) -> Result<Option<crate::save_repo::foco::ValorEmFoco>, SaveRepoError> {
+            Ok(FOCO_FALSO.with(|f| f.borrow().clone()))
+        }
+
         fn write_transfer_budget(&self, anterior: i32, novo: i32) -> Result<i32, SaveRepoError> {
             self.escritas.lock().unwrap_or_else(|p| p.into_inner()).push((anterior, novo));
             let mut fila = self.resultados_escrita.lock().unwrap_or_else(|p| p.into_inner());
@@ -5556,7 +6037,221 @@ mod tests {
             alvo: None,
             referencia: None,
             relatorio_id: None,
+            no_jogo: false,
         }
+    }
+
+    #[test]
+    fn matching_names_ignore_case_accents_and_a_common_name_inside_the_full_one() {
+        assert!(nomes_equivalentes("Isi Palazón", "Isi Palaz\u{f3}n"));
+        assert!(nomes_equivalentes("Sverre Nypan", "SVERRE NYPAN"));
+        assert!(nomes_equivalentes("Éder Gabriel Militão", "Militão"), "nome comum dentro do completo");
+        assert!(!nomes_equivalentes("Sverre Nypan", "Kees Smit"));
+        assert!(!nomes_equivalentes("Li", "Li"), "curto demais para confiar");
+    }
+
+    #[test]
+    fn the_estimate_learns_from_exact_readings_that_carry_the_estimate_of_the_moment() {
+        let leitura = |valor: u32, estimativa: Option<u32>| ValorDoJogo { valor, lido_em: Date(20260710), estimativa };
+        let mut leituras = std::collections::BTreeMap::new();
+        assert_eq!(ajuste_das_leituras(&leituras), 1.0, "sem leituras: nada muda");
+        // quatro leituras 25% acima da estimativa: ainda pouco para mexer
+        for i in 0..4u32 {
+            leituras.insert(i + 1, leitura(1_250_000, Some(1_000_000)));
+        }
+        assert_eq!(ajuste_das_leituras(&leituras), 1.0);
+        // leituras SEM a estimativa (de antes desta versão) não contam
+        for i in 10..20u32 {
+            leituras.insert(i, leitura(9_000_000, None));
+        }
+        assert_eq!(ajuste_das_leituras(&leituras), 1.0);
+        // a quinta com estimativa: o fator sobe, puxado para 1
+        leituras.insert(50, leitura(1_250_000, Some(1_000_000)));
+        let a = ajuste_das_leituras(&leituras);
+        assert!(a > 1.05 && a < 1.25, "{a}");
+        // se a Central estimava alto, o fator desce
+        let mut abaixo = std::collections::BTreeMap::new();
+        for i in 0..8u32 {
+            abaixo.insert(i + 1, leitura(800_000, Some(1_000_000)));
+        }
+        assert!(ajuste_das_leituras(&abaixo) < 0.95);
+    }
+
+    #[test]
+    fn only_a_precise_observation_can_teach_the_estimate() {
+        let pool = pool_de_teste();
+        let concluida = Missao::de_teste(Uuid::new_v4(), StatusMissao::Concluida);
+        let mut j = search::revelar(&concluida, &pool, Date(20260710), pool.jogadores.iter().find(|j| j.player_id == 3).expect("jogador"));
+        j.overall = FaixaAtributo { min: 78, max: 82 };
+        j.potencial = FaixaAtributo { min: 80, max: 84 };
+        assert_eq!(j.estimativa_precisa(), Some(u32::try_from(j.valor_estimado()).expect("cabe")), "faixas de até 4 pontos");
+        j.overall = FaixaAtributo { min: 70, max: 90 };
+        assert_eq!(j.estimativa_precisa(), None, "faixa larga: o erro não é do modelo");
+    }
+
+    #[test]
+    fn a_game_value_is_exact_for_90_days_then_the_central_estimates_again() {
+        let v = ValorDoJogo { valor: 5_000_000, lido_em: Date(20260701), estimativa: None };
+        assert!(v.vale_em(Some(Date(20260701))));
+        assert!(v.vale_em(Some(Date(20260929))), "89 dias");
+        assert!(!v.vale_em(Some(Date(20261001))), "92 dias");
+        assert!(!v.vale_em(Some(Date(20260630))), "antes da leitura (save antigo)");
+        assert!(v.vale_em(None), "sem data na tela, vale");
+    }
+
+    #[test]
+    fn the_value_in_focus_is_harvested_only_for_known_players_with_the_same_name() {
+        use crate::save_repo::foco::ValorEmFoco;
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let vencida = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![vencida], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let item = st.relatorios(false).into_iter().next().expect("Relatório");
+        let jogador = item.relatorio.jogadores[0].clone();
+        let em_foco = |id: u32, nome: &str, valor: u32| {
+            FOCO_FALSO.with(|f| *f.borrow_mut() = Some(ValorEmFoco { jogador: id, time: 10, valor, nome: nome.to_string() }));
+        };
+        let colher = |st: &mut ScoutState| {
+            st.ultima_colheita = None;
+            st.tick();
+        };
+
+        // jogador que a Central não conhece, e id conhecido com outro nome: ignorados
+        em_foco(399_999, "Outro Jogador", 5_000_000);
+        colher(&mut st);
+        em_foco(jogador.player_id, "Totalmente Diferente", 5_000_000);
+        colher(&mut st);
+        assert_eq!(st.valor_do_jogo(jogador.player_id), None);
+        assert_eq!(st.valor_do_jogo(399_999), None);
+
+        // o jogador conhecido, com o nome certo: colhido (e mostrado como exato)
+        em_foco(jogador.player_id, &jogador.nome, 5_000_000);
+        colher(&mut st);
+        assert_eq!(st.valor_do_jogo(jogador.player_id), Some(ValorDoJogo { valor: 5_000_000, lido_em: Date(20260712), estimativa: st.valor_do_jogo(jogador.player_id).and_then(|v| v.estimativa) }));
+        assert_eq!(st.valor_exato(jogador.player_id), Some(5_000_000));
+        // o arquivo guarda
+        let salvo = st.estado_ativo().cloned().expect("estado").ler(|d| d.valores_do_jogo.get(&jogador.player_id).copied());
+        assert_eq!(salvo.map(|v| v.valor), Some(5_000_000));
+
+        // o valor mudou no jogo: a leitura nova vale
+        em_foco(jogador.player_id, &jogador.nome, 6_500_000);
+        colher(&mut st);
+        assert_eq!(st.valor_exato(jogador.player_id), Some(6_500_000));
+
+        // 4 meses depois, volta a estimar (a leitura continua guardada)
+        st.data_progresso = Some(Date(20261112));
+        assert_eq!(st.valor_exato(jogador.player_id), None);
+        assert!(st.valor_do_jogo(jogador.player_id).is_some());
+    }
+
+    #[test]
+    fn a_new_escolhido_keeps_the_team_and_an_old_one_gets_it_from_the_save() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let vencida = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![vencida], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let item = st.relatorios(false).into_iter().next().expect("Relatório");
+        let pid = item.relatorio.jogadores[0].player_id;
+        st.abrir_relatorio(item.relatorio.id);
+        st.abrir_ficha(pid);
+        assert!(st.adicionar_escolhido_da_ficha());
+        assert_eq!(st.escolhidos()[0].escolhido.jogador.clube_id, Some(10), "o time do save vai junto");
+        assert!(st.ids_sem_time.is_empty(), "com time conhecido não precisa perguntar ao save");
+        assert!(!st.escolhidos()[0].escolhido.no_jogo, "sem o jogo localizado nada foi posto na lista dele");
+
+        // Escolhido de um Relatório antigo: sem time
+        let estado = st.estado_ativo().cloned().expect("estado");
+        estado
+            .mutar(|d| {
+                for e in d.escolhidos.iter_mut() {
+                    e.jogador.clube_id = None;
+                }
+            })
+            .expect("grava");
+        st.ids_sem_time.push(pid);
+        st.buscar_times();
+        assert!(st.times_pendente);
+        let inicio = Instant::now();
+        while st.times_pendente {
+            st.tick();
+            assert!(inicio.elapsed() < Duration::from_secs(5), "busca do time travou");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(st.escolhidos()[0].escolhido.jogador.clube_id, Some(10), "o time veio do save");
+    }
+
+    fn dados_de_nivel() -> (persistence::ScoutStateFile, Uuid, Uuid) {
+        let pool = pool_de_teste();
+        let rodando = Missao::de_teste(Uuid::new_v4(), StatusMissao::EmExecucao);
+        let concluida = Missao::de_teste(Uuid::new_v4(), StatusMissao::Concluida);
+        let jogador = |id: u32| search::revelar(&concluida, &pool, Date(20260710), pool.jogadores.iter().find(|j| j.player_id == id).expect("jogador"));
+        let mut r_rodando = Relatorio::de_teste(rodando.id);
+        r_rodando.jogadores = vec![jogador(1), jogador(2)];
+        let mut r_concluido = Relatorio::de_teste(concluida.id);
+        r_concluido.precisao_mais_menos = 5;
+        r_concluido.jogadores = vec![jogador(3), jogador(4)];
+        let mut dados = persistence::ScoutStateFile::default();
+        dados.missoes = vec![rodando, concluida];
+        dados.relatorios = vec![r_rodando.clone(), r_concluido.clone()];
+        (dados, r_rodando.id, r_concluido.id)
+    }
+
+    #[test]
+    fn game_levels_follow_the_reports_the_escolhidos_and_their_aging() {
+        let (mut dados, id_rodando, id_concluido) = dados_de_nivel();
+        let hoje = Date(20260801);
+        let alvo = |dados: &persistence::ScoutStateFile, hoje: Date| -> std::collections::BTreeMap<i32, (i32, Option<i32>)> {
+            pedidos_de_nivel(dados, hoje, |_| false).into_iter().map(|p| (p.jogador, (p.alvo, p.original))).collect()
+        };
+
+        // Relatório de Missão concluída: só os jogadores dele, pela precisão (±5 → 178); o parcial não escreve
+        let mapa = alvo(&dados, hoje);
+        assert_eq!(mapa.keys().copied().collect::<Vec<_>>(), vec![3, 4]);
+        assert_eq!(mapa[&3], (178, None), "só sobe (sem original)");
+
+        // Escolhido do Relatório que ainda roda: 140 (valor anterior ao completo)
+        let mut do_parcial = escolhido_de_teste(1, 20260801);
+        do_parcial.relatorio_id = Some(id_rodando);
+        // Escolhido do Relatório concluído: segue a precisão dele (10 → 158)
+        let mut do_concluido = escolhido_de_teste(3, 20260801);
+        do_concluido.relatorio_id = Some(id_concluido);
+        do_concluido.precisao = 10;
+        dados.escolhidos = vec![do_parcial, do_concluido];
+        let mapa = alvo(&dados, hoje);
+        assert_eq!(mapa[&1], (140, None));
+        assert_eq!(mapa[&3], (158, None), "o Escolhido vale mais que o Relatório (178)");
+        assert_eq!(mapa[&4], (178, None));
+
+        // com o nível original guardado, o pedido do Escolhido vem com o piso
+        dados.nivel_original.insert(3, 40);
+        assert_eq!(alvo(&dados, hoje)[&3], (158, Some(40)));
+
+        // observação vencida (mais de 1,5 ano): volta ao que o jogo tinha
+        let vencido = Date(20280601);
+        let mapa = alvo(&dados, vencido);
+        assert_eq!(mapa[&3], (40, Some(40)), "volta ao nível original");
+        assert_eq!(mapa[&1].0, 0, "sem original guardado volta a 0, mas sem piso ele só sobe (nada acontece)");
+        assert_eq!(mapa[&1].1, None);
+    }
+
+    #[test]
+    fn the_in_game_mark_is_saved_only_when_set_and_old_files_still_load() {
+        let mut e = escolhido_de_teste(1, 20_351_001);
+        let sem = serde_json::to_string(&e).expect("serializa");
+        assert!(!sem.contains("no_jogo"), "marca falsa não vai para o arquivo");
+        let lido: Escolhido = serde_json::from_str(&sem).expect("arquivo sem a marca carrega");
+        assert!(!lido.no_jogo);
+
+        e.no_jogo = true;
+        let com = serde_json::to_string(&e).expect("serializa");
+        assert!(com.contains("\"no_jogo\":true"));
+        let lido: Escolhido = serde_json::from_str(&com).expect("recarrega");
+        assert!(lido.no_jogo);
+        assert_eq!(lido.jogador.clube_id, e.jogador.clube_id);
     }
 
     #[test]
