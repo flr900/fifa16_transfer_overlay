@@ -13,6 +13,7 @@ use imgui::{DrawListMut, FontId, StyleColor, StyleVar, Ui};
 
 use super::theme::{self, Fonts};
 use super::{com_fonte, contorno_hover, ESPESSURA_FOCO};
+use crate::scout::minifaces::Rosto;
 use crate::scout::quality::{Estrelas, Frescor};
 use crate::scout::state::{Qualidade, Tier};
 
@@ -331,6 +332,32 @@ pub fn rotulo_com_estrelas(
     let x = pos[0] + w + theme::ESPACO_1;
     let largura = desenhar_estrelas(dl, [x, pos[1] + (h - lado) * 0.5], estrelas, lado, cor);
     w + theme::ESPACO_1 + largura
+}
+
+// ---------------------------------------------------------------------
+// Bandeira de nação (2026-10-05)
+// ---------------------------------------------------------------------
+
+/// Largura ÷ altura da bandeira (o ícone do jogo é ~1,6 : 1).
+const PROPORCAO_BANDEIRA: f32 = 1.6;
+
+/// Largura de uma bandeira de `altura` px.
+pub fn largura_da_bandeira(altura: f32) -> f32 {
+    (altura * PROPORCAO_BANDEIRA).round()
+}
+
+/// A bandeira pelo draw list, com o canto de cima à esquerda em `pos`.
+/// Enquanto a imagem não chega (ou se o jogo não a tem), um retângulo
+/// neutro com a mesma borda marca o lugar. Devolve a largura ocupada.
+pub fn bandeira(dl: &DrawListMut<'_>, rosto: Rosto, pos: [f32; 2], altura: f32) -> f32 {
+    let largura = largura_da_bandeira(altura);
+    let max = [pos[0] + largura, pos[1] + altura];
+    match rosto {
+        Rosto::Pronto(textura) => dl.add_image_rounded(textura, pos, max, 2.0).build(),
+        Rosto::Carregando | Rosto::Ausente => dl.add_rect(pos, max, [1.0, 1.0, 1.0, 0.08]).filled(true).rounding(2.0).build(),
+    }
+    dl.add_rect(pos, max, theme::BORDER_HAIRLINE).rounding(2.0).build();
+    largura
 }
 
 /// Texto pelo draw list numa fonte do tema; devolve o tamanho.

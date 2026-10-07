@@ -8,6 +8,10 @@
 //! abre com os filtros ideais da Especialização dele; "Restaurar sugestão"
 //! volta a eles. B volta ao passo anterior.
 //!
+//! Desde 2026-10-05 a tela tem duas colunas: à esquerda o Olheiro com o
+//! que ele oferece (estrelas, mercados, o que vale para esta Missão); à
+//! direita os filtros. Os atalhos de filtro saíram por ora.
+//!
 //! A barra de abas e o cabeçalho continuam visíveis (é uma tela, não um
 //! modal). Confirmar debita o orçamento com as garantias da contratação
 //! (Story 1.5) e grava a Missão como `Pendente`; nenhuma busca roda agora
@@ -18,7 +22,7 @@
 //! Épico 3 — cada um abre um painel em tela cheia (o de referência é o
 //! seletor de elenco, AD-13).
 
-use imgui::{StyleColor, Ui};
+use imgui::{StyleColor, Ui, WindowFlags};
 
 use super::componentes::{self, badge_qualidade, EstiloBotao};
 use super::theme::{self, Fonts};
@@ -27,19 +31,23 @@ use crate::scout::quality::{Investimento, TipoMissao};
 use crate::scout::{ContextoSeletor, Satelite};
 use crate::scout::quality;
 use crate::scout::state::{
-    Atalho, Atributo, BloqueioMissao, FiltrosMissao, Limite, NivelEquipe, Perfil, Carga, CampoFaixa, ErroCompra, FaixaAtributo, FiltroPe, ModoBusca, PreviaMissao, RitmoTrabalho,
+    Atributo, BloqueioMissao, Especializacao, FiltrosMissao, Limite, NivelEquipe, Perfil, Carga, CampoFaixa, ErroCompra, FaixaAtributo, FiltroPe, ModoBusca, PreviaMissao, RitmoTrabalho,
     ScoutState,
 };
 
 const ALTURA_RODAPE: f32 = 176.0;
+/// O painel do Olheiro, à esquerda: um terço da tela, entre estes limites.
+const FRACAO_PAINEL_OLHEIRO: f32 = 0.30;
+const LARGURA_PAINEL_MIN: f32 = 250.0;
+const LARGURA_PAINEL_MAX: f32 = 340.0;
 const LARGURA_ROTULO: f32 = 170.0;
 const LARGURA_VALOR: f32 = 44.0;
-const LARGURA_MODO: f32 = 150.0;
-const LARGURA_VALOR_CAMPO: f32 = 320.0;
+const LARGURA_MODO: f32 = 130.0;
+const LARGURA_VALOR_CAMPO: f32 = 300.0;
 const LARGURA_RITMO: f32 = 120.0;
 const LARGURA_POSICAO: f32 = 64.0;
 const LARGURA_LIMITE: f32 = 190.0;
-const LARGURA_VERBA: f32 = 200.0;
+const LARGURA_VERBA: f32 = 180.0;
 
 pub const MSG_SEM_OLHEIRO: &str = "Nenhum Olheiro disponível.";
 
@@ -137,21 +145,35 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         return Acao::Cancelou;
     };
 
+    com_fonte(ui, fonts.map(|f| f.heading), || ui.text("Nova Missão"));
+    ui.dummy([0.0, theme::ESPACO_2]);
+
     let mut campo = None;
     let altura_campos = (ui.content_region_avail()[1] - ALTURA_RODAPE).max(120.0);
+    // Olheiro e stats à esquerda, filtros à direita (2026-10-05, pedido do
+    // Felipe: no formulário antigo não dava para ver o que o Olheiro oferece).
+    let largura_olheiro = (ui.content_region_avail()[0] * FRACAO_PAINEL_OLHEIRO).clamp(LARGURA_PAINEL_MIN, LARGURA_PAINEL_MAX);
+    {
+        let _fundo = ui.push_style_color(StyleColor::ChildBg, theme::BG_PANEL_RAISED);
+        ui.child_window("##olheiro_nova_missao")
+            .size([largura_olheiro, altura_campos])
+            .border(true)
+            // sem rolagem: o perfil cabe inteiro, e a tela nunca vira dois
+            // lugares para rolar (Felipe, 2026-10-05)
+            .flags(super::flags_conteudo() | WindowFlags::NO_SCROLLBAR | WindowFlags::NO_SCROLL_WITH_MOUSE)
+            .build(|| painel_olheiro(ui, fonts, state, &previa));
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
     let rolagem = state.rolagem();
     ui.child_window("##campos_nova_missao")
         .size([0.0, altura_campos])
         .border(false)
-        .flags(super::flags_conteudo())
+        .flags(super::flags_conteudo() | WindowFlags::HORIZONTAL_SCROLLBAR)
         .build(|| {
             super::rolar_com_analogico(ui, rolagem);
-            com_fonte(ui, fonts.map(|f| f.heading), || ui.text("Nova Missão"));
-            ui.dummy([0.0, theme::ESPACO_2]);
-            cabecalho_olheiro(ui, fonts, state, &previa);
-            ui.dummy([0.0, theme::ESPACO_1]);
-            campo_atalhos(ui, fonts, state);
             let f = &previa.rascunho.filtros;
+
+            restaurar_sugestao(ui, fonts, state, previa.rascunho.olheiro_id.is_some());
 
             secao(ui, fonts, "Onde");
             let geografia = match state.listar_ligas() {
@@ -293,44 +315,111 @@ fn divisor(ui: &Ui) {
     ui.dummy([0.0, theme::ESPACO_2]);
 }
 
-/// O Olheiro escolhido no passo 1 (não muda aqui; B volta para trocar) e
-/// "Restaurar sugestão", que devolve os filtros ideais dele.
-fn cabecalho_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
-    let inicio = ui.cursor_pos();
-    rotulo(ui, fonts, "Olheiro");
-    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+/// "Restaurar sugestão": o primeiro item dos filtros, que devolve os filtros
+/// ideais do Olheiro escolhido. Com o foco do controle nele, rola até o topo
+/// (os títulos de seção não são itens; sem isso ficavam escondidos).
+fn restaurar_sugestao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, com_olheiro: bool) {
+    if componentes::botao(ui, fonts, "Restaurar sugestão", EstiloBotao::Secundario, com_olheiro) {
+        state.restaurar_filtros_ideais();
+    }
+    if componentes::focado_pelo_controle(ui) && ui.scroll_y() > 0.0 {
+        ui.set_scroll_y(0.0);
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+    let y = ui.cursor_pos()[1];
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
+        ui.text_colored(theme::TEXT_SECONDARY, "Os filtros já vêm com o que combina com o foco do Olheiro.");
+    });
+}
+
+/// O painel da esquerda: o Olheiro escolhido no passo 1 (não muda aqui; B
+/// volta para trocar) e o que ele oferece — estrelas, o que vale para esta
+/// Missão, mercados com bandeira e o aviso de penalidade. Compacto e sem
+/// rolagem: o que não é essencial (descrição do foco, legendas) ficou fora.
+fn painel_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
     let escolhido = previa
         .rascunho
         .olheiro_id
         .and_then(|id| previa.olheiros.iter().find(|c| c.olheiro.id == id))
         .map(|c| c.olheiro.clone());
-    match escolhido {
-        Some(o) => {
-            olheiros::nome_com_badge(ui, fonts, &o.nome_exibicao(), o.tier);
-            ui.same_line_with_spacing(0.0, theme::ESPACO_4);
-            if componentes::botao(ui, fonts, "Restaurar sugestão", EstiloBotao::Secundario, true) {
-                state.restaurar_filtros_ideais();
-            }
-            // Primeiro item da tela: com o foco do controle nele, rola até o
-            // topo (o título não é item; sem isso ele ficava escondido).
-            if componentes::focado_pelo_controle(ui) && ui.scroll_y() > 0.0 {
-                ui.set_scroll_y(0.0);
-            }
-            let foco = o.perfil().foco();
-            ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-            com_fonte(ui, fonts.map(|f| f.meta), || {
-                ui.text_colored(
-                    theme::TEXT_SECONDARY,
-                    format!("Foco {}: {} Os filtros abaixo já vêm com o que combina com ele.", foco.nome(), olheiros::descricao(foco)),
-                )
-            });
-            if let Some(aviso) = texto_penalidade(previa) {
-                ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-                com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::WARNING, aviso));
-            }
+    let Some(o) = escolhido else {
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_OLHEIRO));
+        return;
+    };
+    let perfil = o.perfil();
+    let foco = perfil.foco();
+
+    // bandeira, nome e nível; embaixo, nação e foco
+    olheiros::com_nacoes(state, |nacoes| {
+        if let Some(n) = &o.nacao {
+            let altura = com_fonte(ui, fonts.map(|f| f.heading), || ui.text_line_height());
+            let altura_bandeira = (altura * 0.72).round();
+            let pos = ui.cursor_screen_pos();
+            let w = componentes::bandeira(
+                &ui.get_window_draw_list(),
+                (nacoes.bandeira)(n.id),
+                [pos[0], pos[1] + (altura - altura_bandeira) * 0.5],
+                altura_bandeira,
+            );
+            ui.dummy([w, altura]);
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
         }
-        None => com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_OLHEIRO)),
+    });
+    olheiros::nome_com_badge(ui, fonts, &o.nome_exibicao(), o.tier);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let origem = o.nacao.as_ref().map_or("Sem nação", |n| n.nome.as_str());
+        ui.text_colored(theme::TEXT_SECONDARY, format!("{origem} · {}", foco.nome()));
+    });
+
+    divisor_do_painel(ui);
+    for e in Especializacao::TODAS {
+        let cor = if e == foco { theme::ACCENT_PRIMARY } else { theme::TEXT_SECONDARY };
+        linha_estrelas(ui, fonts, e.nome(), perfil.atributo(e), cor);
     }
+    linha_estrelas(ui, fonts, "Rede de contatos", perfil.rede, theme::FIELD_GREEN);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let _cor = ui.push_style_color(StyleColor::Text, theme::ACCENT_PRIMARY);
+        ui.text_wrapped(texto_vale_para_a_missao(previa.tipo, perfil.para_tipo(previa.tipo)));
+    });
+
+    divisor_do_painel(ui);
+    olheiros::com_nacoes(state, |nacoes| olheiros::origem_no_fluxo(ui, fonts, &o, nacoes, false, 4));
+
+    if let Some(aviso) = texto_penalidade(previa) {
+        divisor_do_painel(ui);
+        com_fonte(ui, fonts.map(|f| f.meta), || {
+            let _cor = ui.push_style_color(StyleColor::Text, theme::WARNING);
+            ui.text_wrapped(aviso);
+        });
+    }
+}
+
+/// Linha fina entre os blocos do painel do Olheiro.
+fn divisor_do_painel(ui: &Ui) {
+    ui.dummy([0.0, theme::ESPACO_1]);
+    let _c = ui.push_style_color(StyleColor::Separator, theme::BORDER_HAIRLINE_SUBTLE);
+    ui.separator();
+    ui.dummy([0.0, theme::ESPACO_1]);
+}
+
+/// "Para esta Missão (Jovens) vale 3,5 estrelas."
+pub fn texto_vale_para_a_missao(tipo: TipoMissao, estrelas: quality::Estrelas) -> String {
+    format!("Para esta Missão ({}) ele vale {} estrelas.", nome_tipo(tipo), estrelas.texto())
+}
+
+/// Uma linha do painel do Olheiro: o nome do atributo à esquerda e as
+/// estrelas encostadas à direita.
+fn linha_estrelas(ui: &Ui, fonts: Option<&Fonts>, nome: &str, estrelas: quality::Estrelas, cor: [f32; 4]) {
+    let altura = com_fonte(ui, fonts.map(|f| f.meta), || ui.text_line_height());
+    let pos = ui.cursor_screen_pos();
+    let largura = ui.content_region_avail()[0];
+    let dl = ui.get_window_draw_list();
+    componentes::texto_em(ui, fonts.map(|f| f.meta), &dl, pos, cor, nome);
+    let lado = (altura * 0.8).max(8.0);
+    let largura_estrelas = (lado + 2.0) * 5.0 - 2.0;
+    componentes::desenhar_estrelas(&dl, [pos[0] + largura - largura_estrelas, pos[1] + (altura - lado) * 0.5], estrelas, lado, cor);
+    ui.dummy([0.0, altura + theme::ESPACO_1]);
 }
 
 /// Linha de faixa: `[-] min [+]  até  [-] max [+]  unidade`. Segurar o
@@ -445,37 +534,6 @@ fn campo_pe(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pe: Option<F
             )
         });
     }
-}
-
-/// Atalhos de filtro (2026-10-03): um clique monta uma busca comum
-/// (mantém a geografia e o teto). O tooltip diz o que cada um faz.
-fn campo_atalhos(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
-    // Escopo de ID próprio em cada linha: rótulos se repetem entre linhas
-    // ("Muda patamar" é atalho e nível; "Qualquer" é nível e pé) e, sem
-    // ele, o ImGui via os dois como o mesmo botão: o foco do controle
-    // pulava de linha e o atalho parava de responder (2026-10-03).
-    let _id = ui.push_id("atalhos");
-    let inicio = ui.cursor_pos();
-    rotulo(ui, fonts, "Atalhos");
-    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
-    let mut em_destaque = None;
-    for (indice, atalho) in Atalho::TODOS.into_iter().enumerate() {
-        if indice > 0 {
-            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
-        }
-        if componentes::botao(ui, fonts, atalho.nome(), EstiloBotao::Secundario, true) {
-            state.aplicar_atalho_da_missao(atalho);
-        }
-        if ui.is_item_hovered() || componentes::focado_pelo_controle(ui) {
-            em_destaque = Some(atalho);
-        }
-    }
-    // A explicação fica na linha de baixo (um tooltip no foco atrapalhava
-    // voltar com o controle para o topo).
-    let texto = em_destaque
-        .map_or("Um clique monta a busca; a geografia, as posições e o orçamento ficam como estão.", Atalho::descricao);
-    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto));
 }
 
 /// Nível em relação ao elenco: Qualquer / Muda patamar / Titular / Banco /

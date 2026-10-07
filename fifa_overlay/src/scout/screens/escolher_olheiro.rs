@@ -52,30 +52,46 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) -> Acao {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, texto));
         ui.dummy([0.0, theme::ESPACO_2]);
     }
-    let nacao = |id: u16| state.nome_da_nacao(id);
-    for c in &contratados {
-        if linha(ui, fonts, c, &nacao) && !c.ocupado() {
-            acao = Acao::Escolheu(c.olheiro.id);
+    olheiros::com_nacoes(state, |nacoes| {
+        for c in &contratados {
+            if linha(ui, fonts, c, nacoes) && !c.ocupado() {
+                acao = Acao::Escolheu(c.olheiro.id);
+            }
         }
-    }
+    });
     acao
 }
 
-fn linha(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado, nacao: &dyn Fn(u16) -> Option<String>) -> bool {
+fn linha(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado, nacoes: &olheiros::Nacoes<'_>) -> bool {
     let c_card = card(ui, &c.olheiro.id.to_string(), ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
     let dl = ui.get_window_draw_list();
     let ocupado = c.ocupado();
     let cor = if ocupado { theme::TEXT_DISABLED } else { theme::TEXT_PRIMARY };
     let x = c_card.min[0] + theme::ESPACO_4;
     let y = c_card.min[1] + theme::ESPACO_2;
+    let altura_nome = com_fonte(ui, fonts.map(|f| f.heading), || ui.calc_text_size(&c.olheiro.nome_exibicao())[1]);
+    // a bandeira da nação antes do nome
+    let x_nome = match &c.olheiro.nacao {
+        Some(n) => {
+            let altura_bandeira = (altura_nome * 0.72).round();
+            let w = componentes::bandeira(&dl, (nacoes.bandeira)(n.id), [x, y + (altura_nome - altura_bandeira) * 0.5], altura_bandeira);
+            x + w + theme::ESPACO_2
+        }
+        None => x,
+    };
     let nome = c.olheiro.nome_exibicao();
-    let [w, h] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], cor, &nome);
-    let badge = desenhar_badge(ui, fonts, &dl, &badge_tier(c.olheiro.tier), [x + w + theme::ESPACO_2, y], h);
+    let [w, h] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x_nome, y], cor, &nome);
+    let badge = desenhar_badge(ui, fonts, &dl, &badge_tier(c.olheiro.tier), [x_nome + w + theme::ESPACO_2, y], h);
     let perfil = c.olheiro.perfil();
     let foco = format!("{} · {} estrelas", perfil.foco().nome(), perfil.principal().texto());
-    texto_em(ui, fonts.map(|f| f.meta), &dl, [x + w + badge[0] + theme::ESPACO_4, y + 2.0], theme::TEXT_SECONDARY, &foco);
-    let detalhe = if ocupado { olheiros::texto_missao(c) } else { olheiros::texto_origem(&c.olheiro, nacao) };
-    texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y + h + theme::ESPACO_1], theme::TEXT_SECONDARY, &detalhe);
+    texto_em(ui, fonts.map(|f| f.meta), &dl, [x_nome + w + badge[0] + theme::ESPACO_4, y + 2.0], theme::TEXT_SECONDARY, &foco);
+    let y_detalhe = y + h + theme::ESPACO_1;
+    if ocupado {
+        texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y_detalhe], theme::TEXT_SECONDARY, &olheiros::texto_missao(c));
+    } else {
+        let largura = c_card.max[0] - theme::ESPACO_4 - 120.0 - x;
+        olheiros::desenhar_chips(ui, fonts, &dl, [x, y_detalhe], largura, 1, &olheiros::chips_do_olheiro(&c.olheiro, nacoes, false));
+    }
     let (status, cor_status) = if c.em_missao {
         ("Em Missão", theme::WARNING)
     } else if c.acompanhando {

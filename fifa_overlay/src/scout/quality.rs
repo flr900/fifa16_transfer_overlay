@@ -208,7 +208,7 @@ pub enum Mercado {
 }
 
 impl Mercado {
-    fn continente(self) -> Confederacao {
+    pub fn continente(self) -> Confederacao {
         match self {
             Mercado::Pais { continente, .. } | Mercado::Continente(continente) => continente,
         }
@@ -435,10 +435,17 @@ pub fn nome_atratividade(valor: u8) -> &'static str {
     }
 }
 
-/// Período do mercado de Olheiros: a oferta muda a cada mês do calendário
-/// da carreira (`ano`, `mes` 1–12 da data da carreira).
-pub fn periodo_do_mercado(ano: i32, mes: i32) -> u32 {
-    u32::try_from(ano * 12 + mes - 1).unwrap_or(0)
+/// Período do mercado de Olheiros: a oferta muda toda semana (era todo mês;
+/// o Felipe não quer esperar meses de carreira por um Olheiro de outro
+/// continente, 2026-10-05). `dia` é `Date::day_number` da data da carreira;
+/// o período é a semana (7 dias) desde 1970.
+pub fn periodo_do_mercado(dia: i64) -> u32 {
+    u32::try_from(dia.div_euclid(7)).unwrap_or(0)
+}
+
+/// Primeiro dia do período seguinte (`Date::from_day_number`).
+pub fn inicio_do_periodo(periodo: u32) -> i64 {
+    i64::from(periodo) * 7
 }
 
 /// Um país de onde pode vir um Olheiro (países com clubes no save).
@@ -446,6 +453,41 @@ pub fn periodo_do_mercado(ano: i32, mes: i32) -> u32 {
 pub struct PaisCandidato {
     pub id: u16,
     pub continente: Confederacao,
+    /// Relevância das ligas do país (`peso_da_liga`, somadas): decide
+    /// quantos Olheiros o continente tem e de qual país eles saem.
+    pub peso: u32,
+}
+
+/// Quanto uma liga conta para o mercado: as primeiras divisões de liga cheia
+/// (16 clubes ou mais) valem mais; divisões de baixo e ligas pequenas, pouco.
+pub fn peso_da_liga(nivel: u8, clubes: u16) -> u32 {
+    match (nivel, clubes) {
+        (0 | 1, c) if c >= 16 => 8,
+        (0 | 1, _) => 5,
+        (2, _) => 3,
+        _ => 1,
+    }
+}
+
+/// Olheiros por continente no mercado da semana: o mínimo e o máximo.
+pub const OFERTAS_CONTINENTE_MIN: u32 = 3;
+pub const OFERTAS_CONTINENTE_MAX: u32 = 10;
+
+/// Quantos Olheiros cada continente (com países no mercado) tem: de 3 a 10,
+/// na proporção da relevância das ligas dele frente ao continente mais
+/// forte. Quem tem poucas ligas, e pequenas, fica nos 3; a Europa fica nos
+/// 10. Na ordem de `Confederacao::TODAS`.
+pub fn ofertas_por_continente(paises: &[PaisCandidato]) -> Vec<(Confederacao, u32)> {
+    let pesos: Vec<(Confederacao, u32)> = Confederacao::TODAS
+        .iter()
+        .filter_map(|&c| {
+            let do_continente: Vec<&PaisCandidato> = paises.iter().filter(|p| p.continente == c).collect();
+            (!do_continente.is_empty()).then(|| (c, do_continente.iter().map(|p| p.peso.max(1)).sum::<u32>()))
+        })
+        .collect();
+    let maior = pesos.iter().map(|(_, p)| *p).max().unwrap_or(1).max(1);
+    let faixa = OFERTAS_CONTINENTE_MAX - OFERTAS_CONTINENTE_MIN;
+    pesos.into_iter().map(|(c, p)| (c, OFERTAS_CONTINENTE_MIN + (faixa * p + maior / 2) / maior)).collect()
 }
 
 /// Um Olheiro gerado para o mercado (sem nome: `scout::nomes` dá um pela
@@ -460,10 +502,10 @@ pub struct CandidatoOlheiro {
     pub mercados: Vec<Mercado>,
 }
 
-/// Quantas ofertas o mercado mostra: de 4 (clube sem atrativo) a 9.
-pub fn quantas_ofertas(atratividade: u8) -> u32 {
-    4 + u32::from(atratividade.min(100)) / 20
-}
+/// Parte das ofertas que vêm com perfil médio (equilibrado): os quatro
+/// atributos a até 1★ um do outro, sem um extremo (Felipe, 2026-10-05: os
+/// Olheiros estavam todos nos extremos). O resto segue especialista.
+const PCT_EQUILIBRADOS: u32 = 40;
 
 /// Sorteio determinístico em `0..n`.
 fn sortear(semente: u64, canal: u32, n: u32) -> u32 {
@@ -474,72 +516,105 @@ fn semente_de(base: u64, canal: u32) -> u64 {
     semente(u128::from(base), canal, 77)
 }
 
-/// Os Olheiros à venda num período (item 3). Determinístico pela carreira
-/// e pelo período. A raridade vem da atratividade: num clube grande, cerca
-/// de 1 em 4 ofertas é Elite; num clube pequeno, quase todas são Júnior.
-/// A nação sai dos países com clubes, com peso maior para o país do clube
-/// (6) e o continente dele (2).
+/// Os Olheiros à venda num período (item 3), de todos os continentes.
+/// Determinístico pela carreira e pelo período. Cada continente com países
+/// no mercado tem de 3 a 10 Olheiros (`ofertas_por_continente`: mais para
+/// quem tem mais ligas, e mais relevantes), cada um com a nação num país do
+/// continente; assim um clube acha rápido um Olheiro da Ásia, por exemplo.
+/// A raridade vem da atratividade: num clube grande, cerca de 1 em 4
+/// ofertas é Elite; num clube pequeno, quase todas são Júnior. Dois em cada
+/// cinco vêm com perfil médio (`PCT_EQUILIBRADOS`). Dentro do continente, a
+/// nação pesa pela relevância das ligas (`PaisCandidato::peso`), e o país do
+/// clube pesa mais.
 pub fn gerar_ofertas(atratividade: u8, periodo: u32, carreira: u64, clube: &PerfilClube, paises: &[PaisCandidato]) -> Vec<CandidatoOlheiro> {
-    let atr = u32::from(atratividade.min(100));
-    (0..quantas_ofertas(atratividade))
-        .map(|indice| {
-            let s = semente_de(carreira ^ (u64::from(periodo) << 32), indice);
-            // raridade: Elite < atr/4 %, Experiente até +20% +0,3×atr
-            let rolagem = sortear(s, 1, 100);
-            let limite_elite = atr / 4;
-            let limite_experiente = limite_elite + 20 + atr * 3 / 10;
-            let (foco_meias, rede) = if rolagem < limite_elite {
-                let cinco = atr >= 70 && sortear(s, 2, 4) == 0;
-                (if cinco { 10 } else { 9 }, 6 + sortear(s, 3, 5))
-            } else if rolagem < limite_experiente {
-                (6 + sortear(s, 2, 3), 4 + sortear(s, 3, 4))
-            } else {
-                (3 + sortear(s, 2, 3), 1 + sortear(s, 3, 4))
-            };
-            let foco = Especializacao::TODAS[usize::try_from(sortear(s, 4, 4)).unwrap_or(0)];
-            let generalista = foco == Especializacao::Generalista;
-            let mut perfil = PerfilOlheiro {
-                jovens: Estrelas(0),
-                medalhoes: Estrelas(0),
-                tatico: Estrelas(0),
-                generalista: Estrelas(0),
-                rede: Estrelas::de_meias(i32::try_from(rede).unwrap_or(2)),
-            };
-            for (canal, e) in (10u32..).zip(Especializacao::TODAS) {
-                // o Generalista é equilibrado: os outros ficam mais perto do foco
-                let queda = if generalista { 1 + sortear(s, canal, 3) } else { 2 + sortear(s, canal, 4) };
-                let meias = if e == foco { foco_meias } else { foco_meias.saturating_sub(queda).max(1) };
-                *perfil.atributo_mut(e) = Estrelas::de_meias(i32::try_from(meias).unwrap_or(1));
-            }
-            let pais = escolher_pais(s, clube, paises);
-            let mut mercados: Vec<Mercado> = pais.iter().map(|p| Mercado::Pais { id: p.id, continente: p.continente }).collect();
-            let tier = perfil.tier();
-            let conhece_continente = match tier {
-                Tier::Elite => true,
-                Tier::Experiente => sortear(s, 20, 2) == 0,
-                Tier::Junior => false,
-            };
-            if let (true, Some(p)) = (conhece_continente, &pais) {
-                mercados.push(Mercado::Continente(p.continente));
-            }
-            if tier != Tier::Junior && sortear(s, 21, 10) < 3 {
-                if let Some(outro) = escolher_pais(semente_de(s, 22), clube, paises).filter(|o| Some(o.id) != pais.as_ref().map(|p| p.id)) {
-                    mercados.push(Mercado::Pais { id: outro.id, continente: outro.continente });
-                }
-            }
-            CandidatoOlheiro { indice, semente: s, perfil, pais: pais.map(|p| p.id), mercados }
-        })
-        .collect()
+    let mut indice = 0u32;
+    let mut ofertas = Vec::new();
+    for (continente, quantos) in ofertas_por_continente(paises) {
+        let do_continente: Vec<PaisCandidato> = paises.iter().filter(|p| p.continente == continente).cloned().collect();
+        for _ in 0..quantos {
+            ofertas.push(gerar_um(indice, atratividade, periodo, carreira, clube, paises, &do_continente));
+            indice += 1;
+        }
+    }
+    ofertas
 }
 
+/// Um Olheiro do mercado: `do_continente` são os países de onde ele pode vir.
+fn gerar_um(
+    indice: u32,
+    atratividade: u8,
+    periodo: u32,
+    carreira: u64,
+    clube: &PerfilClube,
+    paises: &[PaisCandidato],
+    do_continente: &[PaisCandidato],
+) -> CandidatoOlheiro {
+    let atr = u32::from(atratividade.min(100));
+    let s = semente_de(carreira ^ (u64::from(periodo) << 32), indice);
+    // raridade: Elite < atr/4 %, Experiente até +20% +0,3×atr
+    let rolagem = sortear(s, 1, 100);
+    let limite_elite = atr / 4;
+    let limite_experiente = limite_elite + 20 + atr * 3 / 10;
+    let (foco_meias, rede) = if rolagem < limite_elite {
+        let cinco = atr >= 70 && sortear(s, 2, 4) == 0;
+        (if cinco { 10 } else { 9 }, 6 + sortear(s, 3, 5))
+    } else if rolagem < limite_experiente {
+        (6 + sortear(s, 2, 3), 4 + sortear(s, 3, 4))
+    } else {
+        (3 + sortear(s, 2, 3), 1 + sortear(s, 3, 4))
+    };
+    let foco = Especializacao::TODAS[usize::try_from(sortear(s, 4, 4)).unwrap_or(0)];
+    let generalista = foco == Especializacao::Generalista;
+    let equilibrado = sortear(s, 5, 100) < PCT_EQUILIBRADOS;
+    // o perfil médio também tem a Rede perto do resto, não só no nível da raridade
+    let rede = if equilibrado { (foco_meias.saturating_sub(1) + sortear(s, 6, 3)).clamp(1, 10) } else { rede };
+    let mut perfil = PerfilOlheiro {
+        jovens: Estrelas(0),
+        medalhoes: Estrelas(0),
+        tatico: Estrelas(0),
+        generalista: Estrelas(0),
+        rede: Estrelas::de_meias(i32::try_from(rede).unwrap_or(2)),
+    };
+    for (canal, e) in (10u32..).zip(Especializacao::TODAS) {
+        // o equilibrado fica a até 1★ do foco; o Generalista também é
+        // chegado ao foco; o especialista despenca fora dele
+        let queda = if equilibrado {
+            sortear(s, canal, 3)
+        } else if generalista {
+            1 + sortear(s, canal, 3)
+        } else {
+            2 + sortear(s, canal, 4)
+        };
+        let meias = if e == foco { foco_meias } else { foco_meias.saturating_sub(queda).max(1) };
+        *perfil.atributo_mut(e) = Estrelas::de_meias(i32::try_from(meias).unwrap_or(1));
+    }
+    let pais = escolher_pais(s, clube, do_continente);
+    let mut mercados: Vec<Mercado> = pais.iter().map(|p| Mercado::Pais { id: p.id, continente: p.continente }).collect();
+    let tier = perfil.tier();
+    let conhece_continente = match tier {
+        Tier::Elite => true,
+        Tier::Experiente => sortear(s, 20, 2) == 0,
+        Tier::Junior => false,
+    };
+    if let (true, Some(p)) = (conhece_continente, &pais) {
+        mercados.push(Mercado::Continente(p.continente));
+    }
+    if tier != Tier::Junior && sortear(s, 21, 10) < 3 {
+        if let Some(outro) = escolher_pais(semente_de(s, 22), clube, paises).filter(|o| Some(o.id) != pais.as_ref().map(|p| p.id)) {
+            mercados.push(Mercado::Pais { id: outro.id, continente: outro.continente });
+        }
+    }
+    CandidatoOlheiro { indice, semente: s, perfil, pais: pais.map(|p| p.id), mercados }
+}
+
+/// Sorteia um país pelo peso (relevância das ligas); o país do clube pesa 4×.
 fn escolher_pais(s: u64, clube: &PerfilClube, paises: &[PaisCandidato]) -> Option<PaisCandidato> {
     let peso = |p: &PaisCandidato| -> u32 {
+        let base = p.peso.max(1);
         if Some(p.id) == clube.pais {
-            6 * paises.len().max(1) as u32 / 10 + 6
-        } else if p.continente == clube.continente {
-            2
+            base * 4
         } else {
-            1
+            base
         }
     };
     let total: u32 = paises.iter().map(peso).sum();
@@ -647,13 +722,14 @@ pub fn capacidade_acompanhamento(generalista: Estrelas) -> usize {
     usize::from(generalista.meias())
 }
 
-/// Dias de acompanhamento até o valor exato: 10 por ponto de precisão e 2
-/// por atributo ainda não observado, no mínimo 7. Um jogador de Relatório
-/// de Qualidade Alta (±1, tudo observado) fica exato em ~10 dias; um de
-/// Qualidade Baixa (±14, 6 de 28 atributos), em ~6 meses.
+/// Dias de acompanhamento até o valor exato: 1 por ponto de precisão e 1
+/// por dois atributos ainda não observados, no mínimo 5. Um jogador de
+/// Relatório de Qualidade Alta (±1, tudo observado) fica exato em 5 dias;
+/// um de Qualidade Baixa (±14, 6 de 28 atributos), em 25 (eram 10 e 2 por
+/// ponto, ~6 meses; 4 e 1, 78 dias: ainda longo para o Felipe, 2026-10-05).
 pub fn dias_para_exato(precisao: u8, observados: usize, total: usize) -> u32 {
     let faltam = u32::try_from(total.saturating_sub(observados)).unwrap_or(0);
-    (10 * u32::from(precisao) + 2 * faltam).max(7)
+    (u32::from(precisao) + faltam.div_ceil(2)).max(5)
 }
 
 /// Precisão (±) depois de `dias` de acompanhamento, de `inicial` até 0.
@@ -904,8 +980,9 @@ fn alvo_jogadores(modo: ModoBusca, pontos: u8) -> u8 {
 fn base_do_modo(modo: ModoBusca) -> (u32, i64) {
     match modo {
         // (dias de carreira, custo)
-        ModoBusca::Rapida => (7, 150_000),
-        ModoBusca::Completa => (21, 400_000),
+        // custos cortados em ~55% em 2026-10-05 (eram 150 mil e 400 mil)
+        ModoBusca::Rapida => (7, 70_000),
+        ModoBusca::Completa => (21, 180_000),
     }
 }
 
@@ -913,9 +990,9 @@ fn base_do_modo(modo: ModoBusca) -> (u32, i64) {
 fn fatores_amplitude(amplitude: AmplitudeGeografica) -> (u32, i64) {
     match amplitude {
         AmplitudeGeografica::Pais => (100, 100),
-        AmplitudeGeografica::VariosPaises => (125, 150),
-        AmplitudeGeografica::Continente => (150, 200),
-        AmplitudeGeografica::Mundo => (200, 300),
+        AmplitudeGeografica::VariosPaises => (125, 135),
+        AmplitudeGeografica::Continente => (150, 170),
+        AmplitudeGeografica::Mundo => (200, 240),
     }
 }
 
@@ -923,8 +1000,8 @@ fn fatores_amplitude(amplitude: AmplitudeGeografica) -> (u32, i64) {
 fn fator_custo_tier(tier: Tier) -> i64 {
     match tier {
         Tier::Junior => 100,
-        Tier::Experiente => 150,
-        Tier::Elite => 220,
+        Tier::Experiente => 130,
+        Tier::Elite => 180,
     }
 }
 
@@ -1827,6 +1904,9 @@ impl Perfil {
 
 /// Atalhos de filtro: um clique monta uma busca comum. Mantêm a geografia,
 /// as posições e o orçamento; o resto volta ao padrão antes de aplicar.
+/// Sem botão na Nova Missão desde 2026-10-05 (retirados por ora, a pedido do
+/// Felipe); o código fica para quando voltarem.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Atalho {
     JovensPromessas,
@@ -1836,6 +1916,7 @@ pub enum Atalho {
     FimDeContrato,
 }
 
+#[allow(dead_code)]
 impl Atalho {
     pub const TODOS: [Atalho; 5] =
         [Atalho::MudaPatamar, Atalho::JovensPromessas, Atalho::NivelTitular, Atalho::NivelBanco, Atalho::FimDeContrato];
@@ -2207,7 +2288,7 @@ mod tests {
         assert_eq!(
             estimar_missao(&pior),
             EstimativaMissao {
-                custo: 450_000,
+                custo: 170_000,
                 duracao_dias: 17,
                 qualidade: Qualidade::Baixa,
                 atributos_revelados: 6,
@@ -2218,7 +2299,7 @@ mod tests {
         assert_eq!(
             estimar_missao(&melhor),
             EstimativaMissao {
-                custo: 880_000,
+                custo: 320_000,
                 duracao_dias: 18,
                 qualidade: Qualidade::Alta,
                 atributos_revelados: 28,
@@ -2748,10 +2829,17 @@ mod tests {
     }
 
     fn paises() -> Vec<PaisCandidato> {
-        [(45, Confederacao::Europa), (14, Confederacao::Europa), (54, Confederacao::AmericaDoSul), (52, Confederacao::AmericaDoSul), (155, Confederacao::Asia), (103, Confederacao::Africa)]
-            .into_iter()
-            .map(|(id, continente)| PaisCandidato { id, continente })
-            .collect()
+        [
+            (45, Confederacao::Europa, 16),
+            (14, Confederacao::Europa, 8),
+            (54, Confederacao::AmericaDoSul, 8),
+            (52, Confederacao::AmericaDoSul, 5),
+            (155, Confederacao::Asia, 5),
+            (103, Confederacao::Africa, 1),
+        ]
+        .into_iter()
+        .map(|(id, continente, peso)| PaisCandidato { id, continente, peso })
+        .collect()
     }
 
     #[test]
@@ -2763,7 +2851,7 @@ mod tests {
         assert_eq!(nome_atratividade(100), "Alta");
         assert_eq!(nome_atratividade(50), "Média");
         assert_eq!(nome_atratividade(10), "Baixa");
-        assert_eq!(periodo_do_mercado(2035, 8), periodo_do_mercado(2035, 7) + 1);
+        assert_eq!(periodo_do_mercado(700), periodo_do_mercado(693) + 1);
     }
 
     #[test]
@@ -2773,8 +2861,9 @@ mod tests {
         let ofertas = |c: &PerfilClube, periodo| gerar_ofertas(atratividade(c), periodo, 0xABCDEF, c, &paises());
         assert_eq!(ofertas(&grande, 24_400), ofertas(&grande, 24_400), "mesmo mês, mesmas ofertas");
         assert_ne!(ofertas(&grande, 24_400), ofertas(&grande, 24_401), "o mercado muda no mês seguinte");
-        assert_eq!(ofertas(&grande, 1).len(), 9);
-        assert_eq!(ofertas(&pequeno, 1).len(), 4);
+        // 24 por semana: Europa 10, América do Sul 7, Ásia 4, África 3
+        assert_eq!(ofertas(&grande, 1).len(), 24);
+        assert_eq!(ofertas(&pequeno, 1).len(), 24, "a quantidade não depende do clube, só a raridade");
         // em muitos meses: o clube grande vê bem mais Elites
         let elites = |c: &PerfilClube| (0..60).flat_map(|m| ofertas(c, m)).filter(|o| o.perfil.tier() == Tier::Elite).count();
         let total = |c: &PerfilClube| (0..60).flat_map(|m| ofertas(c, m)).count();
@@ -2790,9 +2879,62 @@ mod tests {
                 assert!(o.mercados.iter().any(|m| matches!(m, Mercado::Continente(_))), "Elite conhece o continente");
             }
         }
-        // Olheiros locais são os mais comuns
-        let locais = (0..60).flat_map(|m| ofertas(&grande, m)).filter(|o| o.pais == Some(45)).count();
-        assert!(locais * 100 / tg >= 25, "{locais}/{tg}");
+        // na Europa, o país do clube (Espanha, 45) é o mais comum
+        let europeus: Vec<_> = (0..60).flat_map(|m| ofertas(&grande, m)).filter(|o| o.pais == Some(45) || o.pais == Some(14)).collect();
+        let locais = europeus.iter().filter(|o| o.pais == Some(45)).count();
+        assert!(locais * 100 / europeus.len() >= 60, "{locais}/{}", europeus.len());
+    }
+
+    #[test]
+    fn every_continent_has_three_to_ten_olheiros_scaled_by_its_leagues() {
+        let quantos = |lista: &[PaisCandidato]| ofertas_por_continente(lista);
+        let todos = quantos(&paises());
+        let de = |c| todos.iter().find(|(x, _)| *x == c).map(|(_, n)| *n);
+        assert_eq!(de(Confederacao::Europa), Some(10), "o continente mais forte");
+        assert_eq!(de(Confederacao::AmericaDoSul), Some(7));
+        assert_eq!(de(Confederacao::Asia), Some(4));
+        assert_eq!(de(Confederacao::Africa), Some(3), "com poucas ligas fica no mínimo");
+        assert_eq!(de(Confederacao::Oceania), None, "sem países no mercado, sem Olheiros");
+        assert!(todos.iter().all(|(_, n)| (OFERTAS_CONTINENTE_MIN..=OFERTAS_CONTINENTE_MAX).contains(n)));
+        // uma liga relevante sozinha vale mais que várias pequenas
+        let pequenas: Vec<_> = (0..6).map(|i| PaisCandidato { id: 100 + i, continente: Confederacao::Asia, peso: peso_da_liga(3, 10) }).collect();
+        let grande = vec![PaisCandidato { id: 1, continente: Confederacao::Europa, peso: peso_da_liga(1, 20) * 3 }];
+        let mistura: Vec<_> = pequenas.into_iter().chain(grande).collect();
+        let n = quantos(&mistura);
+        assert!(n[0].1 > n[1].1 || n[0].0 == Confederacao::Europa, "{n:?}");
+        assert!(peso_da_liga(1, 20) > peso_da_liga(1, 10) && peso_da_liga(1, 10) > peso_da_liga(2, 20) && peso_da_liga(2, 20) > peso_da_liga(4, 20));
+    }
+
+    #[test]
+    fn every_olheiro_of_a_continent_has_a_market_in_it_and_the_ids_are_unique_per_week() {
+        let c = clube(20, 20, 1, 21);
+        let ofertas = gerar_ofertas(atratividade(&c), 2900, 0xABCDEF, &c, &paises());
+        let indices: std::collections::HashSet<_> = ofertas.iter().map(|o| o.indice).collect();
+        assert_eq!(indices.len(), ofertas.len(), "um índice (identidade) por oferta");
+        for continente in [Confederacao::Europa, Confederacao::AmericaDoSul, Confederacao::Asia, Confederacao::Africa] {
+            let n = ofertas.iter().filter(|o| o.mercados.iter().any(|m| m.continente() == continente)).count();
+            assert!((3..=24).contains(&n), "{continente:?}: {n}");
+        }
+        assert_eq!(periodo_do_mercado(7), periodo_do_mercado(13) , "a mesma semana");
+        assert_eq!(periodo_do_mercado(14), periodo_do_mercado(13) + 1);
+        assert_eq!(inicio_do_periodo(periodo_do_mercado(20_000)) % 7, 0);
+    }
+
+    #[test]
+    fn the_market_has_both_specialists_with_extremes_and_balanced_olheiros() {
+        let grande = clube(20, 20, 1, 21);
+        let todas: Vec<_> = (0..60).flat_map(|m| gerar_ofertas(atratividade(&grande), m, 0xABCDEF, &grande, &paises())).collect();
+        // distância entre o melhor e o pior dos quatro atributos, em meias estrelas
+        let abertura = |o: &CandidatoOlheiro| {
+            let meias: Vec<u8> = Especializacao::TODAS.iter().map(|&e| o.perfil.atributo(e).meias()).collect();
+            meias.iter().max().copied().unwrap_or(0) - meias.iter().min().copied().unwrap_or(0)
+        };
+        let equilibrados = todas.iter().filter(|o| abertura(o) <= 2).count();
+        let extremos = todas.iter().filter(|o| abertura(o) >= 4).count();
+        assert!(equilibrados * 100 / todas.len() >= 30, "equilibrados: {equilibrados}/{}", todas.len());
+        assert!(extremos * 100 / todas.len() >= 25, "extremos: {extremos}/{}", todas.len());
+        // o equilibrado continua com um foco, então com Tier e preço
+        assert!(todas.iter().filter(|o| abertura(o) <= 2).any(|o| o.perfil.tier() == Tier::Experiente));
     }
 
     #[test]
@@ -2810,9 +2952,9 @@ mod tests {
 
     #[test]
     fn following_closes_the_ranges_in_a_time_that_depends_on_how_specified_the_player_was() {
-        assert_eq!(dias_para_exato(1, 28, 28), 10, "Qualidade Alta");
-        assert_eq!(dias_para_exato(14, 6, 28), 184, "Qualidade Baixa: ~6 meses");
-        assert_eq!(dias_para_exato(0, 28, 28), 7, "mínimo");
+        assert_eq!(dias_para_exato(1, 28, 28), 5, "Qualidade Alta");
+        assert_eq!(dias_para_exato(14, 6, 28), 25, "Qualidade Baixa: 25 dias");
+        assert_eq!(dias_para_exato(0, 28, 28), 5, "mínimo");
         assert_eq!(precisao_acompanhada(14, 0, 184), 14);
         assert_eq!(precisao_acompanhada(14, 92, 184), 7);
         assert_eq!(precisao_acompanhada(14, 184, 184), 0);

@@ -1004,6 +1004,15 @@ pub fn ler_miniface(player_id: u32) -> Option<crate::dds::Imagem> {
     crate::dds::decodificar(&dados)
 }
 
+/// Bandeira de uma nação (`data/ui/artassets/countryflags/f_<id>.big`),
+/// como ícone RGBA. `None` se o arquivo não existe ou tem outro formato.
+/// Lê disco: chamar fora do thread de render.
+pub fn ler_bandeira(nacao_id: u32) -> Option<crate::dds::Imagem> {
+    let caminho = pasta_do_jogo().join("data").join("ui").join("artassets").join("countryflags").join(format!("f_{nacao_id}.big"));
+    let dados = std::fs::read(caminho).ok()?;
+    crate::dds::bandeira_do_big(&dados)
+}
+
 /// Lê jogadores de um `DATA` + banco estático em disco (testes e
 /// diagnóstico, sem a carreira localizada).
 #[cfg(test)]

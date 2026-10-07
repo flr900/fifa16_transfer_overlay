@@ -336,6 +336,12 @@ impl Scout {
                     self.state.definir_troca_de_aba_pendente(None);
                     self.nav.pedir_foco();
                 }
+            } else if self.state.demissao_pendente().is_some() {
+                // aviso "Demitir Olheiro?" aberto: B cancela; A é dos botões
+                if comandos.voltar {
+                    self.state.cancelar_demissao();
+                    self.nav.pedir_foco();
+                }
             } else {
                 if comandos.aba_anterior || comandos.proxima_aba {
                     let passo = if comandos.proxima_aba { 1 } else { -1 };
@@ -386,6 +392,7 @@ impl Scout {
     /// No `before_render`: sobe para a GPU os rostos já lidos (Story 2.6).
     pub fn enviar_minifaces(&self, carregar: &mut dyn FnMut(&crate::dds::Imagem, Option<imgui::TextureId>) -> Option<imgui::TextureId>) {
         self.state.minifaces().enviar(carregar);
+        self.state.bandeiras().enviar(carregar);
     }
 
     /// Loga cada vez que o jogo passa a receber (ou deixa de receber) o

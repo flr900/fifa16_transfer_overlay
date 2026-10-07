@@ -99,9 +99,9 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                     theme::TEXT_SECONDARY,
                     format!("Foco {} ({} estrelas) · {}", perfil.foco().nome(), perfil.principal().texto(), olheiros::descricao(perfil.foco())),
                 );
-                let nacao = |id: u16| state.nome_da_nacao(id);
-                ui.text_colored(theme::TEXT_SECONDARY, olheiros::texto_origem(o, &nacao));
             });
+            // nação e mercados, com bandeira
+            olheiros::com_nacoes(state, |nacoes| olheiros::origem_no_fluxo(ui, fonts, o, nacoes, true, 3));
             ui.dummy([0.0, theme::ESPACO_1]);
             let pos = ui.cursor_screen_pos();
             let largura = olheiros::estrelas_do_perfil(ui, fonts, &ui.get_window_draw_list(), pos, &perfil);

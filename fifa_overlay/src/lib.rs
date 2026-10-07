@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "5.0-v4 — Log das transições de bloqueio do controle";
+const BUILD_TAG: &str = "5.0-v7 — Mercado semanal por continente, bandeiras, demitir Olheiro e painel compacto";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.

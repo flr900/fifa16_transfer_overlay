@@ -271,7 +271,7 @@ pub struct MercadoOlheiros {
     /// não deu o clube: atratividade média).
     pub atratividade: u8,
     pub clube: Option<quality::PerfilClube>,
-    /// Primeiro dia do próximo mês da carreira (quando a oferta muda).
+    /// Primeiro dia da próxima semana (quando a oferta muda).
     pub renova_em: Date,
 }
 
@@ -750,10 +750,10 @@ pub struct RelatorioNaLista {
     pub olheiro: Option<Olheiro>,
 }
 
-/// O mercado de Olheiros de um mês (Épico 5): os candidatos de
+/// O mercado de Olheiros de uma semana (Épico 5): os candidatos de
 /// `quality::gerar_ofertas`, com nome (`scout::nomes`), nação e custo, sem
-/// os já contratados (`contratadas`), em ordem de custo, com o que falta
-/// para cada um diante de `orcamento`.
+/// os já contratados (`contratadas`), em ordem de raridade (Elite primeiro),
+/// com o que falta para cada um diante de `orcamento`.
 pub fn montar_ofertas(
     candidatos: &[quality::CandidatoOlheiro],
     periodo: u32,
@@ -785,7 +785,11 @@ pub fn montar_ofertas(
         })
         .filter(|o| !contratadas.contains(&o.id))
         .collect();
-    ofertas.sort_by_key(|o| (o.custo, o.id));
+    // do mais raro ao mais comum: Tier, depois estrelas do foco, depois custo
+    ofertas.sort_by_key(|o| {
+        let perfil = o.olheiro.perfil();
+        (std::cmp::Reverse(perfil.tier()), std::cmp::Reverse(perfil.principal()), std::cmp::Reverse(o.custo), o.id)
+    });
     ofertas
 }
 
@@ -1387,6 +1391,9 @@ pub struct ScoutState {
     relatorio_aberto: Option<Uuid>,
     /// Rostos dos jogadores da visão Cards (Story 2.6).
     minifaces: Minifaces,
+    /// Bandeiras das nações (2026-10-05), pela mesma cache dos rostos; a
+    /// chave é o `nationid`.
+    bandeiras: Minifaces,
     /// Nações do mapa (Story 2.9), lidas uma vez em background.
     tarefa_nacoes: AsyncTask<Arc<Vec<Nacao>>>,
     /// Aba Relatórios mostrando o filtro "Arquivados" (Story 2.7; não
@@ -1413,6 +1420,10 @@ pub struct ScoutState {
     /// LB/RB (ou clique na aba) com a Nova Missão aberta: a aba para onde
     /// ir, esperando o jogador confirmar que descarta o rascunho.
     troca_de_aba_pendente: Option<Aba>,
+    /// "Demitir" clicado num Olheiro: o aviso de confirmação está aberto.
+    demissao_pendente: Option<Uuid>,
+    /// Filtro de continente da tela "Contratar Olheiro" (`None` = todos).
+    filtro_continente: Option<Confederacao>,
     /// Pixels a rolar neste frame pelo analógico direito (positivo = para
     /// baixo).
     rolagem: f32,
@@ -1476,6 +1487,7 @@ impl ScoutState {
             painel_aberto: false,
             relatorio_aberto: None,
             minifaces: Minifaces::new(crate::save_repo::ler_miniface),
+            bandeiras: Minifaces::new(crate::save_repo::ler_bandeira),
             tarefa_nacoes: AsyncTask::new(),
             vendo_arquivados: false,
             data_avisos: None,
@@ -1487,6 +1499,8 @@ impl ScoutState {
             tarefa_ligas: AsyncTask::new(),
             foco_geografico: FocoGeografico::Continentes,
             troca_de_aba_pendente: None,
+            demissao_pendente: None,
+            filtro_continente: None,
             rolagem: 0.0,
             detalhes_da_missao: false,
             tarefa_clube: AsyncTask::new(),
@@ -1553,6 +1567,7 @@ impl ScoutState {
         self.vendo_arquivados = false;
         self.pais_sonar = None;
         self.troca_de_aba_pendente = None;
+        self.demissao_pendente = None;
     }
 
     // -----------------------------------------------------------------
@@ -1970,6 +1985,7 @@ impl ScoutState {
         self.processar_buscas();
         self.processar_escolhidos();
         self.minifaces.tick();
+        self.bandeiras.tick();
 
         match self.tarefa_localizar.poll() {
             TaskState::Running => {
@@ -2153,7 +2169,7 @@ impl ScoutState {
         }
     }
 
-    /// O mercado de Olheiros do mês (Épico 5, item 3), contra o orçamento
+    /// O mercado de Olheiros da semana (Épico 5, item 3), contra o orçamento
     /// atual. Espera o clube, as ligas e as nações (lidos em background).
     pub fn mercado_de_olheiros(&self) -> Carga<MercadoOlheiros> {
         let (Some(id_save), Some(hoje)) = (self.save_ativo.clone(), self.data_progresso) else {
@@ -2174,16 +2190,21 @@ impl ScoutState {
             Carga::Carregando => return Carga::Carregando,
             Carga::Erro => Arc::new(Vec::new()),
         };
-        // países com clubes no save (sem ligas lidas: todas as nações)
-        let mut paises: Vec<quality::PaisCandidato> = ligas
-            .iter()
-            .filter_map(|l| Some(quality::PaisCandidato { id: l.pais?, continente: l.continente }))
-            .collect();
+        // países com clubes no save (sem ligas lidas: todas as nações), cada
+        // um com o peso das ligas dele (`quality::peso_da_liga`)
+        let mut paises: Vec<quality::PaisCandidato> = Vec::new();
+        for l in ligas.iter() {
+            let Some(id) = l.pais else { continue };
+            let peso = quality::peso_da_liga(l.nivel, l.clubes);
+            match paises.iter_mut().find(|p| p.id == id) {
+                Some(p) => p.peso += peso,
+                None => paises.push(quality::PaisCandidato { id, continente: l.continente, peso }),
+            }
+        }
         if paises.is_empty() {
-            paises = nacoes.iter().map(|n| quality::PaisCandidato { id: n.id, continente: n.confederacao }).collect();
+            paises = nacoes.iter().map(|n| quality::PaisCandidato { id: n.id, continente: n.confederacao, peso: 1 }).collect();
         }
         paises.sort_by_key(|p| p.id);
-        paises.dedup();
         let referencia = clube.unwrap_or(quality::PerfilClube {
             prestigio_nacional: 10,
             prestigio_internacional: 7,
@@ -2192,9 +2213,9 @@ impl ScoutState {
             pais: None,
             continente: Confederacao::Outras,
         });
-        let periodo = quality::periodo_do_mercado(hoje.year(), hoje.month());
-        // A atratividade fica fixa no mês (um título novo ou uma leitura que
-        // falhou não sorteiam outro mercado no meio do mês, e o id de uma
+        let periodo = quality::periodo_do_mercado(hoje.day_number());
+        // A atratividade fica fixa na semana (um título novo ou uma leitura que
+        // falhou não sorteiam outro mercado no meio dela, e o id de uma
         // oferta contratada continua sendo o mesmo Olheiro).
         let congelada = self.estado_ativo().and_then(|e| e.ler(|d| d.mercado_do_mes)).filter(|(p, _)| *p == periodo).map(|(_, a)| a);
         let atratividade = match (congelada, clube) {
@@ -2203,7 +2224,7 @@ impl ScoutState {
                 let a = quality::atratividade(&referencia);
                 if let Some(estado) = self.estado_ativo() {
                     if let Err(err) = estado.mutar(|d| d.mercado_do_mes = Some((periodo, a))) {
-                        tracing::warn!("[scout::state] Mercado do mês não foi fixado: {err:?}");
+                        tracing::warn!("[scout::state] Mercado da semana não foi fixado: {err:?}");
                     }
                 }
                 a
@@ -2214,8 +2235,8 @@ impl ScoutState {
         let candidatos = quality::gerar_ofertas(atratividade, periodo, carreira, &referencia, &paises);
         let contratadas = self.estado_ativo().map(|e| e.ler(|d| d.ofertas_contratadas.clone())).unwrap_or_default();
         let ofertas = montar_ofertas(&candidatos, periodo, carreira, &nacoes, &contratadas, self.orcamento());
-        let (ano, mes) = if hoje.month() == 12 { (hoje.year() + 1, 1) } else { (hoje.year(), hoje.month() + 1) };
-        Carga::Pronto(MercadoOlheiros { ofertas, atratividade, clube, renova_em: Date(ano * 10_000 + mes * 100 + 1) })
+        let renova_em = Date::from_day_number(quality::inicio_do_periodo(periodo + 1));
+        Carga::Pronto(MercadoOlheiros { ofertas, atratividade, clube, renova_em })
     }
 
     /// Olheiros já contratados nesta carreira, na ordem de contratação.
@@ -2695,7 +2716,8 @@ impl ScoutState {
         }
     }
 
-    /// Atalho de filtro (mantém a geografia e o teto).
+    /// Atalho de filtro (mantém a geografia e o teto). Sem botão por ora.
+    #[allow(dead_code)]
     pub fn aplicar_atalho_da_missao(&mut self, atalho: Atalho) {
         if let Some(r) = self.rascunho_missao.as_mut() {
             r.filtros = atalho.aplicar(&r.filtros);
@@ -2730,6 +2752,67 @@ impl ScoutState {
 
     pub fn definir_troca_de_aba_pendente(&mut self, aba: Option<Aba>) {
         self.troca_de_aba_pendente = aba;
+    }
+
+    // -----------------------------------------------------------------
+    // Filtro de continente do mercado e demissão (2026-10-05)
+    // -----------------------------------------------------------------
+
+    pub fn filtro_continente(&self) -> Option<Confederacao> {
+        self.filtro_continente
+    }
+
+    pub fn definir_filtro_continente(&mut self, continente: Option<Confederacao>) {
+        self.filtro_continente = continente;
+    }
+
+    /// "Demitir" num Olheiro: abre o aviso de confirmação. Quem está em
+    /// Missão não pode ser demitido (a Missão já foi paga: espere terminar).
+    pub fn pedir_demissao(&mut self, id: Uuid) {
+        if self.olheiros_contratados().iter().any(|c| c.olheiro.id == id && !c.em_missao) {
+            self.demissao_pendente = Some(id);
+        }
+    }
+
+    /// O Olheiro do aviso de demissão, ou `None` se não há aviso aberto (ou o
+    /// Olheiro deixou de poder ser demitido).
+    pub fn demissao_pendente(&self) -> Option<OlheiroContratado> {
+        let id = self.demissao_pendente?;
+        self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == id && !c.em_missao)
+    }
+
+    pub fn cancelar_demissao(&mut self) {
+        self.demissao_pendente = None;
+    }
+
+    /// Confirma a demissão: o Olheiro sai da lista, sem reembolso. Os
+    /// Relatórios e Missões dele continuam (com o nome do Olheiro vazio onde
+    /// ele aparecia); se ele acompanhava os Escolhidos, as vagas dele somem.
+    /// `false` = não pôde (em Missão, ou não salvou).
+    pub fn confirmar_demissao(&mut self) -> bool {
+        let Some(contratado) = self.demissao_pendente() else {
+            self.demissao_pendente = None;
+            return false;
+        };
+        let (Some(estado), id) = (self.estado_ativo().cloned(), contratado.olheiro.id) else {
+            return false;
+        };
+        match estado.mutar(|d| d.olheiros.retain(|o| o.id != id)) {
+            Ok(()) => {
+                tracing::info!("[scout::state] {} demitido.", contratado.olheiro.nome_exibicao());
+                self.demissao_pendente = None;
+                if contratado.acompanhando {
+                    if let Some(hoje) = self.data_progresso {
+                        self.atualizar_escolhidos(hoje);
+                    }
+                }
+                true
+            }
+            Err(err) => {
+                tracing::warn!("[scout::state] Demissão não foi salva: {err:?}");
+                false
+            }
+        }
     }
 
     /// "Mostrar detalhes" do formulário Nova Missão.
@@ -3444,6 +3527,16 @@ impl ScoutState {
 
     pub fn minifaces(&self) -> &Minifaces {
         &self.minifaces
+    }
+
+    /// Bandeira da nação (pede o carregamento se preciso). `Ausente` se o
+    /// jogo não tem a imagem: a tela mostra só o nome.
+    pub fn bandeira(&self, nacao_id: u16) -> Rosto {
+        self.bandeiras.rosto(u32::from(nacao_id))
+    }
+
+    pub fn bandeiras(&self) -> &Minifaces {
+        &self.bandeiras
     }
 
     /// Data da carreira usada nas telas (a da abertura do painel).
@@ -4262,8 +4355,9 @@ mod tests {
         let candidatos = [candidato(0, 9, 54), candidato(1, 5, 52), candidato(2, 7, 54)];
         let ofertas = montar_ofertas(&candidatos, 24_400, 42, &nacoes, &[], Some(1_000_000));
         assert_eq!(ofertas.len(), 3);
-        assert!(ofertas.windows(2).all(|w| w[0].custo <= w[1].custo), "do mais barato ao mais caro");
-        let barato = &ofertas[0];
+        assert!(ofertas.windows(2).all(|w| w[0].olheiro.tier >= w[1].olheiro.tier), "do mais raro ao mais comum");
+        assert_eq!(ofertas[0].olheiro.tier, Tier::Elite);
+        let barato = ofertas.last().expect("oferta");
         assert_eq!(barato.olheiro.tier, Tier::Junior);
         assert_eq!(barato.olheiro.nacao.as_ref().map(|n| n.nome.as_str()), Some("Argentina"));
         assert!(!barato.olheiro.nome.is_empty());
@@ -4295,7 +4389,9 @@ mod tests {
         // a fonte falsa não dá o clube: atratividade média
         assert_eq!(mercado.clube, None);
         assert!(mercado.ofertas.len() >= 4);
-        assert_eq!(mercado.renova_em, Date(20260801));
+        // renova toda semana (a conta é por dia desde 1970)
+        assert_eq!(mercado.renova_em.day_number() % 7, 0);
+        assert!(mercado.renova_em > Date(20260701) && mercado.renova_em <= Date(20260810), "{:?}", mercado.renova_em);
         let oferta = mercado.ofertas[0].clone();
         st.preparar_contratacao(oferta.clone());
         st.definir_nome_da_contratacao("  Zé Olheiro  ");
@@ -4309,7 +4405,7 @@ mod tests {
             Carga::Pronto(m) => m,
             outro => panic!("{outro:?}"),
         };
-        assert!(depois.ofertas.iter().all(|o| o.id != oferta.id), "a oferta contratada saiu do mês");
+        assert!(depois.ofertas.iter().all(|o| o.id != oferta.id), "a oferta contratada saiu da semana");
     }
 
     #[test]
@@ -4480,6 +4576,51 @@ mod tests {
     }
 
     #[test]
+    fn firing_an_olheiro_needs_confirmation_and_never_touches_one_in_a_missao() {
+        let pasta = PastaTemporaria::nova();
+        let ocupado = olheiro(Especializacao::Tatico, Tier::Elite);
+        let livre = olheiro(Especializacao::CacadorDeJovens, Tier::Junior);
+        let outro = olheiro(Especializacao::Generalista, Tier::Experiente);
+        let missoes = vec![Missao::de_teste(ocupado.id, StatusMissao::Pendente)];
+        let (mut st, escritas) = estado_com_olheiros(63_999_988, 0, vec![ocupado.clone(), livre.clone(), outro.clone()], missoes, &pasta);
+
+        // em Missão: o pedido nem abre o aviso
+        st.pedir_demissao(ocupado.id);
+        assert!(st.demissao_pendente().is_none());
+        assert!(!st.confirmar_demissao());
+        assert_eq!(st.olheiros_contratados().len(), 3);
+
+        // livre: o aviso abre, cancelar não muda nada
+        st.pedir_demissao(livre.id);
+        assert_eq!(st.demissao_pendente().map(|c| c.olheiro.id), Some(livre.id));
+        st.cancelar_demissao();
+        assert!(st.demissao_pendente().is_none());
+        assert_eq!(st.olheiros_contratados().len(), 3);
+
+        // confirmar tira só ele da lista e não mexe no orçamento
+        st.pedir_demissao(livre.id);
+        assert!(st.confirmar_demissao());
+        let ids: Vec<_> = st.olheiros_contratados().iter().map(|c| c.olheiro.id).collect();
+        assert_eq!(ids, [ocupado.id, outro.id]);
+        assert!(st.demissao_pendente().is_none());
+        assert!(escritas_de(&escritas).is_empty(), "demitir não debita nem credita");
+        // a Missão do Olheiro que ficou segue de pé
+        assert!(st.olheiros_contratados()[0].em_missao);
+        // demitir um que já saiu não faz nada
+        assert!(!st.confirmar_demissao());
+    }
+
+    #[test]
+    fn the_continent_filter_is_remembered_and_cleared_with_the_panel() {
+        let mut st = ScoutState::new();
+        assert_eq!(st.filtro_continente(), None);
+        st.definir_filtro_continente(Some(Confederacao::Asia));
+        assert_eq!(st.filtro_continente(), Some(Confederacao::Asia));
+        st.definir_filtro_continente(None);
+        assert_eq!(st.filtro_continente(), None);
+    }
+
+    #[test]
     fn new_missao_form_opens_with_the_chosen_olheiro_and_his_ideal_filters() {
         let pasta = PastaTemporaria::nova();
         let ocupado = olheiro(Especializacao::Tatico, Tier::Elite);
@@ -4557,10 +4698,10 @@ mod tests {
         let (mut st, escritas) = estado_com_olheiros(63_999_988, 63_849_988, vec![o.clone()], vec![], &pasta);
         st.abrir_nova_missao(o.id);
         let estimativa = st.previa_missao().and_then(|p| p.estimativa).expect("estimativa");
-        assert_eq!(estimativa.custo, 450_000, "Júnior, Rápida, mundo");
+        assert_eq!(estimativa.custo, 170_000, "Júnior, Rápida, mundo");
 
         assert!(st.confirmar_nova_missao());
-        assert_eq!(escritas_de(&escritas), [(63_999_988, 63_999_988 - 450_000)]);
+        assert_eq!(escritas_de(&escritas), [(63_999_988, 63_999_988 - 170_000)]);
         assert!(!st.tem_nova_missao(), "o formulário fecha");
         assert_eq!(st.orcamento(), Some(63_849_988), "saldo relido do jogo");
 
@@ -4580,7 +4721,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         assert_eq!(json["missoes"][0]["status"], "Pendente");
         assert_eq!(json["missoes"][0]["modo_busca"], "rapida");
-        assert_eq!(json["missoes"][0]["estimativa"]["custo"], 450_000);
+        assert_eq!(json["missoes"][0]["estimativa"]["custo"], 170_000);
 
         // o mesmo Olheiro, agora em Missão, não abre outro formulário
         st.abrir_nova_missao(o.id);
@@ -4595,7 +4736,7 @@ mod tests {
         st.abrir_nova_missao(o.id);
         assert_eq!(
             st.previa_missao().and_then(|p| p.bloqueio),
-            Some(BloqueioMissao::OrcamentoInsuficiente { faltam: 350_000 })
+            Some(BloqueioMissao::OrcamentoInsuficiente { faltam: 70_000 })
         );
         assert!(!st.confirmar_nova_missao());
         assert!(escritas_de(&escritas).is_empty());
@@ -5780,11 +5921,11 @@ mod tests {
     }
 
     #[test]
-    fn the_market_keeps_its_attractiveness_for_the_whole_month() {
+    fn the_market_keeps_its_attractiveness_for_the_whole_week() {
         let pasta = PastaTemporaria::nova();
         let (st, _) = estado_contratacao(63_999_988, 63_999_988, Some(pasta.0.clone()), vec![]);
         let estado = st.estado_ativo().cloned().expect("estado");
-        let periodo = quality::periodo_do_mercado(2026, 7);
+        let periodo = quality::periodo_do_mercado(Date(20260703).day_number());
         estado.mutar(|d| d.mercado_do_mes = Some((periodo, 100))).expect("gravou");
         let mercado = loop {
             if let Carga::Pronto(m) = st.mercado_de_olheiros() {
@@ -5792,9 +5933,9 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(2));
         };
-        assert_eq!(mercado.atratividade, 100, "vale a do mês, mesmo com o clube desconhecido agora");
-        assert_eq!(mercado.ofertas.len(), quality::quantas_ofertas(100) as usize);
-        // mês passado não vale
+        assert_eq!(mercado.atratividade, 100, "vale a da semana, mesmo com o clube desconhecido agora");
+        assert!(mercado.ofertas.len() >= quality::OFERTAS_CONTINENTE_MIN as usize);
+        // semana passada não vale
         estado.mutar(|d| d.mercado_do_mes = Some((periodo - 1, 100))).expect("gravou");
         if let Carga::Pronto(m) = st.mercado_de_olheiros() {
             assert_ne!(m.atratividade, 100);

@@ -9,6 +9,7 @@ mod acompanhamento;
 pub mod aviso;
 mod componentes;
 mod confirmacao_contratacao;
+mod demissao;
 mod escolher_olheiro;
 mod missoes;
 mod campo_atributo;
@@ -82,7 +83,12 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     }
     // LB/RB (ou clique numa aba) com a Nova Missão aberta: aviso por cima.
     let trocando = state.troca_de_aba_pendente();
-    let modal = confirmando || trocando.is_some();
+    // o Olheiro do aviso de demissão pode ter sumido (ou entrado em Missão)
+    let demitindo = state.demissao_pendente().is_some();
+    if !demitindo {
+        state.cancelar_demissao();
+    }
+    let modal = confirmando || trocando.is_some() || demitindo;
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -179,6 +185,7 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             nav.push(satelite);
         }
         Some(Pedido::FecharCampo) => nav.pop(),
+        Some(Pedido::Demitir(id)) => state.pedir_demissao(id),
         Some(Pedido::AbrirRelatorio(id)) => {
             state.abrir_relatorio(id);
             if state.relatorio_aberto().is_some() {
@@ -219,6 +226,16 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
                 nav.pedir_foco();
             }
             None => {}
+        }
+    }
+    if state.demissao_pendente().is_some() {
+        match demissao::render(ui, fonts, state) {
+            demissao::Acao::Nenhuma => {}
+            demissao::Acao::Demitiu => nav.pedir_foco(),
+            demissao::Acao::Cancelou => {
+                state.cancelar_demissao();
+                nav.pedir_foco();
+            }
         }
     }
     if confirmando {
@@ -429,6 +446,8 @@ enum Pedido {
     /// Escolheu (ou voltou) no painel de campo ou no seletor: volta à tela
     /// de baixo.
     FecharCampo,
+    /// "Demitir" num Olheiro: abre o aviso de confirmação.
+    Demitir(uuid::Uuid),
 }
 
 fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState, focar: bool) -> Option<Pedido> {
@@ -550,6 +569,7 @@ fn conteudo_da_tela(
                 *pedido = match olheiros::render(ui, fonts, state) {
                     olheiros::Acao::AbrirContratacao => Some(Pedido::AbrirContratacao),
                     olheiros::Acao::Ativar(id) => Some(Pedido::AtivarOlheiro(id)),
+                    olheiros::Acao::Demitir(id) => Some(Pedido::Demitir(id)),
                     olheiros::Acao::Nenhuma => None,
                 };
             }
