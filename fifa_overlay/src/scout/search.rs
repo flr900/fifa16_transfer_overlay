@@ -73,6 +73,11 @@ pub trait CareerSource: Send + Sync {
     fn read_leagues(&self) -> Result<Vec<Liga>, SaveRepoError> {
         Ok(self.read_all_players()?.ligas)
     }
+    /// Jogador em foco no jogo e o valor de transferência exato que o jogo
+    /// calculou para ele (Story 7.6; leitura barata). Por padrão, nenhum.
+    fn read_focused_value(&self) -> Result<Option<save_repo::foco::ValorEmFoco>, SaveRepoError> {
+        Ok(None)
+    }
     /// Prestígio, liga e títulos do clube do técnico, para o mercado de
     /// Olheiros (lê o save: `AsyncTask`). Por padrão, desconhecido.
     fn read_club_profile(&self) -> Result<DadosDoClube, SaveRepoError> {
@@ -94,6 +99,10 @@ impl CareerSource for SaveRepoSource {
 
     fn write_transfer_budget(&self, anterior: i32, novo: i32) -> Result<i32, SaveRepoError> {
         save_repo::write_transfer_budget(anterior, novo)
+    }
+
+    fn read_focused_value(&self) -> Result<Option<save_repo::foco::ValorEmFoco>, SaveRepoError> {
+        save_repo::foco::read_focused_value()
     }
 
     fn read_all_players(&self) -> Result<PlayerPool, SaveRepoError> {
@@ -456,6 +465,7 @@ pub fn reobservar(
         nacao_id: jogador.nacionalidade,
         nacao: nacao.map(|n| n.nome.clone()).unwrap_or_else(|| anterior.nacao.clone()),
         clube: jogador.clube.clone(),
+        clube_id: jogador.clube_id,
         contrato_ate: jogador.clube_id.map(|_| jogador.contrato_ate),
         observacao: Default::default(),
         overall: quality::faixa_revelada(jogador.overall, precisao, quality::semente(base, pid, 1)),
@@ -510,6 +520,7 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         nacao_id: jogador.nacionalidade,
         nacao: nacao.map(|n| n.nome.clone()).unwrap_or_else(|| "Outros".to_string()),
         clube: jogador.clube.clone(),
+        clube_id: jogador.clube_id,
         contrato_ate: jogador.clube_id.map(|_| jogador.contrato_ate),
         observacao: Default::default(),
         overall: quality::faixa_revelada(jogador.overall, precisao, quality::semente(id, pid, 1)),

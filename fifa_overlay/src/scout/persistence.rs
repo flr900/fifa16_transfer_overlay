@@ -63,6 +63,15 @@ pub struct ScoutStateFile {
     /// Ofertas do mercado de Olheiros já contratadas (não voltam à lista).
     #[serde(default)]
     pub ofertas_contratadas: Vec<uuid::Uuid>,
+    /// Épico 7: o nível de conhecimento que o JOGO tinha de cada jogador
+    /// antes de a Central mexer nele (0 = não tinha registro). É o piso: a
+    /// Central só rebaixa o que ela mesma subiu, e nunca abaixo disto.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub nivel_original: std::collections::BTreeMap<u32, u8>,
+    /// Épico 7: valor de transferência EXATO que o jogo calculou, colhido da
+    /// tela do jogo quando o jogador passou por ela (player id → valor).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub valores_do_jogo: std::collections::BTreeMap<u32, crate::scout::state::ValorDoJogo>,
     /// Atratividade do clube fixada para o mês do mercado de Olheiros:
     /// `(período, atratividade)`.
     #[serde(default)]
@@ -82,6 +91,8 @@ impl Default for ScoutStateFile {
             relatorios: Vec::new(),
             escolhidos: Vec::new(),
             ofertas_contratadas: Vec::new(),
+            nivel_original: std::collections::BTreeMap::new(),
+            valores_do_jogo: std::collections::BTreeMap::new(),
             mercado_do_mes: None,
             ui_prefs: UiPrefs::default(),
         }
@@ -101,11 +112,24 @@ pub struct UiPrefs {
     pub densidade: Densidade,
     /// Visão da aba Olheiros (2026-10-03); Cards por padrão.
     pub densidade_olheiros: Densidade,
+    /// Épico 7: "Sincronizar com o FIFA". Ligado por padrão (decisão de
+    /// 2026-10-06); só vai para o arquivo quando desligado.
+    #[serde(skip_serializing_if = "e_verdadeiro")]
+    pub sincronizar_com_o_jogo: bool,
+}
+
+fn e_verdadeiro(valor: &bool) -> bool {
+    *valor
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        UiPrefs { aba_ativa: Aba::Olheiros, densidade: Densidade::Tabular, densidade_olheiros: Densidade::Cards }
+        UiPrefs {
+            aba_ativa: Aba::Olheiros,
+            densidade: Densidade::Tabular,
+            densidade_olheiros: Densidade::Cards,
+            sincronizar_com_o_jogo: true,
+        }
     }
 }
 
@@ -577,5 +601,19 @@ pub(crate) mod tests {
         let estado = EstadoPersistido::carregar(Some(&funda), ID_A);
         assert!(estado.gravavel());
         assert!(funda.join(format!("{ID_A}.json")).is_file());
+    }
+
+    #[test]
+    fn the_sync_switch_defaults_to_on_is_saved_only_when_off_and_old_files_load() {
+        let padrao = UiPrefs::default();
+        assert!(padrao.sincronizar_com_o_jogo);
+        assert!(!serde_json::to_string(&padrao).expect("serializa").contains("sincronizar"), "ligado não vai para o arquivo");
+        let desligado = UiPrefs { sincronizar_com_o_jogo: false, ..UiPrefs::default() };
+        let json = serde_json::to_string(&desligado).expect("serializa");
+        assert!(json.contains("\"sincronizar_com_o_jogo\":false"));
+        assert!(!serde_json::from_str::<UiPrefs>(&json).expect("recarrega").sincronizar_com_o_jogo);
+        // arquivo de antes do Épico 7 (sem o campo): ligado
+        let antigo: UiPrefs = serde_json::from_str(r#"{"aba_ativa":"olheiros","densidade":"tabular","densidade_olheiros":"cards"}"#).expect("carrega");
+        assert!(antigo.sincronizar_com_o_jogo);
     }
 }

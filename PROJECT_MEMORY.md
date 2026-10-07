@@ -1505,6 +1505,41 @@ documento de melhorias). Sem teste em jogo.
   acompanhado não envelhece; quem perde a vaga volta a envelhecer da
   última observação. Formato do arquivo de estado v2.
 
+## Sessão 15 — Épico 7: integração com o scout nativo (2026-10-05 a 07)
+
+Felipe pediu para integrar a Central ao scout do jogo (o GTN): jogadores da
+Central na lista de escolhidos do FIFA, atributos/valor/salário liberados no
+jogo e valor de transferência exato. Mapeamento em
+`_bmad-output/planning-artifacts/integracao-scout-nativo.md`; histórias 7.1,
+7.2, 7.3, 7.4 e 7.6 em `_bmad-output/implementation-artifacts/`. Build `7.6-v2`.
+
+- **O scout nativo não está nas tabelas** (`career_scouts`/`career_scoutmission`
+  ficam vazias): a lista de escolhidos e o "conhecimento" de cada jogador são
+  vetores na memória do jogo e, no save, seções serializadas depois dos 3 bancos
+  (`sl003`/`sl004`, `mm002`...). Vetor = 3 ponteiros de 8 bytes (início, fim,
+  fim da capacidade) numa estrutura dona que muda de lugar a cada recarga.
+- **Lista de escolhidos:** entradas de 28 bytes `{time, jogador, -1 ×4, marca}`,
+  capacidade 100. **Conhecimento:** registros de 20 bytes ordenados por jogador
+  `[jogador, a, nivel 0–198, aaaammdd, -1]`; o nível decide o que o jogo mostra
+  (qualquer coisa >~27: estimativas; >=140: valor e salário; 198: tudo).
+  Escrever no nível, inclusive INSERIR um registro, funciona e o jogo grava no
+  save (recalcula o contador).
+- **Valor exato:** só existe na linha do jogador em foco (região da carreira +
+  `0x365020`: id, time, ?, valor, nome). As entradas da IA `[time, jogador, V1,
+  V2, salário]` NÃO batem com o valor mostrado. O salário não está lá.
+- **Regras:** NFR1 emendado (a Central escreve a lista e o nível do jogo, com
+  interruptor ligado por padrão, conferindo o valor antigo; rebaixa só o que ela
+  subiu e nunca abaixo do `nivel_original` guardado). Aba Escolhidos tem o
+  interruptor "Sincronizar com o FIFA", "Tentar de novo" e a situação.
+- **Ferramentas** (terminal elevado; o FIFA roda como Administrador):
+  `fifa_process_identifier/scout_probe.py` (captura/diff/--seq),
+  `scout_poke.py`, `scout_insert.py`, `scout_shortlist.py`. Lição: o endereço
+  que a sonda imprime nas ocorrências de um valor é o do VALOR, não o do campo
+  anterior da estrutura (um erro de 12 bytes derrubou a build 7.6-v1).
+- Pendente: calibrar o nível por informação (contrato, atributos) e o campo `a`
+  (7.5), e-mail nativo (7.7), calibrar a estimativa de valor com as leituras
+  exatas, e conferir o offset da linha de valor depois de reabrir o jogo.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —

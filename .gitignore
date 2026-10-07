@@ -24,3 +24,6 @@ Desktop.ini
 # Editor
 .vscode/
 .idea/
+
+# Capturas da sonda de memoria (fifa_process_identifier/scout_probe.py)
+fifa_process_identifier/probe_runs/
