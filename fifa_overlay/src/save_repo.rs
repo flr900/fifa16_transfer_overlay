@@ -31,6 +31,7 @@
 //!   salvar.
 
 pub mod jogadores;
+pub mod nativo;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -830,6 +831,9 @@ pub fn start_locating(task: &AsyncTask<()>) -> bool {
     task.start(|| {
         let live = locate()?;
         *lock_cache() = Some(live);
+        // Scout nativo (Épico 7): só registra no log; falhar aqui nunca
+        // atrapalha a localização da carreira.
+        nativo::localizar_e_guardar();
         Ok(())
     })
 }
@@ -906,6 +910,7 @@ fn with_live<R>(f: impl FnOnce(&LiveCareer) -> Result<R, SaveRepoError>) -> Resu
         },
         Err(LiveCheck::Gone(err)) => {
             *guard = None;
+            nativo::esquecer();
             Err(err)
         }
         Err(LiveCheck::NoCareer) => Err(SaveRepoError::CarreiraNaoCarregada),
@@ -1057,8 +1062,11 @@ pub fn read_transfer_budget() -> Result<i32, SaveRepoError> {
     with_live(|live| live_finances(live, &ProcessMemory).map(|(budget, _)| budget))
 }
 
-/// Escreve o `dqXv.transferbudget` VIVO (Story 1.5). É o ÚNICO campo do
-/// jogo que o Scout escreve (NFR1), e só quando o usuário confirma.
+/// Escreve o `dqXv.transferbudget` VIVO (Story 1.5), só quando o usuário
+/// confirma. Desde 2026-10-06 (NFR1 emendado) o Scout também escreve a
+/// lista de escolhidos e o conhecimento nativos (`save_repo::nativo`,
+/// Épico 7), mas essa sincronização tem interruptor próprio e nunca
+/// cobra nada.
 ///
 /// Compare-and-write: só escreve se o valor vivo ainda for `anterior` (o
 /// que o usuário viu no modal); senão devolve `OrcamentoMudou(atual)` sem

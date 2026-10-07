@@ -398,6 +398,12 @@ geral de onde a rede de scouting do usuário está atuando.
   no save.** Ela não efetiva transferências nem altera o elenco do usuário —
   o usuário sempre finaliza a ação manualmente na tela nativa do FIFA. O
   único campo do save escrito por esta feature é `dqXv.transferbudget`.
+  **Emenda (2026-10-06, Felipe):** a sincronização com o scout nativo
+  (Épico 7) também escreve na memória do jogo a lista de escolhidos nativa e
+  o nível de conhecimento do jogador, só pelo `save_repo`, com interruptor
+  nas configurações (ligado por padrão), conferência do valor antigo e sem
+  nunca rebaixar o nível. Atributos de jogador, `zlrC`/`apoo` e transferências
+  continuam fora.
 - **Não há edição/escrita de atributos de jogador via Scout.** A limitação
   documentada em `PROJECT_MEMORY.md` (escrita per-player não resolvida)
   permanece — o Scout é 100% consumidor de dados já lidos, nunca escritor de
