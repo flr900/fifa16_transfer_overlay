@@ -13,7 +13,10 @@
 //! - **Conhecimento:** um vetor (mesmo formato de dono) de registros de 20
 //!   bytes, ORDENADO por `jogador`: `jogador i32`, `a i32`, `nivel i32`
 //!   (0–198; 198 = jogador totalmente conhecido), `data i32` (`aaaammdd` da
-//!   última atualização) e `-1`. É o `nivel` que decide o que o jogo mostra
+//!   última atualização) e `extra i32`: `-1` na maioria; em alguns registros
+//!   de carreiras longas traz um valor (14.500.000, 21.000.000; visto em
+//!   2026-10-07 na carreira do PSG). A Central PRESERVA esse campo quando
+//!   reescreve o array. É o `nivel` que decide o que o jogo mostra
 //!   (estimativas, valor e salário a partir de 140, tudo em 198).
 //!
 //! Esta story só LOCALIZA e LÊ. Nada aqui escreve na memória do jogo
@@ -110,19 +113,26 @@ pub struct RegistroConhecimento {
     pub nivel: i32,
     /// Data da última atualização.
     pub data: Date,
+    /// Último campo do registro: `-1`, ou um valor de mercado (múltiplo de
+    /// 5.000) que o jogo guardou. Nunca é alterado pela Central.
+    pub extra: i32,
 }
 
 impl RegistroConhecimento {
     /// Decodifica 20 bytes; `None` se não parecem um registro.
     pub fn de_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != REGISTRO_CONHECIMENTO || i32_at(bytes, 16)? != -1 {
+        if bytes.len() != REGISTRO_CONHECIMENTO {
+            return None;
+        }
+        let extra = i32_at(bytes, 16)?;
+        if extra != -1 && !(extra > 0 && extra % 5_000 == 0) {
             return None;
         }
         let jogador = i32_at(bytes, 0)?;
         let nivel = i32_at(bytes, 8)?;
         let data = Date(i32_at(bytes, 12)?);
         ((1..=MAX_ID_JOGADOR).contains(&jogador) && (0..=NIVEL_COMPLETO).contains(&nivel) && data.is_plausible()).then_some(
-            RegistroConhecimento { jogador, a: i32_at(bytes, 4)?, nivel, data },
+            RegistroConhecimento { jogador, a: i32_at(bytes, 4)?, nivel, data, extra },
         )
     }
 
@@ -130,7 +140,7 @@ impl RegistroConhecimento {
     #[allow(dead_code)] // usado pela Story 7.3 (escrita)
     pub fn para_bytes(&self) -> [u8; REGISTRO_CONHECIMENTO] {
         let mut out = [0u8; REGISTRO_CONHECIMENTO];
-        let campos = [self.jogador, self.a, self.nivel, self.data.0, -1];
+        let campos = [self.jogador, self.a, self.nivel, self.data.0, self.extra];
         for (i, valor) in campos.iter().enumerate() {
             if let Some(destino) = out.get_mut(i * 4..i * 4 + 4) {
                 destino.copy_from_slice(&valor.to_le_bytes());
@@ -766,7 +776,7 @@ fn aplicar_niveis_em(
                 if pedido.original.is_none() {
                     resumo.primeiro_toque.push((pedido.jogador, 0));
                 }
-                por_jogador.insert(pedido.jogador, RegistroConhecimento { jogador: pedido.jogador, a: A_PADRAO, nivel: alvo, data: hoje });
+                por_jogador.insert(pedido.jogador, RegistroConhecimento { jogador: pedido.jogador, a: A_PADRAO, nivel: alvo, data: hoje, extra: -1 });
                 resumo.criados += 1;
             }
             None => {}
@@ -881,7 +891,7 @@ mod tests {
     ];
 
     fn registro(jogador: i32, a: i32, nivel: i32, data: i32) -> [u8; REGISTRO_CONHECIMENTO] {
-        RegistroConhecimento { jogador, a, nivel, data: Date(data) }.para_bytes()
+        RegistroConhecimento { jogador, a, nivel, data: Date(data), extra: -1 }.para_bytes()
     }
 
     fn escreve_u64(memoria: &mut [u8], pos: usize, valor: u64) {
@@ -934,6 +944,55 @@ mod tests {
         let mut sem_fim = registro(268737, 2, 140, 20260710);
         sem_fim[16..20].copy_from_slice(&0i32.to_le_bytes());
         assert!(RegistroConhecimento::de_bytes(&sem_fim).is_none(), "falta o -1 final");
+    }
+
+    #[test]
+    fn a_record_may_carry_a_market_value_in_its_last_field_and_it_survives_a_rewrite() {
+        // registros reais da carreira do PSG (2029): o último campo traz o valor
+        let mut bruto = registro(51261, 1_114_111, 198, 20290504);
+        bruto[16..20].copy_from_slice(&14_500_000i32.to_le_bytes());
+        let r = RegistroConhecimento::de_bytes(&bruto).expect("registro com valor");
+        assert_eq!((r.jogador, r.nivel, r.extra), (51261, 198, 14_500_000));
+        assert_eq!(r.para_bytes(), bruto, "volta idêntico");
+        // um valor que não é de mercado não vale como registro
+        let mut torto = bruto;
+        torto[16..20].copy_from_slice(&14_500_001i32.to_le_bytes());
+        assert!(RegistroConhecimento::de_bytes(&torto).is_none());
+        let mut negativo = bruto;
+        negativo[16..20].copy_from_slice(&(-5i32).to_le_bytes());
+        assert!(RegistroConhecimento::de_bytes(&negativo).is_none());
+
+        // um array com esses registros no meio continua UMA sequência...
+        let mut memoria = vec![0u8; 0x1000];
+        let linhas = [(100, -1), (200, 14_500_000), (300, -1), (400, 21_000_000), (500, -1)];
+        for (i, (id, extra)) in linhas.iter().enumerate() {
+            let mut b = registro(*id, 1, 100, 20290101);
+            b[16..20].copy_from_slice(&i32::to_le_bytes(*extra));
+            memoria[0x100 + i * 20..0x100 + (i + 1) * 20].copy_from_slice(&b);
+        }
+        assert_eq!(sequencias_de_conhecimento(0, &memoria), vec![Sequencia { inicio: 0x100, registros: 5 }]);
+    }
+
+    #[test]
+    fn rewriting_the_array_keeps_the_last_field_of_every_existing_record() {
+        let (mem, mut local) = com_dois_donos();
+        // põe um valor no último campo do 73885 (existente) e do 246606
+        let vetor = local.conhecimento.expect("vetor");
+        for (jogador, valor) in [(73885i32, 14_500_000i32), (246606, 21_000_000)] {
+            let atual = VetorVivo::ler(&mem, vetor.dono).expect("dono");
+            let registros = ler_conhecimento_de(&mem, &atual).expect("lê");
+            let k = registros.iter().position(|r| r.jogador == jogador).expect("registro");
+            mem.write(vetor.inicio + k * REGISTRO_CONHECIMENTO + 16, &valor.to_le_bytes());
+        }
+        // sobe um, cria outro (reescreve o array inteiro)
+        aplicar_niveis_em(&mem, &mut local, &[pedido(71178, 150, None), pedido(71532, 140, None)], HOJE).expect("aplica");
+        let atual = VetorVivo::ler(&mem, vetor.dono).expect("dono");
+        let registros = ler_conhecimento_de(&mem, &atual).expect("lê");
+        let extra = |j: i32| registros.iter().find(|r| r.jogador == j).map(|r| r.extra);
+        assert_eq!(extra(73885), Some(14_500_000), "o valor guardado pelo jogo sobrevive");
+        assert_eq!(extra(246606), Some(21_000_000));
+        assert_eq!(extra(71532), Some(-1), "o registro novo nasce com -1");
+        assert_eq!(extra(71178), Some(-1));
     }
 
     #[test]

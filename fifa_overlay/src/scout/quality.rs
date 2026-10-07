@@ -1144,45 +1144,62 @@ pub fn estimar_missao(pedido: &PedidoMissao) -> EstimativaMissao {
 
 // ---------------------------------------------------------------------
 // Valor de mercado e salário estimados (branch `claude/relatorio-ficha`,
-// 2026-10-01; salário recalibrado em 2026-10-03)
+// 2026-10-01; salário recalibrado em 2026-10-03; valor recalibrado em
+// 2026-10-07 com valores EXATOS lidos do jogo)
 // ---------------------------------------------------------------------
 //
 // O FIFA não grava valor nem salário dos jogadores: calcula na hora, ao
 // abrir a tela do jogador. O save só tem os contratos do PRÓPRIO elenco
 // (`career_playercontract`). O Relatório mostra uma ESTIMATIVA do Olheiro,
-// a partir do que ele revelou (meio das faixas) e da idade; o teto de
-// gastos da busca usa a mesma conta com os valores reais.
-// - valor = 3 M × 1,2^(Overall − 70) × idade × margem de crescimento,
-//   goleiro × 0,8 (Overall 80, 27 anos ≈ 18,6 M; 90 ≈ 115 M; 60 ≈ 0,5 M);
+// a partir do que ele revelou (meio das faixas) e da idade, até a Central
+// ler o valor exato na tela do jogo (`save_repo::foco`).
+//
+// - valor: ajustado em 2026-10-07 a 9 valores exatos da carreira de teste
+//   (Overall 70–90, idades 19–33; erro médio 3%, 5% deixando cada ponto de
+//   fora): ln(valor) = 2,854 + 0,174 × Overall + 0,045 × max(0, 24 − idade)
+//   − 0,085 × max(0, idade − 27). O potencial e a posição (goleiro) não
+//   precisaram de termo: a juventude já carrega o prêmio. A fórmula antiga
+//   (3 M × 1,2^(OVR−70) × idade × crescimento) passava de 1,1 a 1,7 vez o
+//   valor real. Abaixo de Overall 65 não há exato para conferir.
 // - salário semanal: calibrado com os contratos reais do elenco do Felipe
 //   (2026-10-03): Overall 70 ≈ 20 mil, 80 ≈ 120 mil, 87 ≈ 240 mil,
 //   90 ≈ 300 mil. Sobe ~19,6% por ponto até 80 e ~9,6% depois.
 
-/// Multiplicador de valor pela idade.
-fn fator_idade(idade: u8) -> f64 {
-    match idade {
-        0..=21 => 1.3,
-        22..=25 => 1.15,
-        26..=29 => 1.0,
-        30..=31 => 0.7,
-        32..=33 => 0.45,
-        _ => 0.25,
-    }
-}
-
 /// Arredonda para um número "de mercado": 100 mil acima de 1 M, 5 mil abaixo.
-fn arredondar_mercado(valor: f64) -> i64 {
+pub fn arredondar_mercado(valor: f64) -> i64 {
     let passo = if valor >= 1_000_000.0 { 100_000.0 } else { 5_000.0 };
     let v = ((valor / passo).round() * passo) as i64;
     v.max(10_000)
 }
 
-/// Valor de mercado estimado (mesma unidade do orçamento).
-pub fn valor_estimado(overall: u8, potencial: u8, idade: u8, goleiro: bool) -> i64 {
-    let base = 3_000_000.0 * 1.2f64.powi(i32::from(overall) - 70);
-    let margem = 1.0 + (f64::from(potencial.saturating_sub(overall)) * 0.04).min(0.8);
-    let posicao = if goleiro { 0.8 } else { 1.0 };
-    arredondar_mercado(base * fator_idade(idade) * margem * posicao)
+/// Valor de mercado estimado (mesma unidade do orçamento). `potencial` e
+/// `goleiro` ficam na assinatura (os filtros da busca os têm), mas o ajuste
+/// aos valores reais não encontrou efeito próprio deles.
+pub fn valor_estimado(overall: u8, _potencial: u8, idade: u8, _goleiro: bool) -> i64 {
+    let jovem = f64::from(24u8.saturating_sub(idade));
+    let velho = f64::from(idade.saturating_sub(27));
+    let ln_valor = 2.854 + 0.174 * f64::from(overall) + 0.045 * jovem - 0.085 * velho;
+    arredondar_mercado(ln_valor.exp())
+}
+
+/// Quantos valores exatos lidos do jogo são preciso para a estimativa se
+/// ajustar sozinha, e quanto ela pode se mexer.
+const MIN_LEITURAS_PARA_AJUSTE: usize = 5;
+const AJUSTE_MIN: f64 = 0.75;
+const AJUSTE_MAX: f64 = 1.33;
+
+/// Fator que corrige a estimativa a partir dos valores exatos que a Central
+/// já leu: média geométrica de `valor real ÷ estimativa` (cada razão em
+/// logaritmo), puxada para 1 enquanto há poucas leituras e limitada a
+/// [0,75; 1,33]. Menos de 5 leituras: 1.
+pub fn ajuste_de_valor(razoes_ln: &[f64]) -> f64 {
+    let n = razoes_ln.len();
+    if n < MIN_LEITURAS_PARA_AJUSTE {
+        return 1.0;
+    }
+    let n = n as f64;
+    let media = razoes_ln.iter().sum::<f64>() / n;
+    (media * n / (n + MIN_LEITURAS_PARA_AJUSTE as f64)).exp().clamp(AJUSTE_MIN, AJUSTE_MAX)
 }
 
 /// Salário semanal estimado.
@@ -2600,16 +2617,61 @@ mod tests {
         assert!(niveis.windows(2).all(|par| par[0] >= par[1]));
     }
 
+    /// Valores EXATOS lidos do jogo (carreira de teste, 10/07/2026): overall,
+    /// potencial, idade e o valor que a tela do jogo mostrou.
+    const VALORES_REAIS: [(u8, u8, u8, i64); 9] = [
+        (72, 92, 20, 6_000_000),   // Kees Smit
+        (70, 87, 19, 3_900_000),   // Kostoulas
+        (88, 88, 33, 45_500_000),  // Oblak (goleiro)
+        (81, 81, 31, 16_000_000),  // Palazón
+        (88, 91, 27, 80_000_000),  // Valverde
+        (85, 88, 28, 39_500_000),  // Militão
+        (77, 84, 25, 11_000_000),  // Logan Costa
+        (90, 94, 23, 108_500_000), // Bellingham
+        (71, 87, 19, 5_000_000),   // Nypan
+    ];
+
     #[test]
-    fn estimated_value_and_wage_follow_overall_age_and_growth() {
+    fn the_value_estimate_matches_the_exact_values_read_from_the_game() {
+        for (overall, potencial, idade, real) in VALORES_REAIS {
+            let estimado = valor_estimado(overall, potencial, idade, false);
+            let razao = estimado as f64 / real as f64;
+            assert!((0.9..=1.1).contains(&razao), "OVR {overall} ({idade} anos): estimado {estimado} contra {real} (×{razao:.2})");
+        }
+        // o goleiro não ganha desconto: o Oblak (88, 33 anos) bate sem termo próprio
+        assert_eq!(valor_estimado(88, 88, 33, true), valor_estimado(88, 88, 33, false));
+    }
+
+    #[test]
+    fn the_value_estimate_orders_players_sensibly() {
         let v80 = valor_estimado(80, 80, 27, false);
         assert!((15_000_000..30_000_000).contains(&v80), "{v80}");
         assert!(valor_estimado(90, 90, 27, false) > 100_000_000);
         assert!(valor_estimado(60, 60, 27, false) < 1_000_000);
-        assert!(valor_estimado(75, 88, 19, false) > valor_estimado(75, 75, 27, false), "jovem com potencial vale mais");
+        assert!(valor_estimado(75, 88, 19, false) > valor_estimado(75, 75, 27, false), "jovem vale mais");
         assert!(valor_estimado(80, 80, 34, false) < valor_estimado(80, 80, 27, false), "veterano vale menos");
-        assert!(valor_estimado(80, 80, 27, true) < v80, "goleiro um pouco abaixo");
+        assert!(valor_estimado(80, 80, 40, false) >= 10_000, "nunca abaixo do piso");
         assert_eq!(v80 % 100_000, 0, "arredondado");
+        let niveis: Vec<i64> = (50..=95u8).map(|o| valor_estimado(o, o, 26, false)).collect();
+        assert!(niveis.windows(2).all(|p| p[0] <= p[1]), "mais overall nunca vale menos");
+    }
+
+    #[test]
+    fn the_value_adjusts_only_after_enough_readings_and_never_too_far() {
+        assert_eq!(ajuste_de_valor(&[]), 1.0);
+        assert_eq!(ajuste_de_valor(&[0.3; 4]), 1.0, "poucas leituras: nada muda");
+        // cinco leituras 20% acima do estimado: sobe, puxado para 1 (meio caminho)
+        let a = ajuste_de_valor(&[0.2f64.ln_1p(); 5]);
+        assert!(a > 1.0 && a < 1.2, "{a}");
+        // leituras iguais ao estimado: 1
+        assert!((ajuste_de_valor(&[0.0; 30]) - 1.0).abs() < 1e-9);
+        // absurdo: limitado
+        assert_eq!(ajuste_de_valor(&[3.0; 50]), 1.33);
+        assert_eq!(ajuste_de_valor(&[-3.0; 50]), 0.75);
+    }
+
+    #[test]
+    fn estimated_wage_follows_the_squad_contracts() {
         // salário: calibrado nos contratos reais do elenco do Felipe
         for (overall, real) in [(70u8, 20_000i64), (80, 120_000), (87, 240_000), (90, 300_000)] {
             let estimado = salario_estimado(overall);

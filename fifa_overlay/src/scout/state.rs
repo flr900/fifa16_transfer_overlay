@@ -97,6 +97,11 @@ pub enum TipoAviso {
 pub struct ValorDoJogo {
     pub valor: u32,
     pub lido_em: Date,
+    /// O que a Central estimava para ele quando leu o valor exato (só quando
+    /// o Olheiro o tinha observado com precisão): vira uma leitura da
+    /// correção da estimativa dos outros jogadores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimativa: Option<u32>,
 }
 
 /// Depois de quantos dias de carreira o valor lido deixa de valer como
@@ -111,6 +116,16 @@ impl ValorDoJogo {
             (0..=VALIDADE_DO_VALOR_DIAS).contains(&dias)
         })
     }
+}
+
+/// Correção da estimativa de valor a partir das leituras exatas que têm a
+/// estimativa da hora da leitura guardada (`quality::ajuste_de_valor`).
+fn ajuste_das_leituras(leituras: &std::collections::BTreeMap<u32, ValorDoJogo>) -> f64 {
+    let razoes: Vec<f64> = leituras
+        .values()
+        .filter_map(|v| v.estimativa.filter(|e| *e > 0).map(|e| (f64::from(v.valor) / f64::from(e)).ln()))
+        .collect();
+    quality::ajuste_de_valor(&razoes)
 }
 
 /// Os mesmos nomes? Compara só as letras ASCII, sem caixa, para o Latin-1 do
@@ -1033,6 +1048,14 @@ impl JogadorEncontrado {
         quality::valor_estimado(meio_da_faixa(self.overall), meio_da_faixa(self.potencial), self.idade, self.goleiro())
     }
 
+    /// A estimativa só serve de leitura de calibração quando o Olheiro viu o
+    /// jogador com precisão (Overall e potencial em faixas de até 4 pontos):
+    /// com faixa larga o meio do intervalo erra, e esse erro não é do modelo.
+    pub fn estimativa_precisa(&self) -> Option<u32> {
+        let estreita = |f: FaixaAtributo| f.max.saturating_sub(f.min) <= 4;
+        (estreita(self.overall) && estreita(self.potencial)).then(|| u32::try_from(self.valor_estimado()).unwrap_or(u32::MAX))
+    }
+
     /// Salário semanal estimado.
     pub fn salario_estimado(&self) -> i64 {
         quality::salario_estimado(meio_da_faixa(self.overall))
@@ -1583,6 +1606,8 @@ pub struct ScoutState {
     /// Colheita do valor exato do jogador em foco no jogo (Story 7.6).
     ultima_colheita: Option<Instant>,
     ultimo_foco: Option<(u32, u32, String)>,
+    /// Correção da estimativa de valor aprendida com as leituras exatas (1 = nenhuma).
+    ajuste_valor: f64,
     /// Há uma atualização disparada e ainda não tratada.
     atualizacao_escolhidos_pendente: bool,
     /// Pediram outra atualização enquanto uma rodava: roda de novo no fim.
@@ -1660,6 +1685,7 @@ impl ScoutState {
             avisou_nativo_ausente: false,
             ultima_colheita: None,
             ultimo_foco: None,
+            ajuste_valor: 1.0,
             atualizacao_escolhidos_pendente: false,
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
@@ -2152,6 +2178,11 @@ impl ScoutState {
         self.estado_ativo()?.ler(|d| d.valores_do_jogo.get(&player_id).copied())
     }
 
+    /// Estimativa de valor com a correção aprendida das leituras exatas.
+    pub fn valor_estimado(&self, j: &JogadorEncontrado) -> i64 {
+        quality::arredondar_mercado(j.valor_estimado() as f64 * self.ajuste_valor)
+    }
+
     /// O valor que a Central mostra para o jogador: o exato do jogo, se
     /// ainda vale, senão `None` (a tela estima).
     pub fn valor_exato(&self, player_id: u32) -> Option<u32> {
@@ -2176,26 +2207,27 @@ impl ScoutState {
             return;
         }
         self.ultimo_foco = Some(leitura);
-        let nome = estado.ler(|d| {
+        let conhecido = estado.ler(|d| {
             d.escolhidos
                 .iter()
                 .map(|e| &e.jogador)
                 .chain(d.relatorios.iter().flat_map(|r| r.jogadores.iter()))
                 .find(|j| j.player_id == foco.jogador)
-                .map(|j| j.nome.clone())
+                .map(|j| (j.nome.clone(), j.estimativa_precisa()))
         });
-        let Some(nome) = nome else { return };
+        let Some((nome, estimativa)) = conhecido else { return };
         if !nomes_equivalentes(&nome, &foco.nome) {
             tracing::info!("[scout::state] Linha de valor do jogo ignorada: id {} é \"{}\" na Central e \"{}\" no jogo.", foco.jogador, nome, foco.nome);
             return;
         }
-        let novo = ValorDoJogo { valor: foco.valor, lido_em: hoje };
+        let novo = ValorDoJogo { valor: foco.valor, lido_em: hoje, estimativa };
         if let Err(err) = estado.mutar(|d| {
             d.valores_do_jogo.insert(foco.jogador, novo);
         }) {
             tracing::warn!("[scout::state] Valor do jogo não foi salvo: {err:?}");
             return;
         }
+        self.ajuste_valor = estado.ler(|d| ajuste_das_leituras(&d.valores_do_jogo));
         tracing::info!("[scout::state] Valor exato de {} lido no jogo: {}.", nome, foco.valor);
     }
 
@@ -2538,6 +2570,7 @@ impl ScoutState {
         }
         self.aba_restaurada = Some(estado.ler(|dados| dados.ui_prefs.aba_ativa));
         crate::save_repo::nativo::definir_sincronizacao(estado.ler(|dados| dados.ui_prefs.sincronizar_com_o_jogo));
+        self.ajuste_valor = estado.ler(|dados| ajuste_das_leituras(&dados.valores_do_jogo));
         tracing::info!("[scout::state] Carreira ativa: estado {}…", id_save.get(..8).unwrap_or(&id_save));
         self.ultimo_save = Some(id_save.clone());
         self.save_ativo = Some(id_save);
@@ -6018,8 +6051,47 @@ mod tests {
     }
 
     #[test]
+    fn the_estimate_learns_from_exact_readings_that_carry_the_estimate_of_the_moment() {
+        let leitura = |valor: u32, estimativa: Option<u32>| ValorDoJogo { valor, lido_em: Date(20260710), estimativa };
+        let mut leituras = std::collections::BTreeMap::new();
+        assert_eq!(ajuste_das_leituras(&leituras), 1.0, "sem leituras: nada muda");
+        // quatro leituras 25% acima da estimativa: ainda pouco para mexer
+        for i in 0..4u32 {
+            leituras.insert(i + 1, leitura(1_250_000, Some(1_000_000)));
+        }
+        assert_eq!(ajuste_das_leituras(&leituras), 1.0);
+        // leituras SEM a estimativa (de antes desta versão) não contam
+        for i in 10..20u32 {
+            leituras.insert(i, leitura(9_000_000, None));
+        }
+        assert_eq!(ajuste_das_leituras(&leituras), 1.0);
+        // a quinta com estimativa: o fator sobe, puxado para 1
+        leituras.insert(50, leitura(1_250_000, Some(1_000_000)));
+        let a = ajuste_das_leituras(&leituras);
+        assert!(a > 1.05 && a < 1.25, "{a}");
+        // se a Central estimava alto, o fator desce
+        let mut abaixo = std::collections::BTreeMap::new();
+        for i in 0..8u32 {
+            abaixo.insert(i + 1, leitura(800_000, Some(1_000_000)));
+        }
+        assert!(ajuste_das_leituras(&abaixo) < 0.95);
+    }
+
+    #[test]
+    fn only_a_precise_observation_can_teach_the_estimate() {
+        let pool = pool_de_teste();
+        let concluida = Missao::de_teste(Uuid::new_v4(), StatusMissao::Concluida);
+        let mut j = search::revelar(&concluida, &pool, Date(20260710), pool.jogadores.iter().find(|j| j.player_id == 3).expect("jogador"));
+        j.overall = FaixaAtributo { min: 78, max: 82 };
+        j.potencial = FaixaAtributo { min: 80, max: 84 };
+        assert_eq!(j.estimativa_precisa(), Some(u32::try_from(j.valor_estimado()).expect("cabe")), "faixas de até 4 pontos");
+        j.overall = FaixaAtributo { min: 70, max: 90 };
+        assert_eq!(j.estimativa_precisa(), None, "faixa larga: o erro não é do modelo");
+    }
+
+    #[test]
     fn a_game_value_is_exact_for_90_days_then_the_central_estimates_again() {
-        let v = ValorDoJogo { valor: 5_000_000, lido_em: Date(20260701) };
+        let v = ValorDoJogo { valor: 5_000_000, lido_em: Date(20260701), estimativa: None };
         assert!(v.vale_em(Some(Date(20260701))));
         assert!(v.vale_em(Some(Date(20260929))), "89 dias");
         assert!(!v.vale_em(Some(Date(20261001))), "92 dias");
@@ -6057,7 +6129,7 @@ mod tests {
         // o jogador conhecido, com o nome certo: colhido (e mostrado como exato)
         em_foco(jogador.player_id, &jogador.nome, 5_000_000);
         colher(&mut st);
-        assert_eq!(st.valor_do_jogo(jogador.player_id), Some(ValorDoJogo { valor: 5_000_000, lido_em: Date(20260712) }));
+        assert_eq!(st.valor_do_jogo(jogador.player_id), Some(ValorDoJogo { valor: 5_000_000, lido_em: Date(20260712), estimativa: st.valor_do_jogo(jogador.player_id).and_then(|v| v.estimativa) }));
         assert_eq!(st.valor_exato(jogador.player_id), Some(5_000_000));
         // o arquivo guarda
         let salvo = st.estado_ativo().cloned().expect("estado").ler(|d| d.valores_do_jogo.get(&jogador.player_id).copied());

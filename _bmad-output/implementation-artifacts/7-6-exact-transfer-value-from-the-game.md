@@ -31,3 +31,11 @@ The save does not store the market value; the game computes it when a screen sho
 
 - Still unverified: whether the offset is the same after closing and reopening the game (it was the same across careers and DLL reloads). If the exact value stops appearing in a new session, find the row again with `scout_probe.py` (search for a known value and player id).
 - A value is only exact for players who passed through the game's screens while the Central was running; the others keep the estimate. Using the harvested values to calibrate the estimate (the current one is 1.1–1.7× high against six real values) is left for a later story.
+
+## Addendum (2026-10-07): estimate recalibrated, new-session check, last-field fix
+
+- **Estimate recalibrated** (`quality::valor_estimado`): fitted to 9 exact values from the 2026 test career (OVR 70–90, ages 19–33): `ln(value) = 2.854 + 0.174·OVR + 0.045·max(0, 24−age) − 0.085·max(0, age−27)`; mean error 3% (5% leave-one-out) against 30–60% for the old formula (it ran 1.1–1.7× high). Potential and goalkeeper needed no term. The proposals' `valuation`/`offeredfee` are NOT the displayed value (Bellingham: 149.5 M / 121.5 M against 108.5 M), so only exact readings were used.
+- **Self-adjusting layer:** every exact reading of a player the Olheiro saw precisely (OVR and POT ranges ≤ 4) stores the estimate of that moment; with ≥ 5 such readings the estimate is multiplied by a factor (geometric mean of real ÷ estimated, pulled toward 1, clamped to [0.75, 1.33]).
+- **New game session (PSG career, 2029):** the region base changed (`0x8CC30000`) but the value row (`+0x365020`), the date (`+0x373E08`) and the knowledge array (`+0x359890`) kept the same offsets; the locator then took 286 ms.
+- **Bug found only in that career:** the last field of a knowledge record is `-1` OR a market value (14.5 M, 21 M); the validator required `-1`, so the array split into 5 pieces and was not located, and a rewrite would have erased those values. `RegistroConhecimento.extra` now keeps it (valid: `-1` or a positive multiple of 5,000) and a rewrite preserves it; two tests.
+- In the game (build `7.6-v4`, PSG career): `Localização em 286 ms`, 311 knowledge records read, `Conhecimento do jogo: 84 criado(s)`, and an exact value read (`Kees Smit: 37500000`). Felipe confirmed everything worked.
