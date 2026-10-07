@@ -68,6 +68,10 @@ pub struct ScoutStateFile {
     /// Central só rebaixa o que ela mesma subiu, e nunca abaixo disto.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub nivel_original: std::collections::BTreeMap<u32, u8>,
+    /// Épico 7: valor de transferência EXATO que o jogo calculou, colhido da
+    /// tela do jogo quando o jogador passou por ela (player id → valor).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub valores_do_jogo: std::collections::BTreeMap<u32, crate::scout::state::ValorDoJogo>,
     /// Atratividade do clube fixada para o mês do mercado de Olheiros:
     /// `(período, atratividade)`.
     #[serde(default)]
@@ -88,6 +92,7 @@ impl Default for ScoutStateFile {
             escolhidos: Vec::new(),
             ofertas_contratadas: Vec::new(),
             nivel_original: std::collections::BTreeMap::new(),
+            valores_do_jogo: std::collections::BTreeMap::new(),
             mercado_do_mes: None,
             ui_prefs: UiPrefs::default(),
         }

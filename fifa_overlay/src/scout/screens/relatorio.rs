@@ -140,8 +140,18 @@ pub fn contrato_a_vencer(ano: Option<u16>, hoje: Option<Date>) -> bool {
 
 /// "Valor ≈ 18,6 M · Salário ≈ 120 mil/sem" (o salário só depois que o
 /// Olheiro o descobre, no Relatório parcial).
+#[cfg(test)]
 pub fn texto_mercado(j: &JogadorEncontrado) -> String {
-    let valor = format!("Valor ≈ {}", formatar_dinheiro(j.valor_estimado()));
+    texto_mercado_com(j, None)
+}
+
+/// Como `texto_mercado`, mas com o valor exato que o jogo calculou, quando a
+/// Central o colheu e ele ainda vale: "Valor 5,0 M (exato)".
+pub fn texto_mercado_com(j: &JogadorEncontrado, exato: Option<u32>) -> String {
+    let valor = match exato {
+        Some(v) => format!("Valor {} (exato)", formatar_dinheiro(i64::from(v))),
+        None => format!("Valor ≈ {}", formatar_dinheiro(j.valor_estimado())),
+    };
     if j.salario_conhecido() {
         format!("{valor} · Salário ≈ {}/sem", formatar_dinheiro(j.salario_estimado()))
     } else {
@@ -407,7 +417,7 @@ fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorE
     let x_largo = c.min[0] + theme::ESPACO_3;
     let largura_larga = c.max[0] - theme::ESPACO_3 - x_largo;
     y = y.max(r_max[1] + theme::ESPACO_2);
-    let (mercado, _) = truncar(&texto_mercado(j), largura_larga, medir(meta));
+    let (mercado, _) = truncar(&texto_mercado_com(j, state.valor_exato(j.player_id)), largura_larga, medir(meta));
     y += texto_em(ui, meta, &dl, [x_largo, y], theme::TEXT_PRIMARY, &mercado)[1];
     let contrato = format!("Contrato: {}", formatar_contrato(j.contrato_ate, hoje));
     let cor_contrato = if contrato_a_vencer(j.contrato_ate, hoje) { theme::WARNING } else { theme::TEXT_SECONDARY };
@@ -565,6 +575,9 @@ mod tests {
         assert!(texto_mercado(&j).ends_with("salário em observação"));
         j.observacao = Observacao::Completa;
         assert!(texto_mercado(&j).contains("Salário ≈"));
+        let exato = texto_mercado_com(&j, Some(5_000_000));
+        assert!(exato.starts_with("Valor ") && exato.contains("(exato)") && !exato.contains("Valor ≈"), "{exato}");
+        assert!(exato.contains("Salário ≈"), "o salário continua estimado");
         assert_eq!(texto_titular(&j), None);
         j.titular_elenco = Some(71);
         assert_eq!(texto_titular(&j).as_deref(), Some("seu titular: 71 (+3)"));

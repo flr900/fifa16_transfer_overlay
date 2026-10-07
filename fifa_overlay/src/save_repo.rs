@@ -30,6 +30,7 @@
 //!   do disco não existe mais na memória → `CarreiraNaoCarregada` até
 //!   salvar.
 
+pub mod foco;
 pub mod jogadores;
 pub mod nativo;
 

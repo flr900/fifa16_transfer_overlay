@@ -218,7 +218,7 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, ficha: &FichaAb
     }
     // Mercado, contrato e o titular do elenco na posição.
     y += theme::ESPACO_1;
-    y += texto_em(ui, fonts.map(|f| f.body), &dl, [x, y], theme::TEXT_PRIMARY, &super::relatorio::texto_mercado(j))[1];
+    y += texto_em(ui, fonts.map(|f| f.body), &dl, [x, y], theme::TEXT_PRIMARY, &super::relatorio::texto_mercado_com(j, state.valor_exato(j.player_id)))[1];
     let hoje = state.data_da_carreira();
     let contrato = format!("Contrato: {}", super::relatorio::formatar_contrato(j.contrato_ate, hoje));
     let cor = if super::relatorio::contrato_a_vencer(j.contrato_ate, hoje) { theme::WARNING } else { theme::TEXT_SECONDARY };

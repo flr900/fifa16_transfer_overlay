@@ -57,6 +57,8 @@ use super::Aba;
 const INTERVALO_RELEITURA: Duration = Duration::from_secs(1);
 /// De quanto em quanto tempo a Central confere o conhecimento do jogo (Épico 7).
 const INTERVALO_SYNC_NATIVA: Duration = Duration::from_secs(5);
+/// De quanto em quanto tempo a Central olha o jogador em foco no jogo.
+const INTERVALO_COLHEITA: Duration = Duration::from_millis(500);
 
 /// Sem carreira pronta, pergunta "há carreira carregada?" nesse intervalo.
 const INTERVALO_SINAL: Duration = Duration::from_secs(2);
@@ -87,6 +89,37 @@ pub enum TipoAviso {
     JogoAtualizado { jogadores: usize },
     /// A sincronização está ligada mas o scout do jogo não foi localizado.
     JogoNaoLocalizado,
+}
+
+/// O valor de transferência que o jogo calculou para um jogador, e quando a
+/// Central o leu (Épico 7, Story 7.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValorDoJogo {
+    pub valor: u32,
+    pub lido_em: Date,
+}
+
+/// Depois de quantos dias de carreira o valor lido deixa de valer como
+/// "exato" (o mercado muda) e a Central volta a estimar.
+pub const VALIDADE_DO_VALOR_DIAS: i64 = 90;
+
+impl ValorDoJogo {
+    /// Ainda vale como exato em `hoje`?
+    pub fn vale_em(&self, hoje: Option<Date>) -> bool {
+        hoje.is_none_or(|h| {
+            let dias = h.day_number() - self.lido_em.day_number();
+            (0..=VALIDADE_DO_VALOR_DIAS).contains(&dias)
+        })
+    }
+}
+
+/// Os mesmos nomes? Compara só as letras ASCII, sem caixa, para o Latin-1 do
+/// banco e o UTF-8 não atrapalharem; aceita um nome contido no outro (o jogo
+/// às vezes mostra o nome comum).
+fn nomes_equivalentes(a: &str, b: &str) -> bool {
+    let limpar = |s: &str| s.chars().filter(char::is_ascii_alphabetic).map(|c| c.to_ascii_lowercase()).collect::<String>();
+    let (a, b) = (limpar(a), limpar(b));
+    a.len() >= 4 && b.len() >= 4 && (a == b || a.contains(&b) || b.contains(&a))
 }
 
 /// O que a aba Escolhidos mostra sobre a sincronização com o jogo.
@@ -1547,6 +1580,9 @@ pub struct ScoutState {
     nativo_localizando: bool,
     /// O aviso "não localizado" já foi dado nesta sessão.
     avisou_nativo_ausente: bool,
+    /// Colheita do valor exato do jogador em foco no jogo (Story 7.6).
+    ultima_colheita: Option<Instant>,
+    ultimo_foco: Option<(u32, u32, String)>,
     /// Há uma atualização disparada e ainda não tratada.
     atualizacao_escolhidos_pendente: bool,
     /// Pediram outra atualização enquanto uma rodava: roda de novo no fim.
@@ -1622,6 +1658,8 @@ impl ScoutState {
             tarefa_nativo: AsyncTask::new(),
             nativo_localizando: false,
             avisou_nativo_ausente: false,
+            ultima_colheita: None,
+            ultimo_foco: None,
             atualizacao_escolhidos_pendente: false,
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
@@ -2108,9 +2146,57 @@ impl ScoutState {
         }
     }
 
-    /// "Sincronizar com o FIFA" ligado?
-    pub fn sincronizacao_nativa(&self) -> bool {
-        crate::save_repo::nativo::sincronizacao_ligada()
+    /// Valor exato lido do jogo para o jogador (`None` = nunca passou pela
+    /// tela do jogo com a Central olhando).
+    pub fn valor_do_jogo(&self, player_id: u32) -> Option<ValorDoJogo> {
+        self.estado_ativo()?.ler(|d| d.valores_do_jogo.get(&player_id).copied())
+    }
+
+    /// O valor que a Central mostra para o jogador: o exato do jogo, se
+    /// ainda vale, senão `None` (a tela estima).
+    pub fn valor_exato(&self, player_id: u32) -> Option<u32> {
+        self.valor_do_jogo(player_id).filter(|v| v.vale_em(self.data_da_carreira())).map(|v| v.valor)
+    }
+
+    /// Olha a linha de valor do jogador em foco no jogo e, se for um jogador
+    /// que a Central conhece (Escolhidos ou Relatórios, conferindo id E
+    /// nome), guarda o valor com a data. Leitura de 48 bytes, de meio em meio
+    /// segundo, e só grava no arquivo quando o jogador ou o valor mudam.
+    fn colher_valor_em_foco(&mut self) {
+        if self.ultima_colheita.is_some_and(|t| t.elapsed() < INTERVALO_COLHEITA) {
+            return;
+        }
+        self.ultima_colheita = Some(Instant::now());
+        let CarreiraStatus::Pronta(carreira) = &self.status else { return };
+        let hoje = carreira.data_atual;
+        let Some(estado) = self.estado_ativo().cloned() else { return };
+        let Ok(Some(foco)) = self.fonte.read_focused_value() else { return };
+        let leitura = (foco.jogador, foco.valor, foco.nome.clone());
+        if self.ultimo_foco.as_ref() == Some(&leitura) {
+            return;
+        }
+        self.ultimo_foco = Some(leitura);
+        let nome = estado.ler(|d| {
+            d.escolhidos
+                .iter()
+                .map(|e| &e.jogador)
+                .chain(d.relatorios.iter().flat_map(|r| r.jogadores.iter()))
+                .find(|j| j.player_id == foco.jogador)
+                .map(|j| j.nome.clone())
+        });
+        let Some(nome) = nome else { return };
+        if !nomes_equivalentes(&nome, &foco.nome) {
+            tracing::info!("[scout::state] Linha de valor do jogo ignorada: id {} é \"{}\" na Central e \"{}\" no jogo.", foco.jogador, nome, foco.nome);
+            return;
+        }
+        let novo = ValorDoJogo { valor: foco.valor, lido_em: hoje };
+        if let Err(err) = estado.mutar(|d| {
+            d.valores_do_jogo.insert(foco.jogador, novo);
+        }) {
+            tracing::warn!("[scout::state] Valor do jogo não foi salvo: {err:?}");
+            return;
+        }
+        tracing::info!("[scout::state] Valor exato de {} lido no jogo: {}.", nome, foco.valor);
     }
 
     /// Liga/desliga a sincronização (vale para a sessão e é salvo na
@@ -2350,6 +2436,7 @@ impl ScoutState {
         }
 
         self.reconciliar_nativo();
+        self.colher_valor_em_foco();
 
         if !matches!(self.status, CarreiraStatus::Pronta(_) | CarreiraStatus::Localizando) {
             self.vigiar_carreira();
@@ -4131,7 +4218,17 @@ mod tests {
         liberar_busca: Arc<std::sync::atomic::AtomicBool>,
     }
 
+    thread_local! {
+        /// Jogador em foco no jogo, controlado pelo teste (cada teste roda na
+        /// própria thread e chama `tick` nela).
+        static FOCO_FALSO: std::cell::RefCell<Option<crate::save_repo::foco::ValorEmFoco>> = const { std::cell::RefCell::new(None) };
+    }
+
     impl CareerSource for FonteFalsa {
+        fn read_focused_value(&self) -> Result<Option<crate::save_repo::foco::ValorEmFoco>, SaveRepoError> {
+            Ok(FOCO_FALSO.with(|f| f.borrow().clone()))
+        }
+
         fn write_transfer_budget(&self, anterior: i32, novo: i32) -> Result<i32, SaveRepoError> {
             self.escritas.lock().unwrap_or_else(|p| p.into_inner()).push((anterior, novo));
             let mut fila = self.resultados_escrita.lock().unwrap_or_else(|p| p.into_inner());
@@ -5909,6 +6006,72 @@ mod tests {
             relatorio_id: None,
             no_jogo: false,
         }
+    }
+
+    #[test]
+    fn matching_names_ignore_case_accents_and_a_common_name_inside_the_full_one() {
+        assert!(nomes_equivalentes("Isi Palazón", "Isi Palaz\u{f3}n"));
+        assert!(nomes_equivalentes("Sverre Nypan", "SVERRE NYPAN"));
+        assert!(nomes_equivalentes("Éder Gabriel Militão", "Militão"), "nome comum dentro do completo");
+        assert!(!nomes_equivalentes("Sverre Nypan", "Kees Smit"));
+        assert!(!nomes_equivalentes("Li", "Li"), "curto demais para confiar");
+    }
+
+    #[test]
+    fn a_game_value_is_exact_for_90_days_then_the_central_estimates_again() {
+        let v = ValorDoJogo { valor: 5_000_000, lido_em: Date(20260701) };
+        assert!(v.vale_em(Some(Date(20260701))));
+        assert!(v.vale_em(Some(Date(20260929))), "89 dias");
+        assert!(!v.vale_em(Some(Date(20261001))), "92 dias");
+        assert!(!v.vale_em(Some(Date(20260630))), "antes da leitura (save antigo)");
+        assert!(v.vale_em(None), "sem data na tela, vale");
+    }
+
+    #[test]
+    fn the_value_in_focus_is_harvested_only_for_known_players_with_the_same_name() {
+        use crate::save_repo::foco::ValorEmFoco;
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let vencida = missao_com_prazo(&o, 20260701, 20260710);
+        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![vencida], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        let item = st.relatorios(false).into_iter().next().expect("Relatório");
+        let jogador = item.relatorio.jogadores[0].clone();
+        let em_foco = |id: u32, nome: &str, valor: u32| {
+            FOCO_FALSO.with(|f| *f.borrow_mut() = Some(ValorEmFoco { jogador: id, time: 10, valor, nome: nome.to_string() }));
+        };
+        let colher = |st: &mut ScoutState| {
+            st.ultima_colheita = None;
+            st.tick();
+        };
+
+        // jogador que a Central não conhece, e id conhecido com outro nome: ignorados
+        em_foco(399_999, "Outro Jogador", 5_000_000);
+        colher(&mut st);
+        em_foco(jogador.player_id, "Totalmente Diferente", 5_000_000);
+        colher(&mut st);
+        assert_eq!(st.valor_do_jogo(jogador.player_id), None);
+        assert_eq!(st.valor_do_jogo(399_999), None);
+
+        // o jogador conhecido, com o nome certo: colhido (e mostrado como exato)
+        em_foco(jogador.player_id, &jogador.nome, 5_000_000);
+        colher(&mut st);
+        assert_eq!(st.valor_do_jogo(jogador.player_id), Some(ValorDoJogo { valor: 5_000_000, lido_em: Date(20260712) }));
+        assert_eq!(st.valor_exato(jogador.player_id), Some(5_000_000));
+        // o arquivo guarda
+        let salvo = st.estado_ativo().cloned().expect("estado").ler(|d| d.valores_do_jogo.get(&jogador.player_id).copied());
+        assert_eq!(salvo.map(|v| v.valor), Some(5_000_000));
+
+        // o valor mudou no jogo: a leitura nova vale
+        em_foco(jogador.player_id, &jogador.nome, 6_500_000);
+        colher(&mut st);
+        assert_eq!(st.valor_exato(jogador.player_id), Some(6_500_000));
+
+        // 4 meses depois, volta a estimar (a leitura continua guardada)
+        st.data_progresso = Some(Date(20261112));
+        assert_eq!(st.valor_exato(jogador.player_id), None);
+        assert!(st.valor_do_jogo(jogador.player_id).is_some());
     }
 
     #[test]
