@@ -73,16 +73,23 @@ New-Item -Path $pedido -ItemType File -Force | Out-Null
 # livre não basta: uma cópia carregada de outro caminho (instalada, outro
 # worktree) não trava o arquivo, e apagar o pedido cedo demais a deixava no
 # jogo, com a nova injetada por cima (duas Centrais ao mesmo tempo).
+#
+# E cada cópia APAGA o pedido ao vê-lo (lib.rs, atender_pedido_de_descarga):
+# com duas carregadas, a primeira a olhar consome o arquivo e a segunda nunca
+# o vê. Por isso o pedido é recriado enquanto ainda sobrar alguma cópia.
 $restantes = $carregadas
-for ($i = 0; $i -lt 40; $i++) {
+for ($i = 0; $i -lt 80; $i++) {
     $restantes = Get-OverlayCarregadas
     if ($restantes.Count -eq 0) { break }
+    if (-not (Test-Path $pedido)) {
+        New-Item -Path $pedido -ItemType File -Force | Out-Null
+    }
     Start-Sleep -Milliseconds 500
 }
 Remove-Item $pedido -Force -ErrorAction SilentlyContinue
 if ($restantes.Count -gt 0) {
     $quais = ($restantes | ForEach-Object { $_.FileName }) -join ", "
-    Write-Error ("Ainda carregada(s) depois de 20 s: $quais. Pode ser uma build anterior à 1.6-v2 " +
+    Write-Error ("Ainda carregada(s) depois de 40 s: $quais. Pode ser uma build anterior à 1.6-v2 " +
         "(sem suporte a recarregar): feche o jogo e use iniciar_fifa.ps1. Nada foi injetado.")
 }
 
