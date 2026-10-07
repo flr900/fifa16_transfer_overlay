@@ -20,7 +20,15 @@
 
 $ErrorActionPreference = "Stop"
 
+# O que o script viu e fez, para dar para conferir depois (a janela fecha).
+$logArquivo = Join-Path $env:TEMP "recarregar_dev.log"
+function Registrar([string]$texto) {
+    Write-Host $texto
+    Add-Content -Path $logArquivo -Value ("{0} {1}" -f (Get-Date -Format "HH:mm:ss"), $texto) -ErrorAction SilentlyContinue
+}
+
 trap {
+    Registrar "Erro: $_"
     Write-Host ""
     Write-Host "Erro: $_" -ForegroundColor Red
     Read-Host "Pressione Enter para fechar"
@@ -63,8 +71,9 @@ function Get-OverlayCarregadas {
 }
 
 $carregadas = Get-OverlayCarregadas
-Write-Host ("Cópias do overlay carregadas: {0}" -f $carregadas.Count)
-foreach ($m in $carregadas) { Write-Host "  - $($m.FileName)" }
+Registrar "--- recarregar_dev.ps1 ---"
+Registrar ("Cópias do overlay carregadas: {0}" -f $carregadas.Count)
+foreach ($m in $carregadas) { Registrar "  - $($m.FileName)" }
 
 Write-Host "Pedindo para a Central de Scout carregada se descarregar..."
 New-Item -Path $pedido -ItemType File -Force | Out-Null
@@ -87,11 +96,23 @@ for ($i = 0; $i -lt 80; $i++) {
     Start-Sleep -Milliseconds 500
 }
 Remove-Item $pedido -Force -ErrorAction SilentlyContinue
+Registrar ("Depois da espera: {0} cópia(s) ainda carregada(s)." -f @($restantes).Count)
 if ($restantes.Count -gt 0) {
+    # Uma cópia que não atende o pedido por 40 s está parada (o desenho dela
+    # morreu: por exemplo, os ganchos caíram junto com os de outra cópia que
+    # se descarregou) ou é anterior à 1.6-v2. Ela não desenha mais, mas o
+    # arquivo dela continua travado: a build nova vai para uma cópia com nome
+    # novo, e a antiga só sai do jogo quando o jogo fechar.
     $quais = ($restantes | ForEach-Object { $_.FileName }) -join ", "
-    Write-Error ("Ainda carregada(s) depois de 40 s: $quais. Pode ser uma build anterior à 1.6-v2 " +
-        "(sem suporte a recarregar): feche o jogo e use iniciar_fifa.ps1. Nada foi injetado.")
+    Registrar "AVISO: ainda carregada(s) e sem responder: $quais"
+    Registrar "Injetando a build nova numa cópia com outro nome; reinicie o jogo quando puder (iniciar_fifa.ps1)."
+    Write-Host "AVISO: a cópia antiga continua no jogo (parada) até ele fechar." -ForegroundColor Yellow
+    $copia = Join-Path $overlayDir ("target\fifa_overlay_dev_{0}.dll" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
 }
+# cópias de nome novo de recargas anteriores que já saíram do jogo
+Get-ChildItem (Join-Path $overlayDir "target") -Filter "fifa_overlay_dev_*.dll" -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne $copia } |
+    ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
 
 # A cópia só pode ser sobrescrita depois que o jogo soltar a DLL.
 $copiou = $false
@@ -107,7 +128,7 @@ for ($i = 0; $i -lt 30; $i++) {
 if (-not $copiou) {
     Write-Error "Não foi possível copiar a build nova para $copia (arquivo em uso)."
 }
-Write-Host "Descarregada. Build nova: $((Get-Item $built).LastWriteTime)"
+Registrar "Descarregada. Build nova: $((Get-Item $built).LastWriteTime)"
 
 # Um instante para o FreeLibrary terminar antes de injetar de novo.
 Start-Sleep -Seconds 1
@@ -118,6 +139,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 Start-Sleep -Seconds 3
 $depois = Get-OverlayCarregadas
+Registrar ("Depois de injetar: {0} cópia(s) carregada(s)." -f @($depois).Count)
+foreach ($m in $depois) { Registrar "  - $($m.FileName)" }
 if ($depois.Count -ne 1) {
     Write-Host ("ATENÇÃO: {0} cópias do overlay carregadas (era para ser 1):" -f $depois.Count) -ForegroundColor Yellow
     foreach ($m in $depois) { Write-Host "  - $($m.FileName)" -ForegroundColor Yellow }
