@@ -55,6 +55,8 @@ use super::Aba;
 
 /// Com a carreira pronta, relê o estado vivo nesse intervalo.
 const INTERVALO_RELEITURA: Duration = Duration::from_secs(1);
+/// De quanto em quanto tempo a Central confere o conhecimento do jogo (Épico 7).
+const INTERVALO_SYNC_NATIVA: Duration = Duration::from_secs(5);
 
 /// Sem carreira pronta, pergunta "há carreira carregada?" nesse intervalo.
 const INTERVALO_SINAL: Duration = Duration::from_secs(2);
@@ -1275,6 +1277,48 @@ fn adicionar_na_lista_do_jogo(jogador: &JogadorEncontrado) -> bool {
     }
 }
 
+/// Épico 7: o que o conhecimento do jogo deve ser, hoje, segundo a Central.
+/// - Relatório de Missão concluída: todos os jogadores dele ao nível da
+///   precisão do Relatório (só sobe);
+/// - Escolhido: acompanha a observação dele (`quality::nivel_no_jogo`):
+///   140 enquanto a Missão de origem roda, depois pela precisão — que
+///   envelhece e melhora com o acompanhamento —, e volta ao que o jogo tinha
+///   quando a observação vence. É o único caso que REBAIXA, e só até o nível
+///   original guardado; o Escolhido vale mais que o Relatório do mesmo
+///   jogador.
+fn pedidos_de_nivel(dados: &persistence::ScoutStateFile, hoje: Date, cobre: impl Fn(u32) -> bool) -> Vec<crate::save_repo::nativo::PedidoNivel> {
+    use crate::save_repo::nativo::PedidoNivel;
+    use std::collections::BTreeMap;
+    let concluida = |missao_id: Uuid| dados.missoes.iter().find(|m| m.id == missao_id).map(|m| m.status == StatusMissao::Concluida);
+    let mut pedidos: BTreeMap<u32, PedidoNivel> = BTreeMap::new();
+    for relatorio in &dados.relatorios {
+        if concluida(relatorio.missao_id) != Some(true) {
+            continue;
+        }
+        let alvo = quality::nivel_no_jogo(relatorio.precisao_mais_menos, false, false, 0);
+        for jogador in &relatorio.jogadores {
+            let Ok(id) = i32::try_from(jogador.player_id) else { continue };
+            pedidos
+                .entry(jogador.player_id)
+                .and_modify(|p| p.alvo = p.alvo.max(alvo))
+                .or_insert(PedidoNivel { jogador: id, alvo, original: None });
+        }
+    }
+    for escolhido in &dados.escolhidos {
+        let Ok(id) = i32::try_from(escolhido.jogador.player_id) else { continue };
+        let agora = escolhido_em(escolhido, hoje, cobre(escolhido.jogador.player_id));
+        let parcial = escolhido
+            .relatorio_id
+            .and_then(|rid| dados.relatorios.iter().find(|r| r.id == rid))
+            .and_then(|r| concluida(r.missao_id))
+            .is_some_and(|concluida| !concluida);
+        let original = dados.nivel_original.get(&escolhido.jogador.player_id).map(|n| i32::from(*n));
+        let alvo = quality::nivel_no_jogo(agora.precisao, parcial, agora.frescor == quality::Frescor::Vencido, original.unwrap_or(0));
+        pedidos.insert(escolhido.jogador.player_id, PedidoNivel { jogador: id, alvo, original });
+    }
+    pedidos.into_values().collect()
+}
+
 /// Épico 7: tira da lista do jogo um jogador que a Central pôs lá.
 fn tirar_da_lista_do_jogo(player_id: u32) {
     use crate::save_repo::nativo;
@@ -1479,6 +1523,10 @@ pub struct ScoutState {
     /// Escolhidos esperando o time para entrar na lista do jogo.
     ids_sem_time: Vec<u32>,
     times_pendente: bool,
+    /// Última reconciliação do conhecimento do jogo (Épico 7), para espaçar as leituras.
+    ultima_sync_nativa: Option<Instant>,
+    /// Último erro de escrita já registrado no log (não repete a mesma linha).
+    ultimo_erro_nativo: Option<String>,
     /// Há uma atualização disparada e ainda não tratada.
     atualizacao_escolhidos_pendente: bool,
     /// Pediram outra atualização enquanto uma rodava: roda de novo no fim.
@@ -1549,6 +1597,8 @@ impl ScoutState {
             tarefa_times: AsyncTask::new(),
             ids_sem_time: Vec::new(),
             times_pendente: false,
+            ultima_sync_nativa: None,
+            ultimo_erro_nativo: None,
             atualizacao_escolhidos_pendente: false,
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
@@ -1976,6 +2026,60 @@ impl ScoutState {
         self.atualizacao_escolhidos_pendente = iniciou;
     }
 
+    /// Épico 7: alinha o conhecimento do jogo com o que a Central sabe
+    /// (ver `pedidos_de_nivel`). Roda de tempos em tempos (sem o jogo
+    /// localizado ou com a sincronização desligada não faz nada) e é
+    /// idempotente: sem mudança, nada é escrito. Falhas só vão para o log.
+    fn reconciliar_nativo(&mut self) {
+        use crate::save_repo::nativo;
+        if !nativo::sincronizacao_ligada() || self.ultima_sync_nativa.is_some_and(|t| t.elapsed() < INTERVALO_SYNC_NATIVA) {
+            return;
+        }
+        self.ultima_sync_nativa = Some(Instant::now());
+        let CarreiraStatus::Pronta(carreira) = &self.status else { return };
+        let hoje = carreira.data_atual;
+        let Some(estado) = self.estado_ativo().cloned() else { return };
+        let pedidos = estado.ler(|dados| {
+            let cobertos = Self::acompanhados(dados);
+            pedidos_de_nivel(dados, hoje, |id| cobertos.contains(&id))
+        });
+        if pedidos.is_empty() {
+            return;
+        }
+        match nativo::write_native_knowledge(&pedidos, hoje) {
+            Ok(resumo) => {
+                self.ultimo_erro_nativo = None;
+                if !resumo.mudou() {
+                    return;
+                }
+                tracing::info!(
+                    "[scout::state] Conhecimento do jogo: {} criado(s), {} subiu(ram), {} desceu(ram).",
+                    resumo.criados,
+                    resumo.subiram,
+                    resumo.desceram
+                );
+                if !resumo.primeiro_toque.is_empty() {
+                    if let Err(err) = estado.mutar(|d| {
+                        for (jogador, antes) in &resumo.primeiro_toque {
+                            if let (Ok(id), Ok(antes)) = (u32::try_from(*jogador), u8::try_from(*antes)) {
+                                d.nivel_original.entry(id).or_insert(antes);
+                            }
+                        }
+                    }) {
+                        tracing::warn!("[scout::state] Nível original do jogo não foi salvo: {err:?}");
+                    }
+                }
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                if self.ultimo_erro_nativo.as_deref() != Some(msg.as_str()) {
+                    tracing::warn!("[scout::state] Conhecimento do jogo não foi atualizado: {msg}");
+                    self.ultimo_erro_nativo = Some(msg);
+                }
+            }
+        }
+    }
+
     /// Lê o save (fora do render, AD-4) para descobrir o time dos Escolhidos
     /// de `ids_sem_time` e, ao terminar, pô-los na lista do jogo.
     fn buscar_times(&mut self) {
@@ -2134,6 +2238,8 @@ impl ScoutState {
             self.reler();
             self.avisar_jogadores_novos();
         }
+
+        self.reconciliar_nativo();
 
         if !matches!(self.status, CarreiraStatus::Pronta(_) | CarreiraStatus::Localizando) {
             self.vigiar_carreira();
@@ -5730,6 +5836,60 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(st.escolhidos()[0].escolhido.jogador.clube_id, Some(10), "o time veio do save");
+    }
+
+    fn dados_de_nivel() -> (persistence::ScoutStateFile, Uuid, Uuid) {
+        let pool = pool_de_teste();
+        let rodando = Missao::de_teste(Uuid::new_v4(), StatusMissao::EmExecucao);
+        let concluida = Missao::de_teste(Uuid::new_v4(), StatusMissao::Concluida);
+        let jogador = |id: u32| search::revelar(&concluida, &pool, Date(20260710), pool.jogadores.iter().find(|j| j.player_id == id).expect("jogador"));
+        let mut r_rodando = Relatorio::de_teste(rodando.id);
+        r_rodando.jogadores = vec![jogador(1), jogador(2)];
+        let mut r_concluido = Relatorio::de_teste(concluida.id);
+        r_concluido.precisao_mais_menos = 5;
+        r_concluido.jogadores = vec![jogador(3), jogador(4)];
+        let mut dados = persistence::ScoutStateFile::default();
+        dados.missoes = vec![rodando, concluida];
+        dados.relatorios = vec![r_rodando.clone(), r_concluido.clone()];
+        (dados, r_rodando.id, r_concluido.id)
+    }
+
+    #[test]
+    fn game_levels_follow_the_reports_the_escolhidos_and_their_aging() {
+        let (mut dados, id_rodando, id_concluido) = dados_de_nivel();
+        let hoje = Date(20260801);
+        let alvo = |dados: &persistence::ScoutStateFile, hoje: Date| -> std::collections::BTreeMap<i32, (i32, Option<i32>)> {
+            pedidos_de_nivel(dados, hoje, |_| false).into_iter().map(|p| (p.jogador, (p.alvo, p.original))).collect()
+        };
+
+        // Relatório de Missão concluída: só os jogadores dele, pela precisão (±5 → 178); o parcial não escreve
+        let mapa = alvo(&dados, hoje);
+        assert_eq!(mapa.keys().copied().collect::<Vec<_>>(), vec![3, 4]);
+        assert_eq!(mapa[&3], (178, None), "só sobe (sem original)");
+
+        // Escolhido do Relatório que ainda roda: 140 (valor anterior ao completo)
+        let mut do_parcial = escolhido_de_teste(1, 20260801);
+        do_parcial.relatorio_id = Some(id_rodando);
+        // Escolhido do Relatório concluído: segue a precisão dele (10 → 158)
+        let mut do_concluido = escolhido_de_teste(3, 20260801);
+        do_concluido.relatorio_id = Some(id_concluido);
+        do_concluido.precisao = 10;
+        dados.escolhidos = vec![do_parcial, do_concluido];
+        let mapa = alvo(&dados, hoje);
+        assert_eq!(mapa[&1], (140, None));
+        assert_eq!(mapa[&3], (158, None), "o Escolhido vale mais que o Relatório (178)");
+        assert_eq!(mapa[&4], (178, None));
+
+        // com o nível original guardado, o pedido do Escolhido vem com o piso
+        dados.nivel_original.insert(3, 40);
+        assert_eq!(alvo(&dados, hoje)[&3], (158, Some(40)));
+
+        // observação vencida (mais de 1,5 ano): volta ao que o jogo tinha
+        let vencido = Date(20280601);
+        let mapa = alvo(&dados, vencido);
+        assert_eq!(mapa[&3], (40, Some(40)), "volta ao nível original");
+        assert_eq!(mapa[&1].0, 0, "sem original guardado volta a 0, mas sem piso ele só sobe (nada acontece)");
+        assert_eq!(mapa[&1].1, None);
     }
 
     #[test]

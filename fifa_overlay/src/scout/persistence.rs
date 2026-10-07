@@ -63,6 +63,11 @@ pub struct ScoutStateFile {
     /// Ofertas do mercado de Olheiros já contratadas (não voltam à lista).
     #[serde(default)]
     pub ofertas_contratadas: Vec<uuid::Uuid>,
+    /// Épico 7: o nível de conhecimento que o JOGO tinha de cada jogador
+    /// antes de a Central mexer nele (0 = não tinha registro). É o piso: a
+    /// Central só rebaixa o que ela mesma subiu, e nunca abaixo disto.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub nivel_original: std::collections::BTreeMap<u32, u8>,
     /// Atratividade do clube fixada para o mês do mercado de Olheiros:
     /// `(período, atratividade)`.
     #[serde(default)]
@@ -82,6 +87,7 @@ impl Default for ScoutStateFile {
             relatorios: Vec::new(),
             escolhidos: Vec::new(),
             ofertas_contratadas: Vec::new(),
+            nivel_original: std::collections::BTreeMap::new(),
             mercado_do_mes: None,
             ui_prefs: UiPrefs::default(),
         }

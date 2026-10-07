@@ -96,4 +96,5 @@ development_status:
   epic-7: in-progress
   7-1-locate-the-native-shortlist-and-knowledge-vectors: review
   7-2-add-and-remove-escolhidos-in-the-native-shortlist: review
+  7-3-sync-the-knowledge-level-with-the-game: review
   epic-7-retrospective: optional

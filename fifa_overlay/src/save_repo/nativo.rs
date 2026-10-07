@@ -676,6 +676,141 @@ fn com_cache<R>(f: impl FnOnce(&mut LocalNativo) -> Result<R, SaveRepoError>) ->
     resultado
 }
 
+// ---------------------------------------------------------------------
+// Escrita do nível de conhecimento (Story 7.3)
+// ---------------------------------------------------------------------
+
+/// Campo `a` dos registros que a Central cria: o padrão de uma observação
+/// feita por um scout (`16<<16 | 2`), o mesmo do teste em jogo de 2026-10-06
+/// (o significado exato ainda é desconhecido, mas o jogo aceita).
+const A_PADRAO: i32 = (16 << 16) | 2;
+
+/// Um pedido de nível para um jogador.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PedidoNivel {
+    pub jogador: i32,
+    /// Nível desejado (0–198).
+    pub alvo: i32,
+    /// Nível que o jogo tinha ANTES de a Central mexer (se já registrado).
+    /// Com `Some`, o nível pode ser REBAIXADO, mas nunca abaixo disto nem
+    /// acima do que está agora; com `None`, o nível só sobe.
+    pub original: Option<i32>,
+}
+
+/// O que um lote de pedidos mudou.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumoNiveis {
+    pub criados: usize,
+    pub subiram: usize,
+    pub desceram: usize,
+    /// `(jogador, nível anterior)` dos que a Central mexeu pela PRIMEIRA vez
+    /// (pedido sem `original`); `0` = não havia registro. É o piso futuro.
+    pub primeiro_toque: Vec<(i32, i32)>,
+}
+
+impl ResumoNiveis {
+    pub fn mudou(&self) -> bool {
+        self.criados + self.subiram + self.desceram > 0
+    }
+}
+
+/// Aplica os pedidos ao array de conhecimento: atualiza o nível dos
+/// registros existentes, cria os que faltam (no lugar certo, o array é
+/// ordenado) e grava tudo de uma vez. Idempotente: sem mudança, nada é
+/// escrito. Compare-and-write: o array é relido logo antes de escrever e
+/// precisa ser o mesmo; os dados vão ANTES de o ponteiro de fim avançar; a
+/// releitura final precisa bater.
+fn aplicar_niveis_em(
+    mem: &(impl ByteSource + ByteSink),
+    local: &mut LocalNativo,
+    pedidos: &[PedidoNivel],
+    hoje: Date,
+) -> Result<ResumoNiveis, SaveRepoError> {
+    let esperado = local.conhecimento.ok_or(SaveRepoError::NaoLocalizado)?;
+    let atual_vetor = VetorVivo::ler(mem, esperado.dono)
+        .filter(|v| v.inicio == esperado.inicio && v.fim_capacidade == esperado.fim_capacidade)
+        .ok_or(SaveRepoError::NativoMudou)?;
+    let registros = ler_conhecimento_de(mem, &atual_vetor).ok_or(SaveRepoError::NativoMudou)?;
+    if !hoje.is_plausible() {
+        return Err(SaveRepoError::Interno(format!("data inválida para gravar o conhecimento: {}", hoje.0)));
+    }
+
+    let mut por_jogador: std::collections::BTreeMap<i32, RegistroConhecimento> = registros.iter().map(|r| (r.jogador, *r)).collect();
+    let mut resumo = ResumoNiveis::default();
+    for pedido in pedidos {
+        let alvo = pedido.alvo.clamp(0, NIVEL_COMPLETO);
+        if !(1..=MAX_ID_JOGADOR).contains(&pedido.jogador) {
+            continue;
+        }
+        match por_jogador.get_mut(&pedido.jogador) {
+            Some(registro) => {
+                let novo = match pedido.original {
+                    _ if alvo >= registro.nivel => alvo,
+                    Some(original) => alvo.max(original).min(registro.nivel),
+                    None => registro.nivel,
+                };
+                if novo != registro.nivel {
+                    if pedido.original.is_none() {
+                        resumo.primeiro_toque.push((pedido.jogador, registro.nivel));
+                    }
+                    if novo > registro.nivel {
+                        resumo.subiram += 1;
+                    } else {
+                        resumo.desceram += 1;
+                    }
+                    registro.nivel = novo;
+                    registro.data = hoje;
+                }
+            }
+            None if alvo > 0 => {
+                if pedido.original.is_none() {
+                    resumo.primeiro_toque.push((pedido.jogador, 0));
+                }
+                por_jogador.insert(pedido.jogador, RegistroConhecimento { jogador: pedido.jogador, a: A_PADRAO, nivel: alvo, data: hoje });
+                resumo.criados += 1;
+            }
+            None => {}
+        }
+    }
+    if !resumo.mudou() {
+        return Ok(resumo);
+    }
+
+    let novos: Vec<RegistroConhecimento> = por_jogador.into_values().collect();
+    let novo_fim = atual_vetor.inicio + novos.len() * REGISTRO_CONHECIMENTO;
+    if novo_fim > atual_vetor.fim_capacidade {
+        return Err(SaveRepoError::ConhecimentoCheio);
+    }
+    // o array não pode ter mudado entre a leitura e a escrita
+    if ler_conhecimento_de(mem, &atual_vetor).as_ref() != Some(&registros) {
+        return Err(SaveRepoError::NativoMudou);
+    }
+    let bytes: Vec<u8> = novos.iter().flat_map(|r| r.para_bytes()).collect();
+    if !mem.write(atual_vetor.inicio, &bytes) {
+        return Err(SaveRepoError::ProcessoInacessivel);
+    }
+    if novo_fim != atual_vetor.fim && !mem.write(atual_vetor.dono + 8, &(novo_fim as u64).to_le_bytes()) {
+        return Err(SaveRepoError::ProcessoInacessivel);
+    }
+    let relido = VetorVivo::ler(mem, atual_vetor.dono).ok_or(SaveRepoError::ProcessoInacessivel)?;
+    if relido.inicio != atual_vetor.inicio || relido.fim != novo_fim || ler_conhecimento_de(mem, &relido).as_ref() != Some(&novos) {
+        return Err(SaveRepoError::Interno("o conhecimento relido não é o escrito".into()));
+    }
+    local.conhecimento = Some(relido);
+    Ok(resumo)
+}
+
+/// Aplica um lote de níveis ao conhecimento do jogo (ver `aplicar_niveis_em`).
+pub fn write_native_knowledge(pedidos: &[PedidoNivel], hoje: Date) -> Result<ResumoNiveis, SaveRepoError> {
+    let mut cache = lock_cache();
+    let Some(local) = cache.as_mut() else { return Err(SaveRepoError::NaoLocalizado) };
+    let resultado = aplicar_niveis_em(&ProcessMemory, local, pedidos, hoje);
+    if matches!(resultado, Err(SaveRepoError::NativoMudou)) {
+        local.conhecimento = None;
+    }
+    resultado
+}
+
 /// Descarta o cache (outra carreira carregada).
 pub(super) fn esquecer() {
     *lock_cache() = None;
@@ -1034,5 +1169,115 @@ mod tests {
         assert_eq!(remover_em(&mem, &mut local, 268737), Ok(ResultadoLista::Removido));
         assert!(lista_do_jogo(&mem, &local).is_empty());
         assert_eq!(adicionar_em(&mem, &mut local, 12, 268737), Ok(ResultadoLista::Adicionado));
+    }
+
+    // -----------------------------------------------------------------
+    // Nível de conhecimento (Story 7.3)
+    // -----------------------------------------------------------------
+
+    const HOJE: Date = Date(20260715);
+
+    fn niveis(mem: &Mutavel, local: &LocalNativo) -> Vec<(i32, i32)> {
+        let vetor = local.conhecimento.expect("conhecimento");
+        let atual = VetorVivo::ler(mem, vetor.dono).expect("dono");
+        ler_conhecimento_de(mem, &atual).expect("lê").iter().map(|r| (r.jogador, r.nivel)).collect()
+    }
+
+    fn pedido(jogador: i32, alvo: i32, original: Option<i32>) -> PedidoNivel {
+        PedidoNivel { jogador, alvo, original }
+    }
+
+    #[test]
+    fn a_new_player_is_inserted_in_order_and_the_end_pointer_follows() {
+        let (mem, mut local) = com_dois_donos();
+        let r = aplicar_niveis_em(&mem, &mut local, &[pedido(71532, 140, None)], HOJE).expect("aplica");
+        assert_eq!((r.criados, r.subiram, r.desceram), (1, 0, 0));
+        assert_eq!(r.primeiro_toque, vec![(71532, 0)], "não havia registro: piso 0");
+        let lista = niveis(&mem, &local);
+        assert_eq!(lista.len(), 30);
+        assert!(lista.windows(2).all(|p| p[0].0 < p[1].0), "continua ordenado");
+        assert_eq!(lista.iter().find(|(j, _)| *j == 71532), Some(&(71532, 140)));
+        let vetor = local.conhecimento.expect("vetor");
+        assert_eq!(vetor.fim - vetor.inicio, 30 * REGISTRO_CONHECIMENTO);
+        // o registro criado é o do teste em jogo: a = 16<<16|2, data de hoje
+        let atual = VetorVivo::ler(&mem, vetor.dono).expect("dono");
+        let registros = ler_conhecimento_de(&mem, &atual).expect("lê");
+        let novo = registros.iter().find(|r| r.jogador == 71532).expect("novo");
+        assert_eq!((novo.a, novo.data), ((16 << 16) | 2, HOJE));
+    }
+
+    #[test]
+    fn raising_updates_the_level_and_date_and_never_lowers_without_an_original() {
+        let (mem, mut local) = com_dois_donos();
+        // 73885 está em 198 (real); 71178 em 28
+        let r = aplicar_niveis_em(&mem, &mut local, &[pedido(71178, 150, None), pedido(73885, 140, None)], HOJE).expect("aplica");
+        assert_eq!((r.criados, r.subiram, r.desceram), (0, 1, 0));
+        assert_eq!(r.primeiro_toque, vec![(71178, 28)], "o nível de antes é o piso futuro");
+        let lista = niveis(&mem, &local);
+        assert_eq!(lista.iter().find(|(j, _)| *j == 71178), Some(&(71178, 150)));
+        assert_eq!(lista.iter().find(|(j, _)| *j == 73885), Some(&(73885, 198)), "sem original, o 198 não desce");
+    }
+
+    #[test]
+    fn with_an_original_the_level_can_drop_but_never_below_it_or_above_the_current() {
+        let (mem, mut local) = com_dois_donos();
+        aplicar_niveis_em(&mem, &mut local, &[pedido(71178, 190, None)], HOJE).expect("sobe");
+        // desce até 150: ok; abaixo do original (28) não; acima do atual não
+        let r = aplicar_niveis_em(&mem, &mut local, &[pedido(71178, 150, Some(28))], Date(20260801)).expect("desce");
+        assert_eq!((r.subiram, r.desceram), (0, 1));
+        assert!(r.primeiro_toque.is_empty(), "já havia original");
+        assert_eq!(niveis(&mem, &local).iter().find(|(j, _)| *j == 71178), Some(&(71178, 150)));
+        aplicar_niveis_em(&mem, &mut local, &[pedido(71178, 0, Some(28))], Date(20260802)).expect("vence");
+        assert_eq!(niveis(&mem, &local).iter().find(|(j, _)| *j == 71178), Some(&(71178, 28)), "piso: o que o jogo tinha");
+        // original MAIOR que o atual: não sobe pelo caminho de descer
+        let r = aplicar_niveis_em(&mem, &mut local, &[pedido(71178, 10, Some(100))], Date(20260803)).expect("nada");
+        assert!(!r.mudou());
+        assert_eq!(niveis(&mem, &local).iter().find(|(j, _)| *j == 71178), Some(&(71178, 28)));
+    }
+
+    #[test]
+    fn a_batch_with_no_change_writes_nothing() {
+        let (mem, mut local) = com_dois_donos();
+        let antes = mem.0.borrow().clone();
+        // 73885 já em 198; 246606 também; pedido 0 de quem nem existe
+        let r = aplicar_niveis_em(&mem, &mut local, &[pedido(73885, 150, None), pedido(246606, 198, None), pedido(99999, 0, None)], HOJE)
+            .expect("aplica");
+        assert!(!r.mudou() && r.primeiro_toque.is_empty());
+        assert_eq!(*mem.0.borrow(), antes);
+    }
+
+    #[test]
+    fn a_big_batch_mixes_updates_and_inserts_in_one_write() {
+        let (mem, mut local) = com_dois_donos();
+        let mut pedidos: Vec<PedidoNivel> = (0..50).map(|i| pedido(100_000 + i * 7, 140, None)).collect();
+        pedidos.push(pedido(40205, 190, None)); // existente
+        let r = aplicar_niveis_em(&mem, &mut local, &pedidos, HOJE).expect("aplica");
+        assert_eq!((r.criados, r.subiram), (50, 1));
+        let lista = niveis(&mem, &local);
+        assert_eq!(lista.len(), 29 + 50);
+        assert!(lista.windows(2).all(|p| p[0].0 < p[1].0));
+        // repetir é idempotente
+        let antes = mem.0.borrow().clone();
+        assert!(!aplicar_niveis_em(&mem, &mut local, &pedidos, HOJE).expect("de novo").mudou());
+        assert_eq!(*mem.0.borrow(), antes);
+    }
+
+    #[test]
+    fn a_full_knowledge_array_or_a_moved_owner_refuses_without_writing() {
+        // sem capacidade: encolhe a capacidade do dono para exatamente os 29 registros
+        let (mem, mut local) = com_dois_donos();
+        let vetor = local.conhecimento.expect("vetor");
+        mem.write(vetor.dono + 16, &(vetor.fim as u64).to_le_bytes());
+        local.conhecimento = VetorVivo::ler(&mem, vetor.dono);
+        let antes = mem.0.borrow().clone();
+        assert_eq!(aplicar_niveis_em(&mem, &mut local, &[pedido(71532, 140, None)], HOJE), Err(SaveRepoError::ConhecimentoCheio));
+        assert_eq!(*mem.0.borrow(), antes);
+
+        // dono se mexeu
+        let (mem, mut local) = com_dois_donos();
+        mem.write(DONO_C, &[0u8; 24]);
+        let antes = mem.0.borrow().clone();
+        assert_eq!(aplicar_niveis_em(&mem, &mut local, &[pedido(71532, 140, None)], HOJE), Err(SaveRepoError::NativoMudou));
+        assert_eq!(*mem.0.borrow(), antes);
     }
 }

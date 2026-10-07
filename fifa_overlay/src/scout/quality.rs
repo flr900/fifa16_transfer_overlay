@@ -1234,6 +1234,39 @@ pub fn observacao(fracao: f32, indice: usize, alvo: usize, concluida: bool) -> O
 }
 
 // ---------------------------------------------------------------------
+// Nível de conhecimento no jogo (Épico 7, Story 7.3)
+// ---------------------------------------------------------------------
+//
+// O FIFA guarda, por jogador, um nível de conhecimento de 0 a 198 (ver
+// `save_repo::nativo`). Já visto em jogo (2026-10-06): qualquer nível acima
+// de ~27 mostra estimativas de atributos; a partir de 140 o jogo mostra a
+// taxa de transferência e o salário e refina as estimativas; 198 = tudo.
+
+/// Nível em que o jogo passa a mostrar valor e salário.
+pub const NIVEL_JOGO_VALOR: i32 = 140;
+/// Jogador totalmente conhecido pelo jogo.
+pub const NIVEL_JOGO_COMPLETO: i32 = 198;
+
+/// Nível de conhecimento que o jogo deve ter de um jogador, a partir do que
+/// a Central sabe dele agora:
+/// - observação VENCIDA: volta ao que o jogo tinha antes (`original`);
+/// - Missão ainda rodando (o Relatório é parcial): só valor e salário
+///   (`NIVEL_JOGO_VALOR`, "o valor anterior ao completo");
+/// - Missão concluída: `198 − 4 × precisão (±)`, nunca abaixo de 140 — a
+///   precisão já inclui o envelhecimento e o acompanhamento de um
+///   Generalista, então o nível desce com o tempo e sobe até 198 quando o
+///   valor fica exato (Alta ±1 ≈ 194; Média ±5 ≈ 178; Baixa ±10 ≈ 158).
+pub fn nivel_no_jogo(precisao: u8, parcial: bool, vencido: bool, original: i32) -> i32 {
+    if vencido {
+        return original.clamp(0, NIVEL_JOGO_COMPLETO);
+    }
+    if parcial {
+        return NIVEL_JOGO_VALOR;
+    }
+    (NIVEL_JOGO_COMPLETO - 4 * i32::from(precisao)).clamp(NIVEL_JOGO_VALOR, NIVEL_JOGO_COMPLETO)
+}
+
+// ---------------------------------------------------------------------
 // Relatório parcial e Missão contínua (Story 2.10)
 // ---------------------------------------------------------------------
 
@@ -2549,6 +2582,22 @@ mod tests {
         let com_dominante = ordem_de_observacao(Funcao::MeioCampo, &[Atributo::Drible], Some(PosicaoAlvo::Volante));
         assert_eq!(com_dominante.first(), Some(&Atributo::Drible));
         assert_eq!(relevancia(TipoMissao::Tatica, 70, 80, &[80, 90]), 85, "média dos critérios de perfil");
+    }
+
+    #[test]
+    fn the_game_level_follows_precision_and_never_drops_below_the_value_level_until_expired() {
+        assert_eq!(nivel_no_jogo(0, false, false, 0), 198, "valor exato = jogador completo");
+        assert_eq!(nivel_no_jogo(1, false, false, 0), 194, "Alta");
+        assert_eq!(nivel_no_jogo(5, false, false, 0), 178, "Média");
+        assert_eq!(nivel_no_jogo(10, false, false, 0), 158, "Baixa");
+        assert_eq!(nivel_no_jogo(14, false, false, 0), 142, "análise nova");
+        assert_eq!(nivel_no_jogo(22, false, false, 0), 140, "piso: o jogo continua mostrando valor e salário");
+        assert_eq!(nivel_no_jogo(2, true, false, 0), 140, "Missão ainda rodando: valor anterior ao completo");
+        assert_eq!(nivel_no_jogo(2, false, true, 0), 0, "vencido sem nada antes: volta a nada");
+        assert_eq!(nivel_no_jogo(2, false, true, 77), 77, "vencido: volta ao que o jogo tinha");
+        // mais precisão nunca dá nível menor
+        let niveis: Vec<i32> = (0..=30u8).map(|p| nivel_no_jogo(p, false, false, 0)).collect();
+        assert!(niveis.windows(2).all(|par| par[0] >= par[1]));
     }
 
     #[test]

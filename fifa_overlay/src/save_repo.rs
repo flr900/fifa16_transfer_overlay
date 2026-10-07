@@ -113,6 +113,8 @@ pub enum SaveRepoError {
     OrcamentoMudou(i32),
     /// A lista de escolhidos nativa está cheia (100 jogadores).
     ListaNativaCheia,
+    /// O array de conhecimento do jogo não tem espaço para mais registros.
+    ConhecimentoCheio,
     /// O scout nativo não está mais como foi localizado (a estrutura se
     /// moveu ou o conteúdo mudou): nada foi escrito.
     NativoMudou,
@@ -131,6 +133,7 @@ impl fmt::Display for SaveRepoError {
             SaveRepoError::NaoLocalizado => write!(f, "Carreira ainda não localizada."),
             SaveRepoError::OrcamentoMudou(atual) => write!(f, "O orçamento mudou para {atual}."),
             SaveRepoError::ListaNativaCheia => write!(f, "A lista de escolhidos do jogo está cheia."),
+            SaveRepoError::ConhecimentoCheio => write!(f, "O conhecimento do jogo está cheio."),
             SaveRepoError::NativoMudou => write!(f, "O scout do jogo mudou; nada foi escrito."),
             SaveRepoError::Interno(msg) => write!(f, "Erro interno: {msg}"),
         }
