@@ -1973,19 +1973,17 @@ fn lista_do_jogo() -> Vec<(u32, Option<i32>)> {
         .collect()
 }
 
-/// Os jogadores que o jogo conhece por inteiro (nível de conhecimento no
-/// máximo: o relatório completo do FIFA). Vazia com a sincronização
-/// desligada ou o jogo não localizado.
-fn conhecimento_completo() -> Vec<u32> {
+/// O nível de conhecimento (0–198) que o jogo tem de cada jogador. Vazio com
+/// a sincronização desligada ou o jogo não localizado.
+fn conhecimento_do_jogo() -> std::collections::HashMap<u32, i32> {
     use crate::save_repo::nativo;
     if !nativo::sincronizacao_ligada() {
-        return Vec::new();
+        return std::collections::HashMap::new();
     }
     nativo::read_native_knowledge()
         .unwrap_or_default()
         .iter()
-        .filter(|r| r.nivel >= nativo::NIVEL_COMPLETO)
-        .filter_map(|r| u32::try_from(r.jogador).ok())
+        .filter_map(|r| Some((u32::try_from(r.jogador).ok()?, r.nivel)))
         .collect()
 }
 
@@ -2276,9 +2274,9 @@ pub struct ScoutState {
     mapeamento_pendente: bool,
     /// Pediram outro mapeamento enquanto um rodava.
     remapear: bool,
-    /// Jogadores que o jogo já conhecia por inteiro na última leitura (para
-    /// só refazer o mapeamento quando aparece um novo).
-    completos_vistos: std::collections::HashSet<u32>,
+    /// O conhecimento do jogo sobre quem a Central conhece, na última leitura
+    /// (para só refazer o mapeamento quando algum nível muda).
+    niveis_vistos: std::collections::HashMap<u32, i32>,
 }
 
 /// Nível aberto no filtro geográfico: a lista de continentes (o filtro
@@ -2368,7 +2366,7 @@ impl ScoutState {
             tarefa_mapeamento: AsyncTask::new(),
             mapeamento_pendente: false,
             remapear: false,
-            completos_vistos: std::collections::HashSet::new(),
+            niveis_vistos: std::collections::HashMap::new(),
         }
     }
 
@@ -3170,10 +3168,23 @@ impl ScoutState {
             return;
         }
         let lista = lista_do_jogo();
-        let completos = conhecimento_completo();
-        let conhecidos: std::collections::HashSet<u32> =
-            estado.ler(|d| d.escolhidos.iter().map(|e| e.jogador.player_id).chain(d.importacao_ignorada.iter().copied()).collect());
-        let novidade = lista.iter().any(|(id, _)| !conhecidos.contains(id)) || completos.iter().any(|id| !self.completos_vistos.contains(id));
+        // quem a Central conhece: Escolhidos, Relatórios e o que já mapeou
+        let (conhecidos, na_central): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) = estado.ler(|d| {
+            let escolhidos: std::collections::HashSet<u32> =
+                d.escolhidos.iter().map(|e| e.jogador.player_id).chain(d.importacao_ignorada.iter().copied()).collect();
+            let todos = escolhidos
+                .iter()
+                .copied()
+                .chain(d.mapeados.iter().map(|m| m.jogador.player_id))
+                .chain(d.relatorios.iter().flat_map(|r| r.jogadores.iter().chain(r.da_base.iter())).map(|j| j.player_id))
+                .collect();
+            (escolhidos, todos)
+        });
+        // o conhecimento do jogo sobre eles: se algum nível mudou (um olheiro
+        // do FIFA observou, ou a Central subiu o dela), o mapeamento roda
+        let niveis: std::collections::HashMap<u32, i32> =
+            conhecimento_do_jogo().into_iter().filter(|(id, _)| na_central.contains(id)).collect();
+        let novidade = lista.iter().any(|(id, _)| !conhecidos.contains(id)) || niveis.iter().any(|(id, n)| self.niveis_vistos.get(id) != Some(n));
         if so_com_novidade && !novidade {
             return;
         }
@@ -3182,10 +3193,10 @@ impl ScoutState {
             return;
         }
         let fonte = Arc::clone(&self.fonte);
-        self.completos_vistos = completos.iter().copied().collect();
+        self.niveis_vistos = niveis.clone();
         self.mapeamento_pendente = self.tarefa_mapeamento.start(move || {
             let pool = fonte.read_players_for_mapping()?;
-            Ok((id_save, hoje, mapeamento::montar(&pool, hoje, &lista, &completos, &conhecidos)))
+            Ok((id_save, hoje, mapeamento::montar(&pool, hoje, &lista, &niveis, &conhecidos)))
         });
     }
 
@@ -3221,7 +3232,7 @@ impl ScoutState {
                 self.mapeamento_pendente = false;
                 self.tarefa_mapeamento.reset();
                 self.remapear = false;
-                self.completos_vistos.clear();
+                self.niveis_vistos.clear();
                 tracing::warn!("[scout::state] Mapeamento falhou: {err:?}");
             }
         }
