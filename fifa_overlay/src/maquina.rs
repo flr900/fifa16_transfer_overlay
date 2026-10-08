@@ -6,10 +6,12 @@
 //! atual" ou de "ação pendente" (que um dia dê para escrever, como o orçamento), este
 //! módulo:
 //!
-//! 1. **acha o objeto**: varre o heap pelo valor da vtable da classe
-//!    (`base + 0x3068590`), em blocos, numa thread própria. Cada achado é CONFERIDO: o
-//!    token da ação de compra, em `+0xe98`, tem de ter a vtable das Actions
-//!    (`base + 0x30A8BF8`), senão é só uma cópia solta da vtable;
+//! 1. **acha o objeto**: varre o heap, em blocos e numa thread própria, pelo
+//!    PONTEIRO DO NOME da Action de compra (`[Action+8]` aponta para a string
+//!    `ActionEnterTransferOfferActionPopup`, que mora na imagem). Cada Action tem a
+//!    vtable sobrescrita pela do seu tipo logo depois de construída, então a vtable
+//!    não serve de prova; os nomes dos vizinhos (empréstimo e negociação de
+//!    contrato) servem;
 //! 2. **observa**: com o gravador ligado, lê os primeiros 0x400 bytes do objeto a cada
 //!    frame e registra no log (`[maquina]`) o que muda, com o nome da ação quando um
 //!    valor aponta para um token.
@@ -25,12 +27,17 @@ use std::time::{Duration, Instant};
 use crate::memscan::{enumerate_private_committed_regions, read_region_bytes, read_region_into, Region};
 use crate::pointer_scan::enumerate_modules;
 
-/// RVA da vtable da máquina de estados do modo carreira (build 16.0.2904053).
+/// RVA da vtable da máquina de estados do modo carreira (build 16.0.2904053); só
+/// informativa (a classe derivada pode sobrescrevê-la).
 const RVA_VTABLE_MAQUINA: usize = 0x306_8590;
-/// RVA da vtable das Actions (tokens nomeados da máquina).
-const RVA_VTABLE_ACAO: usize = 0x30A_8BF8;
-/// Onde fica o token `ActionEnterTransferOfferActionPopup` no objeto.
+/// RVAs das strings com o nome das Actions (ficam na imagem, sem ASLR).
+const RVA_NOME_COMPRA: usize = 0x304_B0B0; // ActionEnterTransferOfferActionPopup
+const RVA_NOME_EMPRESTIMO: usize = 0x304_B0E8; // ActionEnterLoanOfferActionPopup
+const RVA_NOME_NEGOCIACAO: usize = 0x304_B118; // ActionEnterPlayerContractNegotiationFromActionPopup
+/// Onde ficam essas Actions no objeto (o nome é o 2º campo: `+8`).
 const DESLOC_ACAO_COMPRA: usize = 0xE98;
+const DESLOC_ACAO_EMPRESTIMO: usize = 0xEB0;
+const DESLOC_ACAO_NEGOCIACAO: usize = 0xEC8;
 /// As Actions ficam no objeto entre estes deslocamentos (a grade não é uniforme: a
 /// conferência é a vtable da Action no endereço, não o alinhamento).
 const INICIO_DAS_ACOES: usize = 0x98;
@@ -99,15 +106,11 @@ fn ler_texto(endereco: usize) -> Option<String> {
     (texto.len() >= 4 && texto.iter().all(|b| (0x20..=0x7E).contains(b))).then(|| String::from_utf8_lossy(texto).into_owned())
 }
 
-/// O nome de uma Action, se o endereço for mesmo uma (`[acao]` é a vtable das Actions;
-/// `[acao + 8]` aponta para o texto).
-fn nome_da_acao(endereco: usize, vtable_acao: u64) -> Option<String> {
-    if ler_u64(endereco)? != vtable_acao {
-        return None;
-    }
+/// O nome de uma Action (`[acao + 8]` aponta para o texto, que começa com "Action").
+fn nome_da_acao(endereco: usize) -> Option<String> {
     let bytes = read_region_bytes(&Region { base: endereco.checked_add(8)?, size: 8 })?;
     let ponteiro = usize::try_from(u64::from_le_bytes(<[u8; 8]>::try_from(bytes.get(..8)?).ok()?)).ok()?;
-    ler_texto(ponteiro)
+    ler_texto(ponteiro).filter(|t| t.starts_with("Action"))
 }
 
 fn ler_u64(endereco: usize) -> Option<u64> {
@@ -115,25 +118,25 @@ fn ler_u64(endereco: usize) -> Option<u64> {
     Some(u64::from_le_bytes(<[u8; 8]>::try_from(b.get(..8)?).ok()?))
 }
 
-/// Varre o heap pela vtable e devolve os objetos que passam na conferência.
+/// Varre o heap pelo ponteiro do nome da Action de compra e devolve os objetos que
+/// passam na conferência (os nomes de empréstimo e de negociação nos lugares certos).
 fn procurar(base_exe: usize) -> Vec<usize> {
-    let vtable = (base_exe + RVA_VTABLE_MAQUINA) as u64;
-    let vtable_acao = (base_exe + RVA_VTABLE_ACAO) as u64;
+    let nome_compra = (base_exe + RVA_NOME_COMPRA) as u64;
     let mut buffer = vec![0u8; TAMANHO_DO_BLOCO];
     let faixa_do_buffer = buffer.as_ptr() as usize..buffer.as_ptr() as usize + buffer.len();
     let mut candidatos = Vec::new();
-    let mut regioes_lidas = 0usize;
+    let mut blocos_lidos = 0usize;
     for regiao in enumerate_private_committed_regions() {
         let mut inicio = 0;
         while inicio < regiao.size && candidatos.len() < MAX_ACHADOS {
             let tamanho = TAMANHO_DO_BLOCO.min(regiao.size - inicio);
             let bloco = Region { base: regiao.base + inicio, size: tamanho };
             if let Some(lido) = read_region_into(&bloco, &mut buffer) {
-                regioes_lidas += 1;
-                for pos in achar_valor_alinhado(&buffer[..lido], vtable) {
-                    let endereco = bloco.base + pos;
-                    if !faixa_do_buffer.contains(&endereco) {
-                        candidatos.push(endereco);
+                blocos_lidos += 1;
+                for pos in achar_valor_alinhado(&buffer[..lido], nome_compra) {
+                    let acao = bloco.base + pos - 8;
+                    if !faixa_do_buffer.contains(&(bloco.base + pos)) && acao >= DESLOC_ACAO_COMPRA {
+                        candidatos.push(acao - DESLOC_ACAO_COMPRA);
                     }
                 }
             }
@@ -141,13 +144,21 @@ fn procurar(base_exe: usize) -> Vec<usize> {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
-    tracing::info!("[maquina] Varredura: {regioes_lidas} bloco(s) lidos, {} candidato(s) com a vtable.", candidatos.len());
+    tracing::info!("[maquina] Varredura: {blocos_lidos} bloco(s) lidos, {} candidato(s) com o nome da ação de compra.", candidatos.len());
     candidatos
         .into_iter()
         .filter(|c| {
-            let conferido = ler_u64(c + DESLOC_ACAO_COMPRA) == Some(vtable_acao);
-            tracing::info!("[maquina] Candidato 0x{c:X}: {}.", if conferido { "confere (token de compra em +0xe98)" } else { "não confere (cópia solta)" });
-            conferido
+            let emprestimo = ler_u64(c + DESLOC_ACAO_EMPRESTIMO + 8) == Some((base_exe + RVA_NOME_EMPRESTIMO) as u64);
+            let negociacao = ler_u64(c + DESLOC_ACAO_NEGOCIACAO + 8) == Some((base_exe + RVA_NOME_NEGOCIACAO) as u64);
+            let vtable = ler_u64(*c);
+            tracing::info!(
+                "[maquina] Candidato 0x{c:X}: empréstimo {}, negociação {}, vtable {:x?} (esperada 0x{:X}).",
+                if emprestimo { "ok" } else { "não" },
+                if negociacao { "ok" } else { "não" },
+                vtable,
+                base_exe + RVA_VTABLE_MAQUINA
+            );
+            emprestimo && negociacao
         })
         .collect()
 }
@@ -237,8 +248,7 @@ impl Maquina {
         for (i, c) in self.anterior.chunks_exact(8).enumerate().take(0x100 / 8) {
             let v = u64::from_le_bytes(<[u8; 8]>::try_from(c).unwrap_or([0; 8]));
             if v != 0 {
-                let vt = (self.base_exe + RVA_VTABLE_ACAO) as u64;
-                tracing::info!("[maquina] inicial +0x{:X}: 0x{v:X}{}", i * 8, descrever(v, endereco, self.base_exe, self.tamanho_imagem, |a| nome_da_acao(a, vt)));
+                tracing::info!("[maquina] inicial +0x{:X}: 0x{v:X}{}", i * 8, descrever(v, endereco, self.base_exe, self.tamanho_imagem, nome_da_acao));
             }
         }
     }
@@ -255,7 +265,6 @@ impl Maquina {
             self.anterior = agora;
             return;
         }
-        let vt = (self.base_exe + RVA_VTABLE_ACAO) as u64;
         let mut linhas = 0;
         for (desloc, antes, depois) in palavras_que_mudaram(&self.anterior, &agora) {
             let n = self.registros.entry(desloc).or_insert(0);
@@ -266,7 +275,7 @@ impl Maquina {
             linhas += 1;
             tracing::info!(
                 "[maquina] t={ms}ms +0x{desloc:X}: 0x{antes:X} -> 0x{depois:X}{}",
-                descrever(depois, endereco, self.base_exe, self.tamanho_imagem, |a| nome_da_acao(a, vt))
+                descrever(depois, endereco, self.base_exe, self.tamanho_imagem, nome_da_acao)
             );
         }
         self.anterior = agora;
