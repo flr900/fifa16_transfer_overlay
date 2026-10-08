@@ -52,6 +52,14 @@ const MAX_ACHADOS: usize = 64;
 const MAX_REGISTROS_POR_CAMPO: u32 = 40;
 const MAX_LINHAS_POR_QUADRO: usize = 40;
 const INTERVALO_CHECAGEM: Duration = Duration::from_secs(1);
+/// O cabeçalho do objeto (`+0x10` marca "há ação postada" e `+0x18` aponta para a
+/// mensagem) vive ~28 ms: um amostrador próprio o lê a cada milissegundo.
+const TAMANHO_DO_CABECALHO: usize = 0x40;
+/// Campo que alterna `0x1300 <-> 0x1301` a cada `B` (estado de carregamento da tela).
+const DESLOC_ESTADO_DA_TELA: usize = 0x13A0;
+/// Quanto da mensagem apontada por `+0x18` se despeja.
+const TAMANHO_DA_MENSAGEM: usize = 0x80;
+const MAX_LINHAS_DO_AMOSTRADOR: u32 = 400;
 
 /// Posições (múltiplas de 8) de `valor` num bloco de bytes.
 fn achar_valor_alinhado(bloco: &[u8], valor: u64) -> Vec<usize> {
@@ -164,6 +172,68 @@ fn procurar(base_exe: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Despeja `TAMANHO_DA_MENSAGEM` bytes de uma mensagem apontada por um campo, palavra
+/// por palavra, com o que cada valor é (ação, imagem, texto).
+fn despejar_mensagem(endereco: usize, instancia: usize, base_exe: usize, tamanho_imagem: usize) -> Vec<String> {
+    let Some(bytes) = read_region_bytes(&Region { base: endereco, size: TAMANHO_DA_MENSAGEM }) else {
+        return vec![format!("  (mensagem em 0x{endereco:X} ilegível)")];
+    };
+    bytes
+        .chunks_exact(8)
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let v = u64::from_le_bytes(<[u8; 8]>::try_from(c).ok()?);
+            if v == 0 {
+                return None;
+            }
+            let ponteiro_para_texto = usize::try_from(v).ok().and_then(ler_texto).map(|t| format!("  ; texto \"{t}\"")).unwrap_or_default();
+            Some(format!(
+                "  msg+0x{:X}: 0x{v:X}{}{}",
+                i * 8,
+                descrever(v, instancia, base_exe, tamanho_imagem, nome_da_acao),
+                ponteiro_para_texto
+            ))
+        })
+        .collect()
+}
+
+/// O amostrador: lê o cabeçalho e o campo de estado da tela a cada milissegundo e
+/// registra cada mudança, com o conteúdo da mensagem postada em `+0x18`.
+fn amostrar(instancia: usize, base_exe: usize, tamanho_imagem: usize, inicio: Instant, parar: Arc<AtomicBool>) {
+    let ler_cab = || read_region_bytes(&Region { base: instancia, size: TAMANHO_DO_CABECALHO });
+    let (Some(mut anterior), Some(mut estado_anterior)) = (ler_cab(), ler_u64(instancia + DESLOC_ESTADO_DA_TELA)) else { return };
+    let mut linhas = 0u32;
+    while !parar.load(Ordering::Relaxed) && linhas < MAX_LINHAS_DO_AMOSTRADOR {
+        std::thread::sleep(Duration::from_millis(1));
+        let (Some(agora), Some(estado)) = (ler_cab(), ler_u64(instancia + DESLOC_ESTADO_DA_TELA)) else {
+            tracing::warn!("[amostrador] O objeto deixou de ser legível; encerrado.");
+            return;
+        };
+        let ms = inicio.elapsed().as_millis();
+        for (desloc, antes, depois) in palavras_que_mudaram(&anterior, &agora) {
+            linhas += 1;
+            tracing::info!(
+                "[amostrador] t={ms}ms +0x{desloc:X}: 0x{antes:X} -> 0x{depois:X}{}",
+                descrever(depois, instancia, base_exe, tamanho_imagem, nome_da_acao)
+            );
+            // a mensagem postada: lê o que o campo aponta enquanto ainda vale
+            if desloc == 0x18 && depois != 0 {
+                if let Ok(endereco) = usize::try_from(depois) {
+                    for linha in despejar_mensagem(endereco, instancia, base_exe, tamanho_imagem) {
+                        tracing::info!("[amostrador]{linha}");
+                    }
+                }
+            }
+        }
+        if estado != estado_anterior {
+            linhas += 1;
+            tracing::info!("[amostrador] t={ms}ms +0x{DESLOC_ESTADO_DA_TELA:X}: 0x{estado_anterior:X} -> 0x{estado:X}");
+            estado_anterior = estado;
+        }
+        anterior = agora;
+    }
+}
+
 pub struct Maquina {
     pedido: PathBuf,
     proxima_checagem: Instant,
@@ -174,6 +244,8 @@ pub struct Maquina {
     base_exe: usize,
     tamanho_imagem: usize,
     registros: HashMap<usize, u32>,
+    /// Pede ao amostrador rápido que pare (ele roda enquanto o gravador está ligado).
+    parar_amostrador: Option<Arc<AtomicBool>>,
 }
 
 impl Maquina {
@@ -188,6 +260,14 @@ impl Maquina {
             base_exe: 0,
             tamanho_imagem: 0,
             registros: HashMap::new(),
+            parar_amostrador: None,
+        }
+    }
+
+    /// O gravador desligou: o amostrador rápido para.
+    pub fn parar(&mut self) {
+        if let Some(parar) = self.parar_amostrador.take() {
+            parar.store(true, Ordering::Relaxed);
         }
     }
 
@@ -270,8 +350,19 @@ impl Maquina {
             self.anterior = agora;
             return;
         }
+        // o amostrador rápido cuida do cabeçalho e do estado da tela
+        if self.parar_amostrador.is_none() {
+            let parar = Arc::new(AtomicBool::new(false));
+            self.parar_amostrador = Some(Arc::clone(&parar));
+            let inicio = Instant::now().checked_sub(Duration::from_millis(u64::try_from(ms).unwrap_or(0))).unwrap_or_else(Instant::now);
+            let (base, tamanho) = (self.base_exe, self.tamanho_imagem);
+            let _ = std::thread::Builder::new().name("amostrador".to_string()).spawn(move || amostrar(endereco, base, tamanho, inicio, parar));
+        }
         let mut linhas = 0;
         for (desloc, antes, depois) in palavras_que_mudaram(&self.anterior, &agora) {
+            if desloc < TAMANHO_DO_CABECALHO || desloc == DESLOC_ESTADO_DA_TELA {
+                continue;
+            }
             let n = self.registros.entry(desloc).or_insert(0);
             *n += 1;
             if *n > MAX_REGISTROS_POR_CAMPO || linhas >= MAX_LINHAS_POR_QUADRO {

@@ -39,7 +39,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v35 — Observador da máquina de estados, objeto inteiro (desenvolvimento)";
+const BUILD_TAG: &str = "7.6-v36 — Amostrador rápido da caixa de correio da máquina (desenvolvimento)";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.
@@ -164,6 +164,8 @@ impl ImguiRenderLoop for FifaOverlay {
         self.gravador.registrar(self.ultimo_controle, foco.as_ref().map(|(id, nome)| (*id, nome.as_str())));
         if let Some(desde) = self.gravador.ligado_desde() {
             self.maquina.observar(desde.elapsed().as_millis());
+        } else {
+            self.maquina.parar();
         }
         let navegacao = self.ultimo_controle.filter(|_| aberto).map(gamepad::para_navegacao);
         gamepad::alimentar_imgui(io, navegacao);
