@@ -77,7 +77,6 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             if componentes::botao(ui, fonts, "Fechar", EstiloBotao::Primario, true) {
                 acao = Acao::Fechar;
             }
-            ui.set_item_default_focus();
         });
     acao
 }

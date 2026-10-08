@@ -263,6 +263,13 @@ pub fn focado_pelo_controle(ui: &Ui) -> bool {
     ui.is_item_focused() && ui.io().nav_visible
 }
 
+/// O próximo item navegável que for desenhado recebe o foco do controle
+/// (botões não são "clicados": só focados).
+pub fn focar_proximo_item() {
+    // SAFETY: chamada simples do ImGui 1.89, com um quadro em andamento.
+    unsafe { imgui::sys::igSetKeyboardFocusHere(0) };
+}
+
 /// Seletor de dois ou mais botões (ex.: Tabular / Cards): o escolhido em
 /// roxo. Só muda com o clique (ou o A em cima do botão): passar o foco por
 /// cima não escolhe nada (2026-10-08, pedido do Felipe para as telas de

@@ -282,9 +282,10 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         .filter_map(|c| c.missao.as_ref().map(|m| (c.olheiro.id, state.regiao_da_missao(&m.filtros))))
         .collect();
     let pediu_opcoes = state.opcoes_pedidas();
+    let foco_inicial = state.tomar_foco_no_principal();
     com_nacoes(state, |nacoes| match densidade {
-        Densidade::Cards => cards(ui, fonts, &contratados, nacoes, &regioes, pediu_opcoes),
-        Densidade::Tabular => tabela(ui, fonts, &contratados, pediu_opcoes),
+        Densidade::Cards => cards(ui, fonts, &contratados, nacoes, &regioes, pediu_opcoes, foco_inicial),
+        Densidade::Tabular => tabela(ui, fonts, &contratados, pediu_opcoes, foco_inicial),
     })
 }
 
@@ -326,6 +327,7 @@ fn cards(
     nacoes: &Nacoes<'_>,
     regioes: &std::collections::HashMap<Uuid, String>,
     pediu_opcoes: bool,
+    foco_inicial: bool,
 ) -> Acao {
     let mut acao = Acao::Nenhuma;
     let [largura_area, altura_area] = ui.content_region_avail();
@@ -344,6 +346,9 @@ fn cards(
             for indice in 0..total {
                 if indice > 0 {
                     ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+                }
+                if indice == 0 && foco_inicial {
+                    componentes::focar_proximo_item();
                 }
                 let resultado = if indice == 0 {
                     let r = olheiro_card::desenhar_novo(ui, fonts, "contratar", dim, ROTULO_CONTRATAR, DETALHE_CONTRATAR);
@@ -394,7 +399,7 @@ fn cor_status(c: &OlheiroContratado) -> [f32; 4] {
 }
 
 /// Visão Tabular: uma linha por Olheiro e, por último, "Contratar Olheiro".
-fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], pediu_opcoes: bool) -> Acao {
+fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], pediu_opcoes: bool, foco_inicial: bool) -> Acao {
     let mut acao = Acao::Nenhuma;
     let flags = TableFlags::ROW_BG | TableFlags::BORDERS_INNER_H | TableFlags::SIZING_FIXED_FIT | TableFlags::NO_SAVED_SETTINGS;
     let _c1 = ui.push_style_color(StyleColor::TableRowBg, theme::TRANSPARENTE);
@@ -422,9 +427,13 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], ped
             ui.table_header(nome);
         }
     });
-    for c in contratados {
+    for (indice, c) in contratados.iter().enumerate() {
         let _id = ui.push_id(c.olheiro.id.to_string());
         ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
+        if indice == 0 && foco_inicial {
+            ui.table_set_column_index(0);
+            componentes::focar_proximo_item();
+        }
         let (ativou, focada) = linha_selecionavel(ui);
         if ativou {
             acao = Acao::Ativar(c.olheiro.id);

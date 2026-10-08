@@ -10,6 +10,9 @@
 //!   próprio FIFA entra nos Escolhidos e na Base da Central, com o que o
 //!   jogo já sabe dele (o nível de conhecimento decide a precisão). Quem o
 //!   técnico tirou dos Escolhidos da Central não volta sozinho.
+//! - **Relatórios completos do jogo.** Quem o jogo já conhece por inteiro
+//!   (conhecimento no máximo, 198) fica completo e exato também na Central:
+//!   os Escolhidos dele são atualizados e ele entra na Base.
 //!
 //! A leitura (`montar`) e a aplicação (`aplicar`) são puras e testáveis; o
 //! `ScoutState` só liga uma à outra, em background.
@@ -53,12 +56,15 @@ pub struct Mapeamento {
     /// Jogadores da lista do jogo que a Central ainda não conhece, com a
     /// precisão (±) que o conhecimento do jogo dá.
     pub da_lista: Vec<(JogadorEncontrado, u8)>,
+    /// Quem o jogo conhece por inteiro, como está agora (exato).
+    pub completos: Vec<JogadorEncontrado>,
 }
 
 /// Lê o elenco e a lista do jogo no `pool`. `lista`: `(jogador, nível de
-/// conhecimento)` de cada um na lista do jogo; `conhecidos`: quem a Central
-/// já tem nos Escolhidos ou não quer de volta.
-pub fn montar(pool: &PlayerPool, hoje: Date, lista: &[(u32, Option<i32>)], conhecidos: &HashSet<u32>) -> Mapeamento {
+/// conhecimento)` de cada um na lista do jogo; `completos`: quem o jogo
+/// conhece por inteiro; `conhecidos`: quem a Central já tem nos Escolhidos
+/// ou não quer de volta.
+pub fn montar(pool: &PlayerPool, hoje: Date, lista: &[(u32, Option<i32>)], completos: &[u32], conhecidos: &HashSet<u32>) -> Mapeamento {
     let do_clube = |j: &crate::save_repo::PlayerRaw| !j.resto_do_mundo && j.clube_id.map(i64::from) == Some(pool.clube_usuario);
     let todos = Atributo::TODOS.len();
     let elenco = pool
@@ -76,7 +82,12 @@ pub fn montar(pool: &PlayerPool, hoje: Date, lista: &[(u32, Option<i32>)], conhe
             Some((search::fotografar(raw, pool, hoje, precisao, atributos), precisao))
         })
         .collect();
-    Mapeamento { clube: pool.clube_usuario, elenco, da_lista }
+    let completos = completos
+        .iter()
+        .filter_map(|&id| pool.jogadores.iter().find(|j| j.player_id == id && !do_clube(j)))
+        .map(|j| search::fotografar(j, pool, hoje, 0, todos))
+        .collect();
+    Mapeamento { clube: pool.clube_usuario, elenco, da_lista, completos }
 }
 
 /// O que `aplicar` mudou (para o log).
@@ -84,11 +95,14 @@ pub fn montar(pool: &PlayerPool, hoje: Date, lista: &[(u32, Option<i32>)], conhe
 pub struct Resumo {
     pub sairam: usize,
     pub importados: usize,
+    /// Escolhidos que ficaram completos e jogadores completos que entraram
+    /// na Base.
+    pub completados: usize,
 }
 
 impl Resumo {
     pub fn mudou(&self) -> bool {
-        self.sairam + self.importados > 0
+        self.sairam + self.importados + self.completados > 0
     }
 }
 
@@ -145,6 +159,40 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
         });
         resumo.importados += 1;
     }
+
+    // ---- quem o jogo conhece por inteiro fica completo na Central
+    for completo in m.completos {
+        let id = completo.player_id;
+        let mut mudou = false;
+        if let Some(e) = dados.escolhidos.iter_mut().find(|e| e.jogador.player_id == id) {
+            if e.precisao > 0 || e.jogador.atributos.len() < completo.atributos.len() {
+                // mantém o que a Missão de origem pediu (Fit, referência)
+                let fit_alvo = e.jogador.fit_alvo;
+                e.jogador = JogadorEncontrado { fit_alvo, ..completo.clone() };
+                e.precisao = 0;
+                e.observado_em = hoje;
+                mudou = true;
+            }
+        }
+        let mut registro = completo;
+        registro.visto_em = Some(hoje);
+        match dados.mapeados.iter_mut().find(|x| x.jogador.player_id == id && x.motivo != MotivoMapeamento::ExClube) {
+            Some(existente) => {
+                if existente.jogador.atributos.len() < registro.atributos.len() || existente.jogador.overall != registro.overall {
+                    existente.jogador = registro;
+                    existente.desde = hoje;
+                    mudou = true;
+                }
+            }
+            None => {
+                dados.mapeados.push(JogadorMapeado { jogador: registro, desde: hoje, motivo: MotivoMapeamento::RelatorioDoJogo });
+                mudou = true;
+            }
+        }
+        if mudou {
+            resumo.completados += 1;
+        }
+    }
     resumo
 }
 
@@ -184,14 +232,14 @@ mod tests {
     fn a_player_leaving_the_club_becomes_a_scout_base_record_and_nobody_else_does() {
         let mut dados = ScoutStateFile::default();
         // 1ª leitura: só guarda as fotos
-        let r = aplicar(&mut dados, montar(&pool_do_clube(&[1, 2, 3]), HOJE, &[], &HashSet::new()), HOJE);
+        let r = aplicar(&mut dados, montar(&pool_do_clube(&[1, 2, 3]), HOJE, &[], &[], &HashSet::new()), HOJE);
         assert!(!r.mudou() && dados.mapeados.is_empty(), "quem está no clube não vai para a Base");
         assert_eq!(dados.elenco.len(), 3);
         assert_eq!(dados.elenco[0].atributos.len(), crate::scout::lista::ATRIBUTOS_DETALHADO, "a foto tem tudo, exato");
         assert_eq!(dados.elenco[0].overall.min, dados.elenco[0].overall.max);
         // o 2 é vendido
         let depois = Date(20260901);
-        let r = aplicar(&mut dados, montar(&pool_do_clube(&[1, 3]), depois, &[], &HashSet::new()), depois);
+        let r = aplicar(&mut dados, montar(&pool_do_clube(&[1, 3]), depois, &[], &[], &HashSet::new()), depois);
         assert_eq!(r.sairam, 1);
         assert_eq!(dados.mapeados.len(), 1);
         let ex = &dados.mapeados[0];
@@ -199,27 +247,66 @@ mod tests {
         assert_eq!(ex.jogador.visto_em, Some(depois));
         assert_eq!(dados.elenco.iter().map(|j| j.player_id).collect::<Vec<_>>(), vec![1, 3]);
         // ler de novo não repete
-        let r = aplicar(&mut dados, montar(&pool_do_clube(&[1, 3]), depois, &[], &HashSet::new()), depois);
+        let r = aplicar(&mut dados, montar(&pool_do_clube(&[1, 3]), depois, &[], &[], &HashSet::new()), depois);
         assert!(!r.mudou() && dados.mapeados.len() == 1);
         // ele volta ao clube: deixa de ser ex-jogador
-        aplicar(&mut dados, montar(&pool_do_clube(&[1, 2, 3]), depois, &[], &HashSet::new()), depois);
+        aplicar(&mut dados, montar(&pool_do_clube(&[1, 2, 3]), depois, &[], &[], &HashSet::new()), depois);
         assert!(dados.mapeados.is_empty(), "no clube de novo, fora da Base");
     }
 
     #[test]
     fn a_bad_squad_read_or_another_club_never_empties_the_squad_into_the_base() {
         let mut dados = ScoutStateFile::default();
-        aplicar(&mut dados, montar(&pool_do_clube(&[1, 2, 3]), HOJE, &[], &HashSet::new()), HOJE);
+        aplicar(&mut dados, montar(&pool_do_clube(&[1, 2, 3]), HOJE, &[], &[], &HashSet::new()), HOJE);
         // leitura vazia: ninguém "saiu"
-        let vazio = Mapeamento { clube: 241, elenco: Vec::new(), da_lista: Vec::new() };
+        let vazio = Mapeamento { clube: 241, elenco: Vec::new(), da_lista: Vec::new(), completos: Vec::new() };
         assert!(!aplicar(&mut dados, vazio, HOJE).mudou());
         assert!(dados.mapeados.is_empty() && dados.elenco.len() == 3);
         // o técnico mudou de clube: recomeça, sem mapear o elenco antigo
         let mut outro = pool(vec![do_clube(7, 99), do_clube(8, 99)]);
         outro.clube_usuario = 99;
-        let r = aplicar(&mut dados, montar(&outro, HOJE, &[], &HashSet::new()), HOJE);
+        let r = aplicar(&mut dados, montar(&outro, HOJE, &[], &[], &HashSet::new()), HOJE);
         assert!(!r.mudou() && dados.mapeados.is_empty());
         assert_eq!((dados.elenco_clube, dados.elenco.len()), (Some(99), 2));
+    }
+
+    #[test]
+    fn players_the_game_knows_completely_become_complete_in_the_central() {
+        let mut jogadores: Vec<_> = (1..=2).map(|id| do_clube(id, 241)).collect();
+        for id in 20..=22 {
+            let mut j = jogador(id, 70, 74, 18);
+            j.clube_id = Some(5);
+            jogadores.push(j);
+        }
+        let p = pool(jogadores);
+        let mut dados = ScoutStateFile::default();
+        // o 20 já é Escolhido, mas com faixas largas e poucos atributos
+        let parcial = search::fotografar(&p.jogadores[2], &p, HOJE, 12, 6);
+        dados.escolhidos.push(Escolhido {
+            jogador: parcial,
+            adicionado_em: HOJE,
+            observado_em: HOJE,
+            precisao: 12,
+            prioridade: false,
+            acompanhamento: None,
+            alvo: None,
+            referencia: None,
+            relatorio_id: None,
+            no_jogo: false,
+            importado: false,
+        });
+        // o jogo conhece por inteiro o 20 (Escolhido), o 21 (ninguém o tinha) e o 1 (do clube)
+        let completos = [20, 21, 1, 99];
+        let depois = Date(20260901);
+        let r = aplicar(&mut dados, montar(&p, depois, &[], &completos, &HashSet::new()), depois);
+        assert_eq!(r.completados, 2);
+        let e = &dados.escolhidos[0];
+        assert_eq!((e.precisao, e.jogador.atributos.len(), e.observado_em), (0, crate::scout::lista::ATRIBUTOS_DETALHADO, depois), "o Escolhido ficou completo");
+        let base: Vec<(u32, MotivoMapeamento)> = dados.mapeados.iter().map(|m| (m.jogador.player_id, m.motivo)).collect();
+        assert_eq!(base, vec![(20, MotivoMapeamento::RelatorioDoJogo), (21, MotivoMapeamento::RelatorioDoJogo)], "o do clube e o que não existe ficam de fora");
+        assert_eq!(dados.escolhidos.len(), 1, "quem não era Escolhido não vira Escolhido");
+        // ler de novo, igual: nada muda
+        assert!(!aplicar(&mut dados, montar(&p, depois, &[], &completos, &HashSet::new()), depois).mudou());
     }
 
     #[test]
@@ -235,7 +322,7 @@ mod tests {
         // 10 já é Escolhido, 11 foi tirado de propósito, 99 não existe, 1 é do clube
         let conhecidos: HashSet<u32> = [10, 11].into_iter().collect();
         let lista = [(10, Some(198)), (11, Some(198)), (12, Some(198)), (13, None), (99, Some(198)), (1, Some(198))];
-        let r = aplicar(&mut dados, montar(&p, HOJE, &lista, &conhecidos), HOJE);
+        let r = aplicar(&mut dados, montar(&p, HOJE, &lista, &[], &conhecidos), HOJE);
         assert_eq!(r.importados, 2);
         let ids: Vec<u32> = dados.escolhidos.iter().map(|e| e.jogador.player_id).collect();
         assert_eq!(ids, vec![12, 13]);
@@ -247,11 +334,11 @@ mod tests {
         assert_eq!(dados.mapeados.iter().map(|m| (m.jogador.player_id, m.motivo)).collect::<Vec<_>>(), vec![(12, MotivoMapeamento::ListaDoJogo), (13, MotivoMapeamento::ListaDoJogo)]);
         // de novo, com os dois já nos Escolhidos: nada muda
         let conhecidos: HashSet<u32> = [10, 11, 12, 13].into_iter().collect();
-        assert!(!aplicar(&mut dados, montar(&p, HOJE, &lista, &conhecidos), HOJE).mudou());
+        assert!(!aplicar(&mut dados, montar(&p, HOJE, &lista, &[], &conhecidos), HOJE).mudou());
         // quem foi tirado dos Escolhidos não volta (a lista ignorada vale também na aplicação)
         dados.escolhidos.clear();
         dados.importacao_ignorada.push(12);
-        let r = aplicar(&mut dados, montar(&p, HOJE, &[(12, Some(198)), (14, Some(198))], &HashSet::new()), HOJE);
+        let r = aplicar(&mut dados, montar(&p, HOJE, &[(12, Some(198)), (14, Some(198))], &[], &HashSet::new()), HOJE);
         assert_eq!((r.importados, dados.escolhidos.len()), (1, 1));
         assert_eq!(dados.escolhidos[0].jogador.player_id, 14);
     }

@@ -64,7 +64,7 @@ pub mod botao {
 
 /// Zona morta do analógico esquerdo e limiar dos gatilhos (valores do SDK).
 const ZONA_MORTA_ANALOGICO: i32 = 7849;
-const LIMIAR_GATILHO: u8 = 30;
+pub const LIMIAR_GATILHO: u8 = 30;
 
 /// Foto do controle num frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -538,12 +538,20 @@ fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: 
     let rolagem = state.rolagem();
     ui.child_window(id).size([0.0, 0.0]).border(false).flags(flags_conteudo()).build(|| {
         rolar_com_analogico(ui, rolagem);
-        if focar {
-            // O próximo item navegável desta tela recebe o foco (botões não
-            // são "clicados": só focados).
-            unsafe { imgui::sys::igSetKeyboardFocusHere(0) };
+        // As abas e o Relatório aberto são listas: o foco vai para o primeiro
+        // card ou linha, não para os botões acima deles. As outras telas
+        // (formulários, fichas) focam o primeiro item.
+        let principal = matches!(tela, ScoutScreen::Aba(_) | ScoutScreen::Satelite(Satelite::Relatorio));
+        if focar && principal {
+            state.pedir_foco_no_principal();
+        } else if focar || state.tomar_foco_na_barra() {
+            componentes::focar_proximo_item();
         }
         conteudo_da_tela(ui, fonts, aba, tela, state, &status, &mut pedido, focar);
+        // ninguém tomou o foco (lista vazia): ele vai para o primeiro botão
+        if state.tomar_foco_no_principal() {
+            state.pedir_foco_na_barra();
+        }
     });
     pedido
 }

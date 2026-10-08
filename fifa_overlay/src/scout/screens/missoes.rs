@@ -149,6 +149,9 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pode_encom
         if indice % por_linha != 0 {
             ui.same_line_with_spacing(0.0, theme::ESPACO_3);
         }
+        if indice == 0 && state.tomar_foco_no_principal() {
+            componentes::focar_proximo_item();
+        }
         let r = nacoes_e_bandeiras(ui, fonts, linha, &regioes[indice], avisos[indice].as_deref());
         if r.ativou {
             if let Some(id) = linha.relatorio_id {

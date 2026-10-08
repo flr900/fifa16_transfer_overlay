@@ -1563,6 +1563,8 @@ pub enum MotivoMapeamento {
     ExClube,
     /// Estava na lista de escolhidos do jogo.
     ListaDoJogo,
+    /// O jogo tem o relatório completo dele (conhecimento no máximo).
+    RelatorioDoJogo,
 }
 
 impl MotivoMapeamento {
@@ -1571,6 +1573,7 @@ impl MotivoMapeamento {
         match self {
             MotivoMapeamento::ExClube => "Ex-jogador do clube",
             MotivoMapeamento::ListaDoJogo => "Lista do jogo",
+            MotivoMapeamento::RelatorioDoJogo => "Relatório do jogo",
         }
     }
 }
@@ -1970,6 +1973,22 @@ fn lista_do_jogo() -> Vec<(u32, Option<i32>)> {
         .collect()
 }
 
+/// Os jogadores que o jogo conhece por inteiro (nível de conhecimento no
+/// máximo: o relatório completo do FIFA). Vazia com a sincronização
+/// desligada ou o jogo não localizado.
+fn conhecimento_completo() -> Vec<u32> {
+    use crate::save_repo::nativo;
+    if !nativo::sincronizacao_ligada() {
+        return Vec::new();
+    }
+    nativo::read_native_knowledge()
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.nivel >= nativo::NIVEL_COMPLETO)
+        .filter_map(|r| u32::try_from(r.jogador).ok())
+        .collect()
+}
+
 /// Épico 7: tira da lista do jogo um jogador que a Central pôs lá.
 fn tirar_da_lista_do_jogo(player_id: u32) {
     use crate::save_repo::nativo;
@@ -2188,6 +2207,8 @@ pub struct ScoutState {
     demissao_pendente: Option<Uuid>,
     /// O jogador apertou Y neste frame (o menu de Opções da tela em foco).
     opcoes_neste_frame: bool,
+    /// L2 (-1) / R2 (+1) neste frame: troca o grupo de posição da lista.
+    passo_de_grupo: i8,
     /// Filtros e ordenação de cada lista de jogadores (só enquanto o Scout
     /// está carregado; a visão vai para o arquivo da carreira).
     prefs_listas: HashMap<ListaId, PrefsLista>,
@@ -2242,11 +2263,22 @@ pub struct ScoutState {
     /// A Ficha aberta é de um jogador da Base do Scout, sem Relatório
     /// (ex-jogador do clube ou da lista do jogo).
     ficha_da_base: bool,
+    /// O foco pedido (abrir o painel, trocar de aba, voltar de um modal ou de
+    /// uma tela) vai para o PRIMEIRO item do conteúdo principal — o card ou
+    /// a linha —, não para a barra de botões acima dele (2026-10-08). A tela
+    /// que desenha o conteúdo toma o sinal (`tomar_foco_no_principal`).
+    foco_no_principal: std::sync::atomic::AtomicBool,
+    /// Ninguém tomou o sinal (conteúdo vazio): o foco vai para o primeiro
+    /// item da tela no frame seguinte.
+    foco_na_barra: std::sync::atomic::AtomicBool,
     /// O mapeamento do elenco e da lista do jogo (`scout::mapeamento`).
     tarefa_mapeamento: AsyncTask<(String, Date, mapeamento::Mapeamento)>,
     mapeamento_pendente: bool,
     /// Pediram outro mapeamento enquanto um rodava.
     remapear: bool,
+    /// Jogadores que o jogo já conhecia por inteiro na última leitura (para
+    /// só refazer o mapeamento quando aparece um novo).
+    completos_vistos: std::collections::HashSet<u32>,
 }
 
 /// Nível aberto no filtro geográfico: a lista de continentes (o filtro
@@ -2305,6 +2337,7 @@ impl ScoutState {
             troca_de_aba_pendente: None,
             demissao_pendente: None,
             opcoes_neste_frame: false,
+            passo_de_grupo: 0,
             prefs_listas: HashMap::new(),
             painel_de_filtros: None,
             opcoes_do_olheiro: None,
@@ -2330,9 +2363,12 @@ impl ScoutState {
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
             ficha_da_base: false,
+            foco_no_principal: std::sync::atomic::AtomicBool::new(false),
+            foco_na_barra: std::sync::atomic::AtomicBool::new(false),
             tarefa_mapeamento: AsyncTask::new(),
             mapeamento_pendente: false,
             remapear: false,
+            completos_vistos: std::collections::HashSet::new(),
         }
     }
 
@@ -2467,6 +2503,27 @@ impl ScoutState {
 
     /// Abre a Ficha de um jogador da Base do Scout que não tem Relatório
     /// (ex-jogador do clube, lista do jogo).
+    /// Pede o foco no conteúdo principal da tela (ver `foco_no_principal`).
+    pub fn pedir_foco_no_principal(&self) {
+        self.foco_no_principal.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Consome o pedido: `true` = a tela deve focar o próximo item que
+    /// desenhar (o primeiro card ou linha do conteúdo).
+    pub fn tomar_foco_no_principal(&self) -> bool {
+        self.foco_no_principal.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Conteúdo vazio: o foco vai para o primeiro item da tela no frame
+    /// seguinte.
+    pub fn pedir_foco_na_barra(&self) {
+        self.foco_na_barra.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn tomar_foco_na_barra(&self) -> bool {
+        self.foco_na_barra.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn abrir_ficha_da_base(&mut self, player_id: u32) {
         if self.base_do_scout().iter().any(|b| b.melhor.jogador.player_id == player_id) {
             self.ficha = Some(player_id);
@@ -3113,9 +3170,11 @@ impl ScoutState {
             return;
         }
         let lista = lista_do_jogo();
+        let completos = conhecimento_completo();
         let conhecidos: std::collections::HashSet<u32> =
             estado.ler(|d| d.escolhidos.iter().map(|e| e.jogador.player_id).chain(d.importacao_ignorada.iter().copied()).collect());
-        if so_com_novidade && !lista.iter().any(|(id, _)| !conhecidos.contains(id)) {
+        let novidade = lista.iter().any(|(id, _)| !conhecidos.contains(id)) || completos.iter().any(|id| !self.completos_vistos.contains(id));
+        if so_com_novidade && !novidade {
             return;
         }
         if self.mapeamento_pendente {
@@ -3123,9 +3182,10 @@ impl ScoutState {
             return;
         }
         let fonte = Arc::clone(&self.fonte);
+        self.completos_vistos = completos.iter().copied().collect();
         self.mapeamento_pendente = self.tarefa_mapeamento.start(move || {
             let pool = fonte.read_players_for_mapping()?;
-            Ok((id_save, hoje, mapeamento::montar(&pool, hoje, &lista, &conhecidos)))
+            Ok((id_save, hoje, mapeamento::montar(&pool, hoje, &lista, &completos, &conhecidos)))
         });
     }
 
@@ -3142,9 +3202,10 @@ impl ScoutState {
                 if let Some(estado) = self.estados.get(&dono).cloned() {
                     match estado.mutar(|d| mapeamento::aplicar(d, resultado, hoje)) {
                         Ok(resumo) if resumo.mudou() => tracing::info!(
-                            "[scout::state] Mapeamento: {} ex-jogador(es) do clube, {} da lista do jogo.",
+                            "[scout::state] Mapeamento: {} ex-jogador(es) do clube, {} da lista do jogo, {} completo(s) do jogo.",
                             resumo.sairam,
-                            resumo.importados
+                            resumo.importados,
+                            resumo.completados
                         ),
                         Ok(_) => {}
                         Err(err) => tracing::warn!("[scout::state] Mapeamento não foi salvo: {err:?}"),
@@ -3160,6 +3221,7 @@ impl ScoutState {
                 self.mapeamento_pendente = false;
                 self.tarefa_mapeamento.reset();
                 self.remapear = false;
+                self.completos_vistos.clear();
                 tracing::warn!("[scout::state] Mapeamento falhou: {err:?}");
             }
         }
@@ -4144,6 +4206,16 @@ impl ScoutState {
 
     pub fn fechar_painel_de_filtros(&mut self) {
         self.painel_de_filtros = None;
+    }
+
+    /// O jogador apertou L2 (-1) ou R2 (+1) neste frame: a lista na tela
+    /// passa para o grupo de posição anterior ou seguinte. Vale um frame.
+    pub fn passo_de_grupo(&self) -> i8 {
+        self.passo_de_grupo
+    }
+
+    pub fn definir_passo_de_grupo(&mut self, passo: i8) {
+        self.passo_de_grupo = passo;
     }
 
     pub fn definir_opcoes(&mut self, pedidas: bool) {

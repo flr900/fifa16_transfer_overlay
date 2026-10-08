@@ -36,7 +36,7 @@ use imgui::Ui;
 use serde::{Deserialize, Serialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VIRTUAL_KEY, VK_F10};
 
-use crate::gamepad::{botao, EstadoControle};
+use crate::gamepad::{botao, EstadoControle, LIMIAR_GATILHO};
 use screens::theme::Fonts;
 use state::ScoutState;
 
@@ -58,6 +58,10 @@ pub struct ComandosControle {
     pub opcoes: bool,
     /// Select: abre (ou fecha) as Configurações do Scout.
     pub configuracoes: bool,
+    /// L2 / R2 (os gatilhos): o grupo de posição anterior / seguinte nas
+    /// listas de jogadores (Todos, Detalhados, Gol, Zag, Mei, Ata).
+    pub grupo_anterior: bool,
+    pub grupo_proximo: bool,
 }
 
 pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> ComandosControle {
@@ -69,6 +73,8 @@ pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> Com
         voltar: borda(botao::B),
         opcoes: borda(botao::Y),
         configuracoes: borda(botao::BACK),
+        grupo_anterior: atual.lt >= LIMIAR_GATILHO && anterior.lt < LIMIAR_GATILHO,
+        grupo_proximo: atual.rt >= LIMIAR_GATILHO && anterior.rt < LIMIAR_GATILHO,
     }
 }
 
@@ -333,6 +339,7 @@ impl Scout {
         // o Y vale por um frame só, e só sem aviso por cima (as telas leem
         // `opcoes_pedidas` no render deste mesmo frame)
         self.state.definir_opcoes(false);
+        self.state.definir_passo_de_grupo(0);
         // `ja_alternou` com o painel fechado agora = o F10 acabou de fechá-lo
         let estava_aberto = self.painel_aberto || ja_alternou;
 
@@ -378,6 +385,9 @@ impl Scout {
             } else {
                 if comandos.configuracoes {
                     self.state.abrir_configuracoes();
+                }
+                if comandos.grupo_proximo != comandos.grupo_anterior {
+                    self.state.definir_passo_de_grupo(if comandos.grupo_proximo { 1 } else { -1 });
                 }
                 if comandos.opcoes {
                     self.state.definir_opcoes(true);
@@ -873,6 +883,29 @@ mod tests {
         scout.state.definir_troca_de_aba_pendente(Some(Aba::Missoes));
         scout.aplicar_controle(controle(botao::Y), false);
         assert!(!scout.state.opcoes_pedidas());
+    }
+
+    #[test]
+    fn l2_and_r2_step_the_position_group_once_per_press_and_not_under_a_modal() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        let gatilhos = |lt: u8, rt: u8| EstadoControle { lt, rt, ..Default::default() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(gatilhos(0, 0), false);
+        scout.aplicar_controle(gatilhos(255, 0), false);
+        assert_eq!(scout.state.passo_de_grupo(), -1, "L2: grupo anterior");
+        scout.aplicar_controle(gatilhos(255, 0), false);
+        assert_eq!(scout.state.passo_de_grupo(), 0, "segurar não repete");
+        scout.aplicar_controle(gatilhos(0, LIMIAR_GATILHO), false);
+        assert_eq!(scout.state.passo_de_grupo(), 1, "R2: grupo seguinte");
+        // os dois juntos se anulam
+        scout.aplicar_controle(gatilhos(0, 0), false);
+        scout.aplicar_controle(gatilhos(255, 255), false);
+        assert_eq!(scout.state.passo_de_grupo(), 0);
+        // com um aviso por cima, não chega às telas de baixo
+        scout.aplicar_controle(gatilhos(0, 0), false);
+        scout.state.definir_troca_de_aba_pendente(Some(Aba::Missoes));
+        scout.aplicar_controle(gatilhos(255, 0), false);
+        assert_eq!(scout.state.passo_de_grupo(), 0);
     }
 
     #[test]

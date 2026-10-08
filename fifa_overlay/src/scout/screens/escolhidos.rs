@@ -148,10 +148,14 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         }
         return acao;
     }
+    let mut foco = state.tomar_foco_no_principal();
     for item in &visiveis {
         let Some(e) = escolhidos.iter().find(|e| e.jogador.player_id == item.jogador.player_id) else {
             continue;
         };
+        if std::mem::take(&mut foco) {
+            componentes::focar_proximo_item();
+        }
         if card_escolhido(ui, fonts, state, e, hoje) {
             acao = Acao::AbrirFicha(e.escolhido.jogador.player_id);
         }

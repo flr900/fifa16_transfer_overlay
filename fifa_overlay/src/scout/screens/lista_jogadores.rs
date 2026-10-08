@@ -127,9 +127,18 @@ pub fn barra(
         state.abrir_painel_de_filtros(id);
     }
 
-    // a posição: escolha única, mas só o clique (ou o A) escolhe
+    // a posição: escolha única, mas só o clique (ou o A) escolhe; L2/R2
+    // passam para o grupo anterior/seguinte
     ui.dummy([0.0, theme::ESPACO_1]);
     let contagens = lista::contagem_por_grupo(itens, &filtros);
+    let passo = state.passo_de_grupo();
+    if passo != 0 {
+        let novo = lista::grupo_com_passo(&contagens, filtros.grupo, passo);
+        if novo != filtros.grupo {
+            state.mutar_filtros_da_lista(id, |f| f.grupo = novo);
+        }
+    }
+    let filtros = state.filtros_da_lista(id);
     for (indice, (grupo, quantos)) in contagens.into_iter().enumerate() {
         if indice > 0 {
             ui.same_line_with_spacing(0.0, theme::ESPACO_2);
@@ -146,6 +155,12 @@ pub fn barra(
             ui.tooltip_text(grupo.nome());
         }
     }
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        ui.same_line_with_spacing(0.0, theme::ESPACO_4);
+        let y = ui.cursor_pos()[1];
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
+        ui.text_colored(theme::TEXT_SECONDARY, "L2 / R2 trocam a posição");
+    });
     ui.dummy([0.0, theme::ESPACO_2]);
 }
 
@@ -210,6 +225,7 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     });
 
     // linhas: só as visíveis (a Base pode ter milhares)
+    let mut foco = state.tomar_foco_no_principal();
     let clipper = imgui::ListClipper::new(i32::try_from(itens.len()).unwrap_or(i32::MAX)).items_height(ALTURA_LINHA).begin(ui);
     for indice in clipper.iter() {
         let Some(item) = usize::try_from(indice).ok().and_then(|i| itens.get(i)) else {
@@ -217,6 +233,10 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
         };
         let _id = ui.push_id_usize(item.chave as usize);
         ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
+        if std::mem::take(&mut foco) {
+            ui.table_set_column_index(0);
+            componentes::focar_proximo_item();
+        }
         if linha_selecionavel(ui) {
             ativado = Some(indice_do_item(itens, item));
         }
@@ -235,13 +255,22 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
 
 /// Cards em grade (quantos couberem por linha). `desenhar` desenha o card do
 /// item e devolve se foi ativado; devolve o ÍNDICE ativado.
-pub fn grade(ui: &Ui, largura_card: f32, itens: &[ItemLista<'_>], mut desenhar: impl FnMut(&ItemLista<'_>) -> bool) -> Option<usize> {
+pub fn grade(
+    ui: &Ui,
+    largura_card: f32,
+    itens: &[ItemLista<'_>],
+    foco_inicial: bool,
+    mut desenhar: impl FnMut(&ItemLista<'_>) -> bool,
+) -> Option<usize> {
     let mut ativado = None;
     let disponivel = ui.content_region_avail()[0];
     let por_linha = (((disponivel + theme::ESPACO_3) / (largura_card + theme::ESPACO_3)).floor() as usize).max(1);
     for (indice, item) in itens.iter().enumerate() {
         if indice % por_linha != 0 {
             ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+        }
+        if indice == 0 && foco_inicial {
+            componentes::focar_proximo_item();
         }
         if desenhar(item) {
             ativado = Some(indice);
@@ -435,7 +464,6 @@ pub fn painel_de_filtros(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState,
             if componentes::botao(ui, fonts, "Fechar", EstiloBotao::Primario, true) {
                 acao = AcaoPainel::Fechar;
             }
-            ui.set_item_default_focus();
             ui.same_line_with_spacing(0.0, theme::ESPACO_3);
             if componentes::botao(ui, fonts, "Limpar filtros", EstiloBotao::Secundario, filtros.ativos() > 0) {
                 novos.limpar_painel();
@@ -599,17 +627,23 @@ mod tests {
     /// tabela faz com elas.
     struct Mesa {
         ctx: imgui::Context,
+        /// O ImGui só aceita um contexto ativo por vez: os testes em paralelo
+        /// esperam a vez.
+        _vez: std::sync::MutexGuard<'static, ()>,
     }
+
+    static VEZ: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     impl Mesa {
         fn nova() -> Mesa {
+            let vez = VEZ.lock().unwrap_or_else(|p| p.into_inner());
             let mut ctx = imgui::Context::create();
             ctx.set_ini_filename(None);
             ctx.io_mut().display_size = [1600.0, 900.0];
             ctx.io_mut().config_flags |= imgui::ConfigFlags::NAV_ENABLE_GAMEPAD;
             ctx.io_mut().backend_flags |= imgui::BackendFlags::HAS_GAMEPAD;
             ctx.fonts().build_rgba32_texture();
-            Mesa { ctx }
+            Mesa { ctx, _vez: vez }
         }
 
         /// Um quadro com a tabela; `tecla` apertada neste quadro.
@@ -645,6 +679,29 @@ mod tests {
                 self.quadro(estado, itens, None);
             }
         }
+    }
+
+    #[test]
+    fn a_focus_request_lands_on_the_first_row_not_on_the_header() {
+        let jogadores: Vec<JogadorEncontrado> =
+            (1..=5).map(|i| JogadorEncontrado::de_teste(i, &format!("Jogador {i}"), 18, (60 + i as u8, 62 + i as u8))).collect();
+        let itens: Vec<ItemLista<'_>> = jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
+        let mut estado = ScoutState::new();
+        let mut mesa = Mesa::nova();
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        // voltar de um modal / trocar de aba: o foco vai para o conteúdo principal
+        estado.pedir_foco_no_principal();
+        mesa.quadro(&mut estado, &itens, None);
+        mesa.quadro(&mut estado, &itens, None);
+        // com o foco na primeira linha, A abre o primeiro jogador (e não ordena por um cabeçalho)
+        let mut ativado = None;
+        for _ in 0..3 {
+            ativado = ativado.or(mesa.quadro(&mut estado, &itens, Some(imgui::Key::GamepadFaceDown)));
+        }
+        assert_eq!(ativado, Some(0), "A abre a primeira linha");
+        assert_eq!(estado.ordenacao_da_lista(ListaId::Base), Ordenacao::default(), "e nenhuma coluna foi reordenada");
     }
 
     #[test]

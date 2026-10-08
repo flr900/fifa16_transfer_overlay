@@ -245,6 +245,21 @@ pub fn contagem_por_grupo(itens: &[ItemLista<'_>], filtros: &FiltrosLista) -> Ve
         .collect()
 }
 
+/// O grupo que L2 (`passo` = -1) ou R2 (+1) escolhem a partir de `atual`:
+/// anda pela ordem dos botões (Todos, Detalhados, Gol, Zag, Mei, Ata), dá a
+/// volta e pula os grupos sem jogador (o Todos nunca é pulado).
+pub fn grupo_com_passo(contagens: &[(GrupoPosicao, usize)], atual: GrupoPosicao, passo: i8) -> GrupoPosicao {
+    let Some(inicio) = contagens.iter().position(|(g, _)| *g == atual) else {
+        return atual;
+    };
+    let total = contagens.len();
+    let delta = if passo >= 0 { 1 } else { total - 1 };
+    (1..=total)
+        .map(|i| &contagens[(inicio + delta * i) % total])
+        .find(|(g, n)| *n > 0 || *g == GrupoPosicao::Todos)
+        .map_or(atual, |(g, _)| *g)
+}
+
 // ---------------------------------------------------------------------
 // Ordenação da visão Tabular
 // ---------------------------------------------------------------------
@@ -398,6 +413,34 @@ impl PrefsLista {
 /// "178 cm" ou "—".
 pub fn texto_altura(altura: Option<u8>) -> String {
     altura.map_or_else(|| "—".to_string(), |a| format!("{a} cm"))
+}
+
+#[cfg(test)]
+mod tests_de_grupo {
+    use super::*;
+
+    fn contagens(quantos: [usize; 6]) -> Vec<(GrupoPosicao, usize)> {
+        GrupoPosicao::TODOS.into_iter().zip(quantos).collect()
+    }
+
+    #[test]
+    fn l2_and_r2_walk_the_position_groups_skipping_the_empty_ones() {
+        use GrupoPosicao::*;
+        let c = contagens([30, 4, 3, 8, 10, 5]);
+        assert_eq!(grupo_com_passo(&c, Todos, 1), Detalhados);
+        assert_eq!(grupo_com_passo(&c, Detalhados, 1), Goleiros);
+        assert_eq!(grupo_com_passo(&c, Atacantes, 1), Todos, "dá a volta");
+        assert_eq!(grupo_com_passo(&c, Todos, -1), Atacantes);
+        assert_eq!(grupo_com_passo(&c, Meias, -1), Defensores);
+        // sem goleiros nem detalhados: pula os dois
+        let vazios = contagens([30, 0, 0, 8, 10, 5]);
+        assert_eq!(grupo_com_passo(&vazios, Todos, 1), Defensores);
+        assert_eq!(grupo_com_passo(&vazios, Defensores, -1), Todos);
+        // nenhum grupo com jogador: fica no Todos
+        let so_todos = contagens([0, 0, 0, 0, 0, 0]);
+        assert_eq!(grupo_com_passo(&so_todos, Todos, 1), Todos);
+        assert_eq!(grupo_com_passo(&so_todos, Meias, 1), Todos, "um grupo vazio atual sai para o Todos");
+    }
 }
 
 #[cfg(test)]

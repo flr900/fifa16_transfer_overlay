@@ -75,8 +75,9 @@ pub(super) fn ocorrencias_na_tela(
         lista_jogadores::tabela(ui, fonts, state, id, &visiveis)
     } else {
         let hoje = state.data_da_carreira();
+        let foco = state.tomar_foco_no_principal();
         let estado: &ScoutState = state;
-        lista_jogadores::grade(ui, relatorio::LARGURA_CARD, &visiveis, |item| {
+        lista_jogadores::grade(ui, relatorio::LARGURA_CARD, &visiveis, foco, |item| {
             let Some((o, origem)) = por_chave.get(&item.chave) else {
                 return false;
             };

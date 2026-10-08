@@ -98,16 +98,18 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     let mut acao = Acao::Nenhuma;
     // Arquivar/Restaurar mexe no estado: é feito depois de desenhar
     let mut mudar: Option<(Uuid, bool)> = None;
+    // o foco vai para o primeiro card
+    let mut foco = state.tomar_foco_no_principal();
     match state.visao_dos_relatorios() {
         VisaoRelatorios::PorRelatorio => {
             let itens: Vec<&RelatorioNaLista> = lista.iter().collect();
-            lista_de_cards(ui, fonts, &itens, arquivados, &mut acao, &mut mudar);
+            lista_de_cards(ui, fonts, &itens, arquivados, &mut acao, &mut mudar, &mut foco);
         }
         VisaoRelatorios::PorOlheiro => {
             olheiros::com_nacoes(state, |nacoes| {
                 for (olheiro, itens) in agrupar_por_olheiro(&lista) {
                     cabecalho_do_olheiro(ui, fonts, olheiro, &itens, nacoes);
-                    lista_de_cards(ui, fonts, &itens, arquivados, &mut acao, &mut mudar);
+                    lista_de_cards(ui, fonts, &itens, arquivados, &mut acao, &mut mudar, &mut foco);
                     ui.dummy([0.0, theme::ESPACO_2]);
                 }
             });
@@ -168,8 +170,12 @@ fn lista_de_cards(
     arquivados: bool,
     acao: &mut Acao,
     mudar: &mut Option<(Uuid, bool)>,
+    foco: &mut bool,
 ) {
     for item in itens {
+        if std::mem::take(foco) {
+            componentes::focar_proximo_item();
+        }
         if card_relatorio(ui, fonts, item) {
             *acao = Acao::AbrirRelatorio(item.relatorio.id);
         }
