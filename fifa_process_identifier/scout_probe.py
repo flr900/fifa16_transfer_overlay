@@ -72,18 +72,52 @@ def scan_regions(handle, max_mb: int):
         yield r
 
 
-def padroes_de_texto(textos: list[str]) -> list[tuple[re.Pattern, str]]:
-    """Um padrão ASCII/Latin-1 e um UTF-16LE por texto (sem diferenciar
-    maiúsculas de minúsculas), com a frase em volta."""
-    padroes = []
+def agulhas_de_texto(textos: list[str]) -> list[tuple[bytes, str]]:
+    """Cada texto em minúsculas, em Latin-1 e em UTF-16LE (a busca ignora
+    maiúsculas: a região é posta em minúsculas uma vez e cada agulha é
+    procurada com `bytes.find`, que roda em C; regex com prefixo variável
+    levava minutos sobre ~1 GB)."""
+    agulhas = []
     for texto in textos:
-        latin = re.escape(texto.encode("latin-1", "replace"))
-        livre = b"[\\x20-\\x7e\\xa0-\\xff]{0,%d}" % CONTEXTO_TEXTO
-        padroes.append((re.compile(livre + latin + livre, re.I), "ascii"))
-        utf16 = b"".join(re.escape(c.encode("utf-16-le")) for c in texto)
-        livre16 = b"(?:[\\x20-\\x7e\\xa0-\\xff]\\x00){0,%d}" % CONTEXTO_TEXTO
-        padroes.append((re.compile(livre16 + utf16 + livre16, re.I), "utf16"))
-    return padroes
+        t = texto.lower()
+        agulhas.append((t.encode("latin-1", "replace"), "ascii"))
+        agulhas.append((t.encode("utf-16-le"), "utf16"))
+    return agulhas
+
+
+def _imprimivel(b: int) -> bool:
+    return 0x20 <= b <= 0x7E or 0xA0 <= b <= 0xFF
+
+
+def achar_textos(raw: bytes, agulhas: list[tuple[bytes, str]], limite: int):
+    """(posição, encoding, frase) de cada ocorrência, com até CONTEXTO_TEXTO
+    letras de cada lado. `raw` é a região original; a busca usa a cópia em
+    minúsculas."""
+    baixo = raw.lower()
+    for agulha, enc in agulhas:
+        passo = 1 if enc == "ascii" else 2
+        pos = baixo.find(agulha)
+        while pos != -1 and limite > 0:
+            if passo == 2 and pos % 2:
+                pos = baixo.find(agulha, pos + 1)
+                continue
+            ini = pos
+            for _ in range(CONTEXTO_TEXTO):
+                anterior = ini - passo
+                if anterior < 0 or not _imprimivel(raw[anterior]) or (passo == 2 and raw[anterior + 1] != 0):
+                    break
+                ini = anterior
+            fim = pos + len(agulha)
+            for _ in range(CONTEXTO_TEXTO):
+                if fim + passo > len(raw) or not _imprimivel(raw[fim]) or (passo == 2 and raw[fim + 1] != 0):
+                    break
+                fim += passo
+            trecho = raw[ini:fim]
+            if passo == 2:
+                trecho = trecho[::2]
+            yield ini, enc, trecho.decode("latin-1", "replace").strip()
+            limite -= 1
+            pos = baixo.find(agulha, pos + len(agulha))
 
 
 def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[int]] | None = None,
@@ -101,7 +135,7 @@ def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[
     )
     hits: dict[str, list[dict]] = {k: [] for k in needles.values()}
     strings: list[dict] = []
-    livres = padroes_de_texto(textos or [])
+    livres = agulhas_de_texto(textos or [])
     achados_livres = 0
     regions = bytes_read = 0
 
@@ -131,24 +165,17 @@ def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[
                     }
                 )
 
-        for rx, enc in livres:
-            if achados_livres >= MAX_STRINGS_LIVRES:
-                break
-            for m in rx.finditer(raw):
-                texto = m.group(0)
-                if enc == "utf16":
-                    texto = texto[::2]
+        if livres and achados_livres < MAX_STRINGS_LIVRES:
+            for pos, enc, frase in achar_textos(raw, livres, MAX_STRINGS_LIVRES - achados_livres):
                 strings.append(
                     {
-                        "addr": region.base + m.start(),
+                        "addr": region.base + pos,
                         "region": region.base,
                         "enc": enc,
-                        "text": "T:" + texto.decode("latin-1", "replace").strip(),
+                        "text": "T:" + frase,
                     }
                 )
                 achados_livres += 1
-                if achados_livres >= MAX_STRINGS_LIVRES:
-                    break
 
         if len(strings) < MAX_STRINGS + achados_livres:
             for rx, enc in ((STR_ASCII, "ascii"), (STR_UTF16, "utf16")):
