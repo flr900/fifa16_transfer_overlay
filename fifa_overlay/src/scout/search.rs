@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
-use super::quality;
+use super::quality::{self, Habilidade};
 use super::state::{
     Atributo, AtributoRevelado, FaixaAtributo, FiltroPe, FiltrosMissao, JogadorEncontrado, JogadorReferencia, Missao, PosicaoAlvo,
     Relatorio,
@@ -212,7 +212,6 @@ pub fn consultar_base(missao: &Missao, pool: &PlayerPool, hoje: Date, base: &[Jo
     }
     let elenco = nivel_do_elenco(pool);
     let por_id: std::collections::HashMap<u32, &PlayerRaw> = pool.jogadores.iter().map(|j| (j.player_id, j)).collect();
-    let alvo = missao.filtros.fit_posicional;
     let referencia = missao.filtros.referencia.as_ref();
     base.iter()
         .filter_map(|registro| {
@@ -225,10 +224,12 @@ pub fn consultar_base(missao: &Missao, pool: &PlayerPool, hoje: Date, base: &[Jo
             j.falso_positivo = false;
             j.dias_de_curadoria = quality::dias_de_curadoria(j.atributos.len());
             j.titular_elenco = Some(elenco.titular(perfil_comparado(missao, real)));
+            let alvo = alvo_do_jogador(&missao.filtros, real);
             let visto = |a: Atributo| j.valor_visto(a);
             let fit = alvo.and_then(|alvo| quality::forca_fit(alvo, j.posicao, visto));
             let variacao = alvo.and_then(|alvo| quality::variacao_overall(alvo, j.posicao, visto));
             let similaridade = referencia.and_then(|r| quality::similaridade(visto, |a| r.atributo(a).map(f32::from), r.goleiro()));
+            j.fit_alvo = alvo;
             j.fit = fit;
             j.variacao_overall = variacao;
             j.similaridade = similaridade;
@@ -266,9 +267,41 @@ pub fn nivel_do_elenco(pool: &PlayerPool) -> quality::NivelElenco {
 }
 
 /// Perfil de posição com que o jogador é comparado ao elenco: o alvo do
-/// Fit Posicional, se houver; senão o da posição dele.
+/// Fit Posicional dele, se houver; senão o da posição dele.
 fn perfil_comparado(missao: &Missao, jogador: &PlayerRaw) -> quality::Perfil {
-    missao.filtros.fit_posicional.map_or_else(|| quality::perfil_da_posicao(jogador.posicao), |alvo| alvo.perfil())
+    alvo_do_jogador(&missao.filtros, jogador).map_or_else(|| quality::perfil_da_posicao(jogador.posicao), |alvo| alvo.perfil())
+}
+
+/// A posição em que o jogador serve pelo Fit da Missão: a posição única do
+/// filtro de antes, ou (Fit nas posições pedidas) a de melhor fit entre as
+/// pedidas, para quem não joga numa delas. `None` = sem Fit nele.
+pub fn alvo_do_jogador(filtros: &FiltrosMissao, jogador: &PlayerRaw) -> Option<PosicaoAlvo> {
+    if filtros.fit_posicional.is_some() {
+        return filtros.fit_posicional;
+    }
+    if !filtros.fit_nas_posicoes || filtros.posicoes.is_empty() || filtros.posicoes.contains(&quality::perfil_da_posicao(jogador.posicao)) {
+        return None;
+    }
+    melhor_alvo_de_fit(jogador, &filtros.posicoes)
+}
+
+/// Entre as posições pedidas, aquela em que o jogador (de outra posição) tem
+/// o maior fit, desde que passe do limiar (`serve_no_alvo`).
+pub fn melhor_alvo_de_fit(jogador: &PlayerRaw, posicoes: &[quality::Perfil]) -> Option<PosicaoAlvo> {
+    quality::alvos_do_fit(posicoes)
+        .into_iter()
+        .filter(|&alvo| serve_no_alvo(jogador, alvo))
+        .filter_map(|alvo| quality::forca_fit(alvo, jogador.posicao, valores(jogador)).map(|forca| (forca, alvo)))
+        .max_by_key(|&(forca, alvo)| (forca, std::cmp::Reverse(alvo)))
+        .map(|(_, alvo)| alvo)
+}
+
+/// O jogador serve nas posições pedidas: joga numa delas ou, com o Fit,
+/// tem fit para alguma.
+fn serve_nas_posicoes(filtros: &FiltrosMissao, jogador: &PlayerRaw) -> bool {
+    filtros.posicoes.is_empty()
+        || filtros.posicoes.contains(&quality::perfil_da_posicao(jogador.posicao))
+        || (filtros.fit_nas_posicoes && melhor_alvo_de_fit(jogador, &filtros.posicoes).is_some())
 }
 
 /// Valor estimado do jogador pelos números reais (teto de gastos).
@@ -310,7 +343,7 @@ pub fn passa_nos_filtros_com(
         && filtros.pe.is_none_or(|pe| do_pe(jogador, pe))
         && filtros.teto_valor.is_none_or(|teto| valor_real(jogador, hoje) <= teto)
         && filtros.teto_salario.is_none_or(|teto| quality::salario_estimado(jogador.overall) <= teto)
-        && (filtros.posicoes.is_empty() || filtros.posicoes.contains(&quality::perfil_da_posicao(jogador.posicao)))
+        && serve_nas_posicoes(filtros, jogador)
         && filtros.nivel_elenco.is_none_or(|nivel| {
             quality::no_nivel(nivel, jogador.overall, jogador.potencial, elenco.titular(perfil_comparado(missao, jogador)))
         })
@@ -357,8 +390,7 @@ fn notas_de_perfil(missao: &Missao, jogador: &PlayerRaw) -> Vec<u8> {
         u8::try_from(soma / filtros.atributos_dominantes.len() as u32).unwrap_or(u8::MAX)
     });
     let similar = filtros.referencia.as_ref().and_then(|r| similaridade_real(jogador, r));
-    let no_alvo = filtros
-        .fit_posicional
+    let no_alvo = alvo_do_jogador(filtros, jogador)
         .and_then(|alvo| quality::nota_no_perfil(alvo.perfil(), valores(jogador)))
         .map(|nota| nota.round().clamp(0.0, 99.0) as u8);
     [dominante, similar, no_alvo].into_iter().flatten().collect()
@@ -534,7 +566,8 @@ pub fn reobservar(
         nacao: nacao.map(|n| n.nome.clone()).unwrap_or_else(|| anterior.nacao.clone()),
         clube: jogador.clube.clone(),
         clube_id: jogador.clube_id,
-        contrato_ate: jogador.clube_id.map(|_| jogador.contrato_ate),
+        // o que o Olheiro não descobriu (sem Olho para Contratos) continua sem saber
+        contrato_ate: anterior.contrato_ate.and(jogador.clube_id.map(|_| jogador.contrato_ate)),
         observacao: Default::default(),
         overall: quality::faixa_revelada(jogador.overall, precisao, quality::semente(base, pid, 1)),
         potencial: quality::faixa_revelada(jogador.potencial, precisao, quality::semente(base, pid, 2)),
@@ -542,6 +575,7 @@ pub fn reobservar(
         pe: Some(jogador.pe),
         similaridade: None,
         fit: None,
+        fit_alvo: None,
         variacao_overall: None,
         ritmo_ataque: Some(jogador.ritmo_ataque),
         ritmo_defesa: Some(jogador.ritmo_defesa),
@@ -559,6 +593,7 @@ pub fn reobservar(
     let variacao = alvo.and_then(|alvo| quality::variacao_overall(alvo, jogador.posicao, visto));
     let similaridade = referencia.and_then(|r| quality::similaridade(visto, |a| r.atributo(a).map(f32::from), r.goleiro()));
     novo.fit = fit;
+    novo.fit_alvo = alvo.filter(|_| fit.is_some());
     novo.variacao_overall = variacao;
     novo.similaridade = similaridade;
     novo
@@ -570,9 +605,12 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
     let id = missao.id.as_u128();
     let pid = jogador.player_id;
     let precisao = missao.estimativa.precisao_mais_menos;
+    // Caça a Promessas lê o Potencial com a margem de erro pela metade
+    let precisao_potencial = if missao.tem(Habilidade::CacaAPromessas) { precisao.div_ceil(2) } else { precisao };
     let funcao = save_repo::funcao_da_posicao(jogador.posicao);
     let filtros = &missao.filtros;
-    let atributos = quality::ordem_de_observacao(funcao, &filtros.atributos_dominantes, filtros.fit_posicional)
+    let alvo = alvo_do_jogador(filtros, jogador);
+    let atributos = quality::ordem_de_observacao(funcao, &filtros.atributos_dominantes, alvo)
         .into_iter()
         .take(usize::from(missao.estimativa.atributos_revelados))
         .map(|atributo| {
@@ -593,14 +631,15 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         nacao: nacao.map(|n| n.nome.clone()).unwrap_or_else(|| "Outros".to_string()),
         clube: jogador.clube.clone(),
         clube_id: jogador.clube_id,
-        contrato_ate: jogador.clube_id.map(|_| jogador.contrato_ate),
+        contrato_ate: jogador.clube_id.filter(|_| missao.tem(Habilidade::OlhoParaContratos)).map(|_| jogador.contrato_ate),
         observacao: Default::default(),
         overall: quality::faixa_revelada(jogador.overall, precisao, quality::semente(id, pid, 1)),
-        potencial: quality::faixa_revelada(jogador.potencial, precisao, quality::semente(id, pid, 2)),
+        potencial: quality::faixa_revelada(jogador.potencial, precisao_potencial, quality::semente(id, pid, 2)),
         atributos,
         pe: Some(jogador.pe),
         similaridade: None,
         fit: None,
+        fit_alvo: None,
         variacao_overall: None,
         ritmo_ataque: Some(jogador.ritmo_ataque),
         ritmo_defesa: Some(jogador.ritmo_defesa),
@@ -619,9 +658,10 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         .referencia
         .as_ref()
         .and_then(|r| quality::similaridade(visto, |a| r.atributo(a).map(f32::from), r.goleiro()));
-    let fit = filtros.fit_posicional.and_then(|alvo| quality::forca_fit(alvo, jogador.posicao, visto));
-    let variacao = filtros.fit_posicional.and_then(|alvo| quality::variacao_overall(alvo, jogador.posicao, visto));
+    let fit = alvo.and_then(|alvo| quality::forca_fit(alvo, jogador.posicao, visto));
+    let variacao = alvo.and_then(|alvo| quality::variacao_overall(alvo, jogador.posicao, visto));
     encontrado.similaridade = similaridade;
+    encontrado.fit_alvo = alvo.filter(|_| fit.is_some());
     encontrado.fit = fit;
     encontrado.variacao_overall = variacao;
     encontrado
@@ -1038,6 +1078,52 @@ pub mod tests {
         m.filtros.fit_posicional = Some(PosicaoAlvo::LateralDireito);
         let ids: Vec<u32> = p.jogadores.iter().filter(|j| passa_nos_filtros(&m, &p, j, HOJE)).map(|j| j.player_id).collect();
         assert_eq!(ids, vec![4], "LE, ALE e zagueiro ficam de fora; o volante pode virar lateral");
+    }
+
+    #[test]
+    fn fit_nas_posicoes_brings_other_positions_with_fit_and_tags_the_target() {
+        let mut volante_nato = meia(3, 82);
+        volante_nato.posicao = 10; // já é volante
+        let p = pool(vec![meia(1, 80), meia(2, 40), volante_nato]);
+        let mut m = missao_com((50, 99), (50, 99));
+        m.filtros.posicoes = vec![quality::Perfil::Volante];
+        let ids = |m: &Missao| -> Vec<u32> { p.jogadores.iter().filter(|j| passa_nos_filtros(m, &p, j, HOJE)).map(|j| j.player_id).collect() };
+        assert_eq!(ids(&m), vec![3], "sem o Fit, só quem joga de volante");
+        m.filtros.fit_nas_posicoes = true;
+        assert_eq!(ids(&m), vec![1, 3], "com o Fit: o nativo e o meia que defende; o 2 não serve");
+        assert_eq!(alvo_do_jogador(&m.filtros, &p.jogadores[0]), Some(PosicaoAlvo::Volante));
+        assert_eq!(alvo_do_jogador(&m.filtros, &p.jogadores[2]), None, "o nativo não precisa de fit");
+        let achado = revelar(&m, &p, HOJE, &p.jogadores[0]);
+        assert_eq!(achado.fit_alvo, Some(PosicaoAlvo::Volante));
+        assert!(achado.fit.is_some(), "o fit é calculado para a posição em que ele serve");
+        assert_eq!(revelar(&m, &p, HOJE, &p.jogadores[2]).fit_alvo, None);
+        // o Fit sem posições pedidas não faz nada
+        m.filtros.posicoes.clear();
+        assert_eq!(ids(&m).len(), 3);
+        assert_eq!(alvo_do_jogador(&m.filtros, &p.jogadores[0]), None);
+    }
+
+    #[test]
+    fn without_the_contract_eye_the_contract_stays_unknown_and_promise_hunting_halves_the_potential_margin() {
+        let p = pool(vec![jogador(1, 70, 78, 24)]);
+        let mut m = missao_com((50, 99), (50, 99));
+        m.estimativa.precisao_mais_menos = 8;
+        let largura = |m: &Missao| {
+            let f = revelar(m, &p, HOJE, &p.jogadores[0]).potencial;
+            f.max - f.min
+        };
+        // Missão de antes das habilidades: tudo vale
+        assert_eq!(revelar(&m, &p, HOJE, &p.jogadores[0]).contrato_ate, Some(2028));
+        assert_eq!(largura(&m), 8, "legado: potencial pela metade");
+        m.habilidades = Some(Vec::new());
+        assert_eq!(revelar(&m, &p, HOJE, &p.jogadores[0]).contrato_ate, None, "sem Olho para Contratos, o contrato não é descoberto");
+        assert_eq!(largura(&m), 16, "sem Caça a Promessas, o potencial tem a margem cheia");
+        m.habilidades = Some(vec![Habilidade::OlhoParaContratos, Habilidade::CacaAPromessas]);
+        assert_eq!(revelar(&m, &p, HOJE, &p.jogadores[0]).contrato_ate, Some(2028));
+        assert_eq!(largura(&m), 8);
+        // quem já foi acompanhado sem saber o contrato continua sem saber
+        let sem = revelar(&Missao { habilidades: Some(Vec::new()), ..m.clone() }, &p, HOJE, &p.jogadores[0]);
+        assert_eq!(reobservar(&sem, &p.jogadores[0], &p, HOJE, 2, 4, None, None).contrato_ate, None);
     }
 
     #[test]

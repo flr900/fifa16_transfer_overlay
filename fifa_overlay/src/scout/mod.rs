@@ -125,8 +125,6 @@ pub enum Satelite {
     Relatorio,
     /// Painel de campo "Atributo dominante" sobre o formulário (Story 2.8).
     CampoAtributo,
-    /// Painel de campo "Fit Posicional" sobre o formulário (Story 3.4).
-    CampoFit,
     /// O seletor de elenco, um só para os dois papéis (AD-13).
     SeletorElenco(ContextoSeletor),
     /// Designar Generalistas para a Lista de Escolhidos (Épico 6).
@@ -512,7 +510,7 @@ mod tests {
         assert!(nav.push(Satelite::FichaJogador));
         let seletor = Satelite::SeletorElenco(ContextoSeletor::ComparacaoFicha);
         assert!(nav.push(seletor));
-        assert!(!nav.push(Satelite::CampoFit));
+        assert!(!nav.push(Satelite::CampoAtributo));
         assert_eq!(nav.profundidade(), 4);
         assert_eq!(nav.tela_atual(), ScoutScreen::Satelite(seletor));
         nav.pop();

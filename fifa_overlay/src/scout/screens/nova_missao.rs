@@ -27,7 +27,7 @@ use imgui::{StyleColor, Ui, WindowFlags};
 use super::componentes::{self, badge_qualidade, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar, olheiros};
-use crate::scout::quality::{Investimento, TipoMissao};
+use crate::scout::quality::{Habilidade, Investimento, TipoMissao};
 use crate::scout::{ContextoSeletor, Satelite};
 use crate::scout::quality;
 use crate::scout::state::{
@@ -195,6 +195,8 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
 
             secao(ui, fonts, "Posição");
             campo_posicoes(ui, fonts, state, &f.posicoes);
+            ui.dummy([0.0, theme::ESPACO_1]);
+            campo_fit(ui, fonts, state, &previa);
 
             secao(ui, fonts, "Nível");
             campo_nivel(ui, fonts, state, f.nivel_elenco);
@@ -204,11 +206,15 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             ui.dummy([0.0, theme::ESPACO_1]);
             campo_limite(ui, fonts, state, true, f.limite_salario, previa.teto_salario, previa.folha_disponivel);
             ui.dummy([0.0, theme::ESPACO_1]);
-            campo_faixa(ui, fonts, state, "Contrato", f.contrato, CampoFaixa::ContratoMin, CampoFaixa::ContratoMax, "anos restantes");
-            com_fonte(ui, fonts.map(|f| f.meta), || {
-                ui.set_cursor_pos([ui.cursor_pos()[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-                ui.text_colored(theme::TEXT_SECONDARY, texto_contrato(f.contrato));
-            });
+            if previa.tem(Habilidade::OlhoParaContratos) {
+                campo_faixa(ui, fonts, state, "Contrato", f.contrato, CampoFaixa::ContratoMin, CampoFaixa::ContratoMax, "anos restantes");
+                com_fonte(ui, fonts.map(|f| f.meta), || {
+                    ui.set_cursor_pos([ui.cursor_pos()[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+                    ui.text_colored(theme::TEXT_SECONDARY, texto_contrato(f.contrato));
+                });
+            } else {
+                linha_bloqueada(ui, fonts, "Contrato", Habilidade::OlhoParaContratos);
+            }
 
             secao(ui, fonts, "Busca");
             campo_busca(ui, fonts, state, previa.rascunho.modo, previa.rascunho.continua);
@@ -234,27 +240,39 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 divisor(ui);
                 campo_faixa(ui, fonts, state, "Overall", f.overall, CampoFaixa::OverallMin, CampoFaixa::OverallMax, "");
                 divisor(ui);
-                campo_faixa(ui, fonts, state, "Potencial", f.potencial, CampoFaixa::PotencialMin, CampoFaixa::PotencialMax, "");
-                divisor(ui);
-                if campo_painel(ui, fonts, "Atributos dominantes", &texto_atributos(&f.atributos_dominantes)) {
-                    campo = Some(Satelite::CampoAtributo);
+                if previa.tem(Habilidade::CacaAPromessas) {
+                    campo_faixa(ui, fonts, state, "Potencial", f.potencial, CampoFaixa::PotencialMin, CampoFaixa::PotencialMax, "");
+                } else {
+                    linha_bloqueada(ui, fonts, "Potencial", Habilidade::CacaAPromessas);
                 }
                 divisor(ui);
-                campo_ritmo(ui, fonts, state, "Ritmo no ataque", true, &f.ritmo_ataque);
-                divisor(ui);
-                campo_ritmo(ui, fonts, state, "Ritmo na defesa", false, &f.ritmo_defesa);
-                divisor(ui);
-                campo_faixa(ui, fonts, state, "Dribles", f.estrelas_drible, CampoFaixa::DribleMin, CampoFaixa::DribleMax, "estrelas");
-                divisor(ui);
-                campo_pe(ui, fonts, state, f.pe);
-                divisor(ui);
-                if campo_painel(ui, fonts, "Fit Posicional", &super::campo_fit::texto_fit(f.fit_posicional)) {
-                    campo = Some(Satelite::CampoFit);
+                if previa.tem(Habilidade::AtributosDominantes) {
+                    if campo_painel(ui, fonts, "Atributos dominantes", &texto_atributos(&f.atributos_dominantes)) {
+                        campo = Some(Satelite::CampoAtributo);
+                    }
+                } else {
+                    linha_bloqueada(ui, fonts, "Atributos dominantes", Habilidade::AtributosDominantes);
                 }
                 divisor(ui);
-                let referencia = f.referencia.as_ref().map_or("Nenhum", |r| r.nome.as_str());
-                if campo_painel(ui, fonts, "Jogador de Referência", referencia) {
-                    campo = Some(Satelite::SeletorElenco(ContextoSeletor::FiltroMissao));
+                if previa.tem(Habilidade::PerfilFisico) {
+                    campo_ritmo(ui, fonts, state, "Ritmo no ataque", true, &f.ritmo_ataque);
+                    divisor(ui);
+                    campo_ritmo(ui, fonts, state, "Ritmo na defesa", false, &f.ritmo_defesa);
+                    divisor(ui);
+                    campo_faixa(ui, fonts, state, "Dribles", f.estrelas_drible, CampoFaixa::DribleMin, CampoFaixa::DribleMax, "estrelas");
+                    divisor(ui);
+                    campo_pe(ui, fonts, state, f.pe);
+                } else {
+                    linha_bloqueada(ui, fonts, "Ritmos, dribles e pé", Habilidade::PerfilFisico);
+                }
+                divisor(ui);
+                if previa.tem(Habilidade::JogadorDeReferencia) {
+                    let referencia = f.referencia.as_ref().map_or("Nenhum", |r| r.nome.as_str());
+                    if campo_painel(ui, fonts, "Jogador de Referência", referencia) {
+                        campo = Some(Satelite::SeletorElenco(ContextoSeletor::FiltroMissao));
+                    }
+                } else {
+                    linha_bloqueada(ui, fonts, "Jogador de Referência", Habilidade::JogadorDeReferencia);
                 }
             }
             ui.dummy([0.0, theme::ESPACO_3]);
@@ -263,6 +281,55 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     match (rodape(ui, fonts, state, &previa), campo) {
         (Acao::Nenhuma, Some(satelite)) => Acao::AbrirCampo(satelite),
         (acao, _) => acao,
+    }
+}
+
+/// Linha de um filtro que o Olheiro escolhido não sabe pedir: o nome apagado
+/// e o que falta. Não é um item navegável: o controle pula direto para o
+/// próximo filtro.
+fn linha_bloqueada(ui: &Ui, fonts: Option<&Fonts>, nome: &str, habilidade: Habilidade) {
+    let inicio = ui.cursor_pos();
+    com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_DISABLED, nome));
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_DISABLED, texto_exige(habilidade)));
+}
+
+/// "Exige a habilidade Fit Posicional (Tático de 4,5★ ou mais): este
+/// Olheiro não tem."
+pub fn texto_exige(habilidade: Habilidade) -> String {
+    format!("Exige a habilidade {} ({}): este Olheiro não tem.", habilidade.nome(), habilidade.exige())
+}
+
+/// Fit Posicional (habilidade): inclui, nas posições pedidas, quem joga em
+/// outra posição mas tem fit para ela. Liga/desliga; vale com posições
+/// escolhidas.
+fn campo_fit(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
+    if !previa.tem(Habilidade::FitPosicional) {
+        linha_bloqueada(ui, fonts, "Fit Posicional", Habilidade::FitPosicional);
+        return;
+    }
+    let f = &previa.rascunho.filtros;
+    let _id = ui.push_id("fit_posicional");
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Fit Posicional");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let ativo = !f.posicoes.is_empty();
+    let estilo = if f.fit_nas_posicoes && ativo { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+    if componentes::botao_com_largura(ui, fonts, "Incluir quem tem fit", estilo, ativo, Some(LARGURA_VALOR_CAMPO)) {
+        state.alternar_fit_nas_posicoes();
+    }
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto_fit(f)));
+}
+
+/// O que o Fit está fazendo, em uma linha.
+pub fn texto_fit(f: &FiltrosMissao) -> String {
+    if f.posicoes.is_empty() {
+        "Escolha as posições acima para usar o Fit.".to_string()
+    } else if f.fit_nas_posicoes {
+        "Busca também jogadores de outras posições que têm fit para elas.".to_string()
+    } else {
+        "Só quem joga nas posições escolhidas.".to_string()
     }
 }
 
@@ -393,6 +460,18 @@ fn painel_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa
 
     divisor_do_painel(ui);
     olheiros::com_nacoes(state, |nacoes| olheiros::origem_no_fluxo(ui, fonts, &o, nacoes, false, 4));
+
+    divisor_do_painel(ui);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let habilidades = o.habilidades_efetivas();
+        if habilidades.is_empty() {
+            ui.text_colored(theme::TEXT_DISABLED, "Sem habilidades: não aceita filtros avançados.");
+        } else {
+            let nomes = habilidades.iter().map(|h| h.nome()).collect::<Vec<_>>().join(", ");
+            let _cor = ui.push_style_color(StyleColor::Text, theme::ACCENT_PRIMARY);
+            ui.text_wrapped(format!("Habilidades: {nomes}"));
+        }
+    });
 
     if let Some(aviso) = texto_penalidade(previa) {
         divisor_do_painel(ui);

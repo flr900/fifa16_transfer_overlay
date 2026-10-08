@@ -258,6 +258,8 @@ pub fn detalhe(item: &RelatorioNaLista) -> String {
         }
         if let Some(alvo) = m.filtros.fit_posicional {
             partes.push(format!("fit em {}", alvo.nome()));
+        } else if m.filtros.fit_nas_posicoes && !m.filtros.posicoes.is_empty() {
+            partes.push("com fit nas posições".to_string());
         }
         if let Some(r) = &m.filtros.referencia {
             partes.push(format!("parecidos com {}", r.nome));
@@ -427,8 +429,9 @@ pub(super) fn card_jogador(
 
     let clube = if j.clube.is_empty() { "Sem clube" } else { j.clube.as_str() };
     // Fit Posicional: badge extra na linha da posição nativa (Story 3.5).
-    let fit = perfil
-        .alvo
+    let fit = j
+        .fit_alvo
+        .or(perfil.alvo)
         .filter(|_| j.atributos_observados())
         .map(|alvo| format!("FIT {}", texto_fit(alvo, j.fit, j.variacao_overall, perfil.aproximado)));
     let largura_fit = fit.as_ref().map_or(0.0, |t| {
@@ -551,6 +554,7 @@ mod tests {
             pe: None,
             similaridade: None,
             fit: None,
+            fit_alvo: None,
             variacao_overall: None,
             ritmo_ataque: None,
             ritmo_defesa: None,

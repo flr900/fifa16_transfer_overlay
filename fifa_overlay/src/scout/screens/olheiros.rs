@@ -336,7 +336,7 @@ fn cards(
             Some(c) => {
                 let regiao = regioes.get(&c.olheiro.id).map_or("", String::as_str);
                 let rodape = Rodape::Situacao { status: texto_status(c), cor: cor_status(c), linhas: texto_situacao(c, regiao) };
-                let r = olheiro_card::desenhar(ui, fonts, &c.olheiro.id.to_string(), &c.olheiro, nacoes, &[], &rodape);
+                let r = olheiro_card::desenhar(ui, fonts, &c.olheiro.id.to_string(), &c.olheiro, nacoes, &rodape);
                 if r.ativou {
                     acao = Acao::Ativar(c.olheiro.id);
                 }
@@ -526,7 +526,7 @@ pub fn render_contratacao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState
             if indice % por_linha != 0 {
                 ui.same_line_with_spacing(0.0, theme::ESPACO_3);
             }
-            let r = olheiro_card::desenhar(ui, fonts, &oferta.id.to_string(), &oferta.olheiro, nacoes, &[], &Rodape::Oferta(oferta));
+            let r = olheiro_card::desenhar(ui, fonts, &oferta.id.to_string(), &oferta.olheiro, nacoes, &Rodape::Oferta(oferta));
             if r.ativou {
                 acao = AcaoContratacao::Contratar((*oferta).clone());
             }

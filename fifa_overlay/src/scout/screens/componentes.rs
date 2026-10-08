@@ -106,6 +106,17 @@ pub fn badge_tier(tier: Tier) -> EstiloBadge {
     }
 }
 
+/// O selo de uma habilidade de Olheiro (2026-10-08): contorno roxo, texto
+/// curto (FIT, REFERÊNCIA, ...).
+pub fn badge_habilidade(habilidade: crate::scout::quality::Habilidade) -> EstiloBadge {
+    EstiloBadge {
+        texto: habilidade.selo(),
+        contorno: theme::ACCENT_PRIMARY,
+        fundo: theme::ACCENT_PRIMARY_DIM,
+        cor_texto: theme::ACCENT_PRIMARY,
+    }
+}
+
 /// BAIXA / MÉDIA / ALTA na mesma escala de cores dos Tiers
 /// (DESIGN.md → quality-low/-medium/-high).
 pub fn badge_qualidade(qualidade: Qualidade) -> EstiloBadge {

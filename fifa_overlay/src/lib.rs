@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v7 — Contrato de 12 meses, multa só na carência dos 12 primeiros meses";
+const BUILD_TAG: &str = "7.6-v8 — Habilidades de Olheiro, Base do Scout, listas tabulares e Opções do Olheiro";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.

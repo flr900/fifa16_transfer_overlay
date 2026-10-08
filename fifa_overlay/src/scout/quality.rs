@@ -197,6 +197,174 @@ impl PerfilOlheiro {
     }
 }
 
+// ---------------------------------------------------------------------
+// Habilidades dos Olheiros (2026-10-08)
+// ---------------------------------------------------------------------
+//
+// Uma habilidade DESTRAVA algo na busca (um filtro, um dado); a qualidade da
+// resposta continua sendo das estrelas e da precisão. Cada uma é liga/desliga
+// (os Atributos Dominantes têm dois tetos) e nasce no mercado ligada a um
+// atributo do Olheiro: o Fit só em Tático de 4,5★ ou mais, a Referência e os
+// Atributos Dominantes em Tático de 3★ ou mais, os Contratos em Caçador de
+// Medalhões de 3★ ou mais, as Promessas em Caçador de Jovens de 3★ ou mais e o
+// Perfil Físico em qualquer um. Júnior tem 0 ou 1, Experiente até 2, Elite até
+// 3. Olheiros de antes não têm a lista gravada e valem como se tivessem todas.
+
+/// O que um Olheiro sabe fazer. No JSON: `"fit_posicional"` etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Habilidade {
+    /// Busca também quem joga em outra posição mas tem fit para as
+    /// posições pedidas.
+    FitPosicional,
+    /// "Parecidos com X": o filtro do Jogador de Referência.
+    JogadorDeReferencia,
+    /// "O melhor driblador, o melhor passador": os atributos dominantes.
+    AtributosDominantes,
+    /// O contrato exato dos jogadores e o filtro de contrato.
+    OlhoParaContratos,
+    /// Ritmos de trabalho, pé preferido e dribles.
+    PerfilFisico,
+    /// O filtro de Potencial e o Potencial com a margem de erro pela metade.
+    CacaAPromessas,
+}
+
+impl Habilidade {
+    pub const TODAS: [Habilidade; 6] = [
+        Habilidade::FitPosicional,
+        Habilidade::JogadorDeReferencia,
+        Habilidade::AtributosDominantes,
+        Habilidade::OlhoParaContratos,
+        Habilidade::PerfilFisico,
+        Habilidade::CacaAPromessas,
+    ];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Habilidade::FitPosicional => "Fit Posicional",
+            Habilidade::JogadorDeReferencia => "Jogador de Referência",
+            Habilidade::AtributosDominantes => "Atributos Dominantes",
+            Habilidade::OlhoParaContratos => "Olho para Contratos",
+            Habilidade::PerfilFisico => "Perfil Físico",
+            Habilidade::CacaAPromessas => "Caça a Promessas",
+        }
+    }
+
+    /// O texto curto do selo no card.
+    pub fn selo(self) -> &'static str {
+        match self {
+            Habilidade::FitPosicional => "FIT",
+            Habilidade::JogadorDeReferencia => "REFERÊNCIA",
+            Habilidade::AtributosDominantes => "DOMINANTES",
+            Habilidade::OlhoParaContratos => "CONTRATOS",
+            Habilidade::PerfilFisico => "FÍSICO",
+            Habilidade::CacaAPromessas => "PROMESSAS",
+        }
+    }
+
+    /// O que ela destrava.
+    pub fn descricao(self) -> &'static str {
+        match self {
+            Habilidade::FitPosicional => "Busca, nas posições pedidas, também jogadores de outras posições que têm fit para elas.",
+            Habilidade::JogadorDeReferencia => "Aceita o filtro \"parecidos com\" um jogador de referência.",
+            Habilidade::AtributosDominantes => "Aceita pedir os atributos em que o jogador é dos melhores (até 2; até 3 com Tático de 4,5★).",
+            Habilidade::OlhoParaContratos => "Descobre o contrato exato dos jogadores e aceita o filtro de contrato.",
+            Habilidade::PerfilFisico => "Aceita filtrar por ritmo de ataque e defesa, pé preferido e dribles.",
+            Habilidade::CacaAPromessas => "Aceita o filtro de Potencial e lê o Potencial com a margem de erro pela metade.",
+        }
+    }
+
+    /// Quem pode tê-la (o que o mercado exige do perfil dele).
+    pub fn exige(self) -> &'static str {
+        match self {
+            Habilidade::FitPosicional => "Tático de 4,5★ ou mais",
+            Habilidade::JogadorDeReferencia | Habilidade::AtributosDominantes => "Tático de 3★ ou mais",
+            Habilidade::OlhoParaContratos => "Caçador de Medalhões de 3★ ou mais",
+            Habilidade::CacaAPromessas => "Caçador de Jovens de 3★ ou mais",
+            Habilidade::PerfilFisico => "qualquer Olheiro",
+        }
+    }
+
+    /// O perfil dele permite ter esta habilidade?
+    pub fn elegivel(self, perfil: &PerfilOlheiro) -> bool {
+        let minimo = |e: Estrelas, meias: u8| e.meias() >= meias;
+        match self {
+            Habilidade::FitPosicional => minimo(perfil.tatico, 9),
+            Habilidade::JogadorDeReferencia | Habilidade::AtributosDominantes => minimo(perfil.tatico, 6),
+            Habilidade::OlhoParaContratos => minimo(perfil.medalhoes, 6),
+            Habilidade::CacaAPromessas => minimo(perfil.jovens, 6),
+            Habilidade::PerfilFisico => true,
+        }
+    }
+
+    /// Chance (%) de um Olheiro elegível ter a habilidade.
+    fn chance(self) -> u32 {
+        match self {
+            Habilidade::FitPosicional => 60,
+            Habilidade::JogadorDeReferencia => 50,
+            Habilidade::AtributosDominantes | Habilidade::OlhoParaContratos | Habilidade::CacaAPromessas => 55,
+            Habilidade::PerfilFisico => 45,
+        }
+    }
+
+    /// Quanto ela encarece a contratação (%): o Perfil Físico, que destrava
+    /// só filtros simples, pouco; as outras, mais.
+    fn acrescimo_no_preco(self) -> i64 {
+        match self {
+            Habilidade::PerfilFisico => 5,
+            _ => 12,
+        }
+    }
+}
+
+/// Quantas habilidades um Olheiro do `tier` pode ter: Júnior 1, Experiente 2,
+/// Elite 3.
+pub fn maximo_de_habilidades(tier: Tier) -> usize {
+    match tier {
+        Tier::Junior => 1,
+        Tier::Experiente => 2,
+        Tier::Elite => 3,
+    }
+}
+
+/// Quantos atributos dominantes o Olheiro com a habilidade deixa pedir: 2, ou
+/// 3 com Tático de 4,5★ ou mais.
+pub fn maximo_de_dominantes(perfil: &PerfilOlheiro) -> usize {
+    if perfil.tatico.meias() >= 9 {
+        MAX_DOMINANTES
+    } else {
+        MAX_DOMINANTES - 1
+    }
+}
+
+/// Sorteia as habilidades de um Olheiro do mercado (determinístico pela
+/// semente da oferta): cada habilidade que o perfil permite sai pela chance
+/// dela; passando do teto do Tier, ficam as primeiras de um embaralhamento
+/// da própria semente.
+pub fn sortear_habilidades(perfil: &PerfilOlheiro, tier: Tier, semente: u64) -> Vec<Habilidade> {
+    let mut sorteadas: Vec<(u64, Habilidade)> = Habilidade::TODAS
+        .iter()
+        .zip(40u32..)
+        .filter(|(h, _)| h.elegivel(perfil))
+        .filter(|(h, canal)| sortear(semente, *canal, 100) < h.chance())
+        .map(|(h, canal)| (semente_de(semente, canal + 100), *h))
+        .collect();
+    sorteadas.sort_by_key(|(ordem, _)| *ordem);
+    sorteadas.truncate(maximo_de_habilidades(tier));
+    let mut habilidades: Vec<Habilidade> = sorteadas.into_iter().map(|(_, h)| h).collect();
+    habilidades.sort();
+    habilidades
+}
+
+/// O preço da contratação com as habilidades: cada uma soma o acréscimo dela
+/// (12%, ou 5% no Perfil Físico) ao preço de base, arredondado a 10 mil.
+pub fn custo_contratacao_com(perfil: &PerfilOlheiro, continente: Option<Confederacao>, mercados: usize, habilidades: &[Habilidade]) -> i32 {
+    let base = i64::from(custo_contratacao(perfil, continente, mercados));
+    let acrescimo: i64 = habilidades.iter().map(|h| h.acrescimo_no_preco()).sum();
+    let total = base * (100 + acrescimo) / 100;
+    i32::try_from((total + 5_000) / 10_000 * 10_000).unwrap_or(i32::MAX).max(100_000)
+}
+
 /// Um mercado que o Olheiro conhece bem (Épico 5): um país ou um
 /// continente inteiro. No JSON: `{"pais": {"id": 54, "continente":
 /// "america_do_sul"}}` ou `{"continente": "europa"}`.
@@ -500,6 +668,8 @@ pub struct CandidatoOlheiro {
     pub perfil: PerfilOlheiro,
     pub pais: Option<u16>,
     pub mercados: Vec<Mercado>,
+    /// O que ele sabe fazer (`sortear_habilidades`).
+    pub habilidades: Vec<Habilidade>,
 }
 
 /// Parte das ofertas que vêm com perfil médio (equilibrado): os quatro
@@ -604,7 +774,8 @@ fn gerar_um(
             mercados.push(Mercado::Pais { id: outro.id, continente: outro.continente });
         }
     }
-    CandidatoOlheiro { indice, semente: s, perfil, pais: pais.map(|p| p.id), mercados }
+    let habilidades = sortear_habilidades(&perfil, tier, s);
+    CandidatoOlheiro { indice, semente: s, perfil, pais: pais.map(|p| p.id), mercados, habilidades }
 }
 
 /// Sorteia um país pelo peso (relevância das ligas); o país do clube pesa 4×.
@@ -1070,8 +1241,10 @@ pub const PE_FRACO_AMBIDESTRO: u8 = 4;
 /// **Tática**, a especialidade do Tático; idade máxima até `IDADE_JOVEM` é
 /// uma Missão de **Jovens**; senão, valem as faixas.
 pub fn tipo_por_filtros(filtros: &FiltrosMissao) -> TipoMissao {
-    let pede_perfil =
-        !filtros.atributos_dominantes.is_empty() || filtros.fit_posicional.is_some() || filtros.referencia.is_some();
+    let pede_perfil = !filtros.atributos_dominantes.is_empty()
+        || filtros.fit_posicional.is_some()
+        || (filtros.fit_nas_posicoes && !filtros.posicoes.is_empty())
+        || filtros.referencia.is_some();
     if pede_perfil {
         return TipoMissao::Tatica;
     }
@@ -1409,8 +1582,8 @@ pub const PCT_MULTA_RESCISAO: i64 = 20;
 
 /// A multa de rescisão de um Olheiro: fixa para ele (um quinto do que custou
 /// contratá-lo, então Olheiros melhores cobram mais), no mínimo 50 mil.
-pub fn multa_de_rescisao(perfil: &PerfilOlheiro, continente: Option<Confederacao>, mercados: usize) -> i32 {
-    let total = i64::from(custo_contratacao(perfil, continente, mercados)) * PCT_MULTA_RESCISAO / 100;
+pub fn multa_de_rescisao(perfil: &PerfilOlheiro, continente: Option<Confederacao>, mercados: usize, habilidades: &[Habilidade]) -> i32 {
+    let total = i64::from(custo_contratacao_com(perfil, continente, mercados, habilidades)) * PCT_MULTA_RESCISAO / 100;
     let arredondada = (total + ARREDONDAMENTO_CUSTO / 2) / ARREDONDAMENTO_CUSTO * ARREDONDAMENTO_CUSTO;
     i32::try_from(arredondada).unwrap_or(i32::MAX).max(50_000)
 }
@@ -1427,6 +1600,12 @@ pub fn revelados(fracao: f32, alvo: usize, encontrados: usize) -> usize {
 // ---------------------------------------------------------------------
 // Fit Posicional (Story 3.4)
 // ---------------------------------------------------------------------
+
+/// As posições-alvo do Fit para as posições pedidas (os grupos de `Perfil`):
+/// todas as `PosicaoAlvo` cujo perfil está entre elas.
+pub fn alvos_do_fit(posicoes: &[Perfil]) -> Vec<PosicaoAlvo> {
+    PosicaoAlvo::TODAS.into_iter().filter(|alvo| posicoes.contains(&alvo.perfil())).collect()
+}
 
 /// Posições que o filtro Fit Posicional oferece (o goleiro fica de fora:
 /// "um zagueiro que jogaria no gol" não é uma pergunta de scout). Lados
@@ -1452,7 +1631,6 @@ pub enum PosicaoAlvo {
 
 impl PosicaoAlvo {
     /// Todas, da defesa para o ataque.
-    #[allow(dead_code)] // usado nos testes
     pub const TODAS: [PosicaoAlvo; 14] = [
         PosicaoAlvo::Zagueiro,
         PosicaoAlvo::LateralDireito,
@@ -3010,6 +3188,55 @@ mod tests {
     }
 
     #[test]
+    fn abilities_follow_the_eligibility_and_tier_caps_and_are_deterministic() {
+        let fraco = PerfilOlheiro { jovens: Estrelas(4), medalhoes: Estrelas(4), tatico: Estrelas(4), generalista: Estrelas(4), rede: Estrelas(5) };
+        let forte = PerfilOlheiro { jovens: Estrelas(9), medalhoes: Estrelas(9), tatico: Estrelas(9), generalista: Estrelas(9), rede: Estrelas(5) };
+        for semente in 0..400u64 {
+            // 2★ em tudo: só o Perfil Físico é possível
+            assert!(sortear_habilidades(&fraco, Tier::Elite, semente).iter().all(|&h| h == Habilidade::PerfilFisico));
+            for (tier, teto) in [(Tier::Junior, 1), (Tier::Experiente, 2), (Tier::Elite, 3)] {
+                let h = sortear_habilidades(&forte, tier, semente);
+                assert!(h.len() <= teto, "{tier:?} {h:?}");
+                assert_eq!(h, sortear_habilidades(&forte, tier, semente), "mesma semente, mesmas habilidades");
+                assert!(h.windows(2).all(|w| w[0] < w[1]), "sem repetir, em ordem");
+            }
+        }
+        let todas = |tier| (0..400u64).map(|s| sortear_habilidades(&forte, tier, s).len()).collect::<Vec<_>>();
+        assert!(todas(Tier::Elite).contains(&3) && todas(Tier::Elite).contains(&0), "há de tudo no mercado");
+        assert!(!todas(Tier::Junior).contains(&2));
+        // o Fit pede Tático de 4,5★; a Referência, 3★
+        let tatico = |meias| PerfilOlheiro { tatico: Estrelas(meias), ..fraco };
+        assert!(!Habilidade::FitPosicional.elegivel(&tatico(8)) && Habilidade::FitPosicional.elegivel(&tatico(9)));
+        assert!(!Habilidade::JogadorDeReferencia.elegivel(&tatico(5)) && Habilidade::JogadorDeReferencia.elegivel(&tatico(6)));
+        assert_eq!((maximo_de_dominantes(&tatico(6)), maximo_de_dominantes(&tatico(9))), (2, 3));
+    }
+
+    #[test]
+    fn abilities_make_the_hire_more_expensive_and_the_cheap_one_costs_less() {
+        let perfil = PerfilOlheiro { jovens: Estrelas(4), medalhoes: Estrelas(8), tatico: Estrelas(8), generalista: Estrelas(6), rede: Estrelas(5) };
+        let c = |h: &[Habilidade]| custo_contratacao_com(&perfil, Some(Confederacao::Africa), 1, h);
+        let base = custo_contratacao(&perfil, Some(Confederacao::Africa), 1);
+        assert!((c(&[]) - base).abs() <= 10_000, "sem habilidades custa o preço de base");
+        assert!(c(&[Habilidade::PerfilFisico]) > c(&[]));
+        assert!(c(&[Habilidade::FitPosicional]) > c(&[Habilidade::PerfilFisico]), "o Físico é o acréscimo menor");
+        assert!(c(&[Habilidade::FitPosicional, Habilidade::OlhoParaContratos]) > c(&[Habilidade::FitPosicional]));
+        // a multa de rescisão acompanha
+        assert!(multa_de_rescisao(&perfil, Some(Confederacao::Africa), 1, &[Habilidade::FitPosicional]) > multa_de_rescisao(&perfil, Some(Confederacao::Africa), 1, &[]));
+    }
+
+    #[test]
+    fn the_market_hands_out_abilities_that_match_each_olheiros_profile() {
+        let grande = clube(20, 20, 1, 21);
+        let ofertas: Vec<CandidatoOlheiro> = (0..60).flat_map(|m| gerar_ofertas(atratividade(&grande), m, 0xABCDEF, &grande, &paises())).collect();
+        assert!(ofertas.iter().any(|o| !o.habilidades.is_empty()), "alguns têm habilidades");
+        assert!(ofertas.iter().any(|o| o.habilidades.is_empty()), "outros não têm nenhuma");
+        for o in &ofertas {
+            assert!(o.habilidades.iter().all(|h| h.elegivel(&o.perfil)), "{o:?}");
+            assert!(o.habilidades.len() <= maximo_de_habilidades(o.perfil.tier()), "{o:?}");
+        }
+    }
+
+    #[test]
     fn the_monthly_market_is_deterministic_and_bigger_clubs_see_more_and_better_olheiros() {
         let grande = clube(20, 20, 1, 21);
         let pequeno = clube(4, 1, 3, 0);
@@ -3108,7 +3335,7 @@ mod tests {
     fn the_rescission_fine_is_fixed_per_olheiro_and_grows_with_his_quality() {
         let junior = PerfilOlheiro::v1(Especializacao::Tatico, Tier::Junior);
         let elite = PerfilOlheiro::v1(Especializacao::Tatico, Tier::Elite);
-        let multa = |p: &PerfilOlheiro| multa_de_rescisao(p, Some(Confederacao::Africa), 1);
+        let multa = |p: &PerfilOlheiro| multa_de_rescisao(p, Some(Confederacao::Africa), 1, &[]);
         assert!(multa(&junior) >= 50_000, "tem piso");
         assert!(multa(&elite) > multa(&junior) * 3, "{} contra {}", multa(&elite), multa(&junior));
         assert_eq!(multa(&elite), multa(&elite), "fixa: não muda entre chamadas");

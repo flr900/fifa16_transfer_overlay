@@ -425,6 +425,7 @@ mod tests {
             pe: Some(Pe::Direito),
             similaridade: None,
             fit: None,
+            fit_alvo: None,
             variacao_overall: None,
             ritmo_ataque: Some(RitmoTrabalho::Medio),
             ritmo_defesa: Some(RitmoTrabalho::Medio),

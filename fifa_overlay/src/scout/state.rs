@@ -270,6 +270,10 @@ pub struct Olheiro {
     /// 6). Enquanto isso não aceita Missão.
     #[serde(default)]
     pub acompanhando_desde: Option<Date>,
+    /// O que ele sabe fazer (2026-10-08). `None` = Olheiro de antes das
+    /// habilidades: vale como se tivesse todas (ninguém perde um filtro).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub habilidades: Option<Vec<quality::Habilidade>>,
 }
 
 /// A nação de um Olheiro como gravada (nome para a tela, continente para
@@ -304,7 +308,18 @@ impl Olheiro {
     /// O que ele cobra para ser tirado de um contrato no meio (fixo para
     /// ele: um quinto do que custou contratá-lo).
     pub fn multa_de_rescisao(&self) -> i32 {
-        quality::multa_de_rescisao(&self.perfil(), self.nacao.as_ref().map(|n| n.continente), self.mercados.len())
+        quality::multa_de_rescisao(&self.perfil(), self.nacao.as_ref().map(|n| n.continente), self.mercados.len(), &self.habilidades_efetivas())
+    }
+
+    /// As habilidades dele de verdade: as gravadas, ou todas (Olheiro de
+    /// antes delas).
+    pub fn habilidades_efetivas(&self) -> Vec<quality::Habilidade> {
+        self.habilidades.clone().unwrap_or_else(|| quality::Habilidade::TODAS.to_vec())
+    }
+
+    /// Ele sabe fazer isso?
+    pub fn tem(&self, habilidade: quality::Habilidade) -> bool {
+        self.habilidades.as_ref().is_none_or(|lista| lista.contains(&habilidade))
     }
 
     /// Só Generalistas mantêm a Lista de Escolhidos (pedido do Felipe).
@@ -556,6 +571,11 @@ pub struct FiltrosMissao {
     /// serve nela (Story 3.4).
     #[serde(default)]
     pub fit_posicional: Option<PosicaoAlvo>,
+    /// Fit Posicional como habilidade (2026-10-08): além de quem joga nas
+    /// `posicoes` pedidas, entram jogadores de OUTRA posição com fit para
+    /// alguma delas; cada um vem com a posição em que serve (`fit_alvo`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fit_nas_posicoes: bool,
     /// "Outro como ele": só entram perfis parecidos com o deste jogador do
     /// elenco (Story 3.3).
     #[serde(default)]
@@ -608,6 +628,7 @@ impl Default for FiltrosMissao {
             teto_valor: None,
             teto_salario: None,
             fit_posicional: None,
+            fit_nas_posicoes: false,
             referencia: None,
         }
     }
@@ -665,6 +686,39 @@ fn estrelas_padrao() -> FaixaAtributo {
 }
 
 impl FiltrosMissao {
+    /// Tira o que o Olheiro não sabe pedir (2026-10-08): cada habilidade
+    /// destrava filtros, e sem ela o filtro volta ao padrão (nunca fica um
+    /// filtro "escondido" valendo). Olheiro de antes das habilidades sabe
+    /// tudo e não perde nada.
+    pub fn sanear(&mut self, olheiro: &Olheiro) {
+        use quality::Habilidade as H;
+        let padrao = FiltrosMissao::default();
+        if !olheiro.tem(H::JogadorDeReferencia) {
+            self.referencia = None;
+        }
+        if !olheiro.tem(H::AtributosDominantes) {
+            self.atributos_dominantes.clear();
+        } else if olheiro.habilidades.is_some() {
+            self.atributos_dominantes.truncate(quality::maximo_de_dominantes(&olheiro.perfil()));
+        }
+        if !olheiro.tem(H::OlhoParaContratos) {
+            self.contrato = padrao.contrato;
+        }
+        if !olheiro.tem(H::PerfilFisico) {
+            self.ritmo_ataque.clear();
+            self.ritmo_defesa.clear();
+            self.estrelas_drible = padrao.estrelas_drible;
+            self.pe = None;
+        }
+        if !olheiro.tem(H::CacaAPromessas) {
+            self.potencial = padrao.potencial;
+        }
+        if !olheiro.tem(H::FitPosicional) {
+            self.fit_posicional = None;
+            self.fit_nas_posicoes = false;
+        }
+    }
+
     /// Algum filtro de onde o jogador joga?
     pub fn tem_geografia(&self) -> bool {
         !(self.continentes.is_empty() && self.paises_dos_clubes.is_empty() && self.ligas.is_empty())
@@ -874,6 +928,17 @@ pub fn mesma_localidade(a: &FiltrosMissao, b: &FiltrosMissao) -> bool {
 }
 
 impl PreviaMissao {
+    /// O Olheiro escolhido para a Missão.
+    pub fn olheiro(&self) -> Option<&Olheiro> {
+        let id = self.rascunho.olheiro_id?;
+        self.olheiros.iter().find(|c| c.olheiro.id == id).map(|c| &c.olheiro)
+    }
+
+    /// O Olheiro escolhido sabe fazer isso? (Sem Olheiro, nada é bloqueado.)
+    pub fn tem(&self, habilidade: quality::Habilidade) -> bool {
+        self.olheiro().is_none_or(|o| o.tem(habilidade))
+    }
+
     /// O que sai do orçamento ao confirmar: a pesquisa nova e a multa.
     pub fn custo_total(&self) -> i32 {
         self.custo.saturating_add(self.multa.map_or(0, |m| m.valor))
@@ -1088,8 +1153,9 @@ pub fn montar_ofertas(
                 mercados: c.mercados.clone(),
                 oferta_id: Some(id),
                 acompanhando_desde: None,
+                habilidades: Some(c.habilidades.clone()),
             };
-            let custo = quality::custo_contratacao(&c.perfil, nacao.map(|n| n.confederacao), c.mercados.len());
+            let custo = quality::custo_contratacao_com(&c.perfil, nacao.map(|n| n.confederacao), c.mercados.len(), &c.habilidades);
             let faltam = orcamento.and_then(|saldo| (saldo < custo).then(|| custo.saturating_sub(saldo)));
             OfertaOlheiro { id, olheiro, custo, faltam }
         })
@@ -1156,6 +1222,10 @@ pub struct Missao {
     /// Renova o contrato sozinho quando ele acaba, havendo verba.
     #[serde(default = "verdadeiro")]
     pub renovar_sozinho: bool,
+    /// As habilidades que o Olheiro tinha ao encomendar (2026-10-08). `None`
+    /// = Missão de antes delas: valia tudo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub habilidades: Option<Vec<quality::Habilidade>>,
 }
 
 fn um_bloco() -> u16 {
@@ -1167,6 +1237,11 @@ fn verdadeiro() -> bool {
 }
 
 impl Missao {
+    /// O Olheiro desta Missão sabia fazer isso ao encomendá-la?
+    pub fn tem(&self, habilidade: quality::Habilidade) -> bool {
+        self.habilidades.as_ref().is_none_or(|lista| lista.contains(&habilidade))
+    }
+
     /// Onde o contrato de 12 meses em vigor acaba. Nas contínuas de antes
     /// (sem contrato), é o fim do bloco pago.
     pub fn fim_do_contrato(&self) -> Date {
@@ -1258,6 +1333,7 @@ impl Missao {
             contratos: Vec::new(),
             renovar_sozinho: true,
             investimento: quality::Investimento::Padrao,
+            habilidades: None,
         }
     }
 }
@@ -1308,6 +1384,10 @@ pub struct JogadorEncontrado {
     /// Olheiro viu (Story 3.4).
     #[serde(default)]
     pub fit: Option<u8>,
+    /// A posição-alvo do `fit` quando o Fit veio das posições da Missão (cada
+    /// jogador serve numa): `None` = a posição-alvo é a da Missão, se houver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit_alvo: Option<PosicaoAlvo>,
     /// Quanto o Overall mudaria na posição-alvo (estimativa, pelo que o
     /// Olheiro viu; 2026-10-03).
     #[serde(default)]
@@ -1414,6 +1494,7 @@ impl JogadorEncontrado {
             pe: Some(Pe::Direito),
             similaridade: None,
             fit: None,
+            fit_alvo: None,
             variacao_overall: None,
             ritmo_ataque: Some(RitmoTrabalho::Medio),
             ritmo_defesa: Some(RitmoTrabalho::Medio),
@@ -2360,7 +2441,7 @@ impl ScoutState {
             adicionado_em: hoje,
             prioridade: false,
             acompanhamento: None,
-            alvo: missao.and_then(|m| m.filtros.fit_posicional),
+            alvo: ficha.jogador.fit_alvo.or_else(|| missao.and_then(|m| m.filtros.fit_posicional)),
             referencia: missao.and_then(|m| m.filtros.referencia.clone()),
             relatorio_id: Some(r.id),
             no_jogo: false,
@@ -3972,15 +4053,26 @@ impl ScoutState {
         }
     }
 
-    /// Atributo dominante entra/sai (até `quality::MAX_DOMINANTES`).
+    /// Quantos atributos dominantes o Olheiro do formulário deixa pedir.
+    pub fn max_dominantes(&self) -> usize {
+        self.previa_missao()
+            .and_then(|p| p.rascunho.olheiro_id.and_then(|id| p.olheiros.into_iter().find(|c| c.olheiro.id == id)))
+            .map_or(quality::MAX_DOMINANTES, |c| match c.olheiro.habilidades {
+                Some(_) => quality::maximo_de_dominantes(&c.olheiro.perfil()),
+                None => quality::MAX_DOMINANTES,
+            })
+    }
+
+    /// Atributo dominante entra/sai (até `max_dominantes`).
     pub fn alternar_atributo_da_missao(&mut self, atributo: Atributo) {
+        let maximo = self.max_dominantes();
         if let Some(r) = self.rascunho_missao.as_mut() {
             let lista = &mut r.filtros.atributos_dominantes;
             match lista.iter().position(|a| *a == atributo) {
                 Some(i) => {
                     lista.remove(i);
                 }
-                None if lista.len() < quality::MAX_DOMINANTES => lista.push(atributo),
+                None if lista.len() < maximo => lista.push(atributo),
                 None => return,
             }
             r.erro = None;
@@ -3995,8 +4087,19 @@ impl ScoutState {
         }
     }
 
-    /// Fit Posicional escolhido no painel de campo (Story 3.4); `None` =
-    /// sem esse filtro.
+    /// "Incluir quem tem fit" (2026-10-08): liga/desliga o Fit Posicional da
+    /// Missão, que busca também jogadores de outras posições com fit para as
+    /// posições pedidas.
+    pub fn alternar_fit_nas_posicoes(&mut self) {
+        if let Some(r) = self.rascunho_missao.as_mut() {
+            r.filtros.fit_nas_posicoes = !r.filtros.fit_nas_posicoes;
+            r.erro = None;
+        }
+    }
+
+    /// Fit Posicional de UMA posição (Story 3.4): o filtro de antes das
+    /// habilidades, que as Missões antigas ainda usam.
+    #[cfg(test)]
     pub fn definir_fit_da_missao(&mut self, alvo: Option<PosicaoAlvo>) {
         if let Some(r) = self.rascunho_missao.as_mut() {
             r.filtros.fit_posicional = alvo;
@@ -4098,7 +4201,7 @@ impl ScoutState {
     /// O formulário inteiro, ou `None` se ele não está aberto (ou a
     /// carreira deixou de estar pronta — o formulário deve fechar).
     pub fn previa_missao(&self) -> Option<PreviaMissao> {
-        let rascunho = self.rascunho_missao.clone()?;
+        let mut rascunho = self.rascunho_missao.clone()?;
         let (orcamento_atual, data_atual) = match &self.status {
             CarreiraStatus::Pronta(c) => (c.orcamento_transferencias, c.data_atual),
             _ => return None,
@@ -4106,6 +4209,9 @@ impl ScoutState {
         let olheiros = self.olheiros_contratados();
         let contratado = rascunho.olheiro_id.and_then(|id| olheiros.iter().find(|c| c.olheiro.id == id && c.aceita_missao_nova()));
         let escolhido = contratado.map(|c| c.olheiro.clone());
+        if let Some(o) = &escolhido {
+            rascunho.filtros.sanear(o);
+        }
         let tipo = quality::tipo_por_filtros(&rascunho.filtros);
         let amplitude = self.amplitude_da_geografia(&rascunho.filtros);
         let (penalidade, distancia_mercado) =
@@ -4220,6 +4326,7 @@ impl ScoutState {
             // uma contínua nasce com o primeiro contrato de 12 meses
             contratos: if previa.rascunho.continua { vec![previa.data_atual] } else { Vec::new() },
             renovar_sozinho: true,
+            habilidades: previa.olheiros.iter().find(|c| c.olheiro.id == olheiro_id).and_then(|c| c.olheiro.habilidades.clone()),
         };
         let nova = missao.clone();
         // a multa e a pesquisa nova saem juntas; o contrato antigo acaba na
@@ -4701,6 +4808,7 @@ impl ScoutState {
                 let quando = r.gerado_em.or_else(|| item.missao.as_ref().map(|m| m.criada_em));
                 let destino = if r.arquivado { &mut arquivadas } else { &mut ativas };
                 for jogador in item.relatorio.jogadores {
+                    let fit_alvo = jogador.fit_alvo.or_else(|| item.missao.as_ref().and_then(|m| m.filtros.fit_posicional));
                     destino.push(Ocorrencia {
                         jogador,
                         relatorio_id: r.id,
@@ -4710,7 +4818,7 @@ impl ScoutState {
                         modo: item.missao.as_ref().map(|m| m.modo_busca),
                         regiao: regiao.clone(),
                         quando,
-                        fit_alvo: item.missao.as_ref().and_then(|m| m.filtros.fit_posicional),
+                        fit_alvo,
                         referencia: item.missao.as_ref().and_then(|m| m.filtros.referencia.as_ref()).map(|j| j.nome.clone()),
                         qualidade: r.qualidade,
                         arquivado: r.arquivado,
@@ -5642,6 +5750,7 @@ mod tests {
             perfil: quality::PerfilOlheiro { jovens: e, medalhoes: e.menos(2), tatico: e.menos(2), generalista: e.menos(2), rede: quality::Estrelas(5) },
             pais: Some(pais),
             mercados: vec![quality::Mercado::Pais { id: pais, continente: Confederacao::AmericaDoSul }],
+            habilidades: Vec::new(),
         }
     }
 
@@ -5872,6 +5981,74 @@ mod tests {
 
     fn olheiro(especializacao: Especializacao, tier: Tier) -> Olheiro {
         Olheiro { id: Uuid::new_v4(), especializacao, tier, ..Default::default() }
+    }
+
+    #[test]
+    fn legacy_olheiros_keep_every_filter_and_new_ones_lose_what_they_lack() {
+        use quality::Habilidade as H;
+        let completo = FiltrosMissao {
+            atributos_dominantes: vec![Atributo::Drible, Atributo::Visao, Atributo::PasseCurto],
+            contrato: FaixaAtributo { min: 2, max: 5 },
+            potencial: FaixaAtributo { min: 80, max: 99 },
+            pe: Some(FiltroPe::Direito),
+            ritmo_ataque: vec![RitmoTrabalho::Alto],
+            estrelas_drible: FaixaAtributo { min: 4, max: 5 },
+            fit_nas_posicoes: true,
+            fit_posicional: Some(PosicaoAlvo::Volante),
+            posicoes: vec![quality::Perfil::Volante],
+            ..FiltrosMissao::default()
+        };
+        let legado = olheiro(Especializacao::Tatico, Tier::Junior);
+        let mut f = completo.clone();
+        f.sanear(&legado);
+        assert_eq!(f, completo, "Olheiro de antes das habilidades não perde nada");
+
+        // sem nenhuma: tudo volta ao padrão, menos a posição (que é de todos)
+        let mut sem = olheiro(Especializacao::Tatico, Tier::Junior);
+        sem.habilidades = Some(Vec::new());
+        let mut f = completo.clone();
+        f.sanear(&sem);
+        let padrao = FiltrosMissao::default();
+        assert_eq!(f, FiltrosMissao { posicoes: vec![quality::Perfil::Volante], ..padrao.clone() });
+
+        // com algumas: só as delas ficam, e os dominantes respeitam o teto
+        let mut com = olheiro(Especializacao::Tatico, Tier::Experiente);
+        com.perfil = Some(quality::PerfilOlheiro { tatico: quality::Estrelas(7), ..quality::PerfilOlheiro::v1(Especializacao::Tatico, Tier::Experiente) });
+        com.habilidades = Some(vec![H::AtributosDominantes, H::CacaAPromessas]);
+        let mut f = completo.clone();
+        f.sanear(&com);
+        assert_eq!(f.atributos_dominantes, vec![Atributo::Drible, Atributo::Visao], "3,5★ de Tático: até 2");
+        assert_eq!(f.potencial, completo.potencial);
+        assert_eq!((f.contrato, f.pe, f.fit_posicional, f.fit_nas_posicoes), (padrao.contrato, None, None, false));
+    }
+
+    #[test]
+    fn the_form_drops_filters_the_olheiro_cannot_ask_for_and_the_mission_remembers_his_abilities() {
+        let pasta = PastaTemporaria::nova();
+        let mut o = olheiro(Especializacao::Tatico, Tier::Experiente);
+        o.habilidades = Some(vec![quality::Habilidade::PerfilFisico]);
+        let (mut st, busca) = estado_com_missoes(&pasta, 20260712, vec![], &o);
+        trocar_jogadores(&busca, Ok(pool_com_elenco()));
+        st.ao_abrir_painel();
+        st.abrir_nova_missao(o.id);
+        elenco_pronto(&st);
+        st.definir_referencia_da_missao(Some(2));
+        st.alternar_atributo_da_missao(Atributo::Drible);
+        if let Some(r) = st.rascunho_missao.as_mut() {
+            r.filtros.potencial = FaixaAtributo { min: 85, max: 99 };
+            r.filtros.pe = Some(FiltroPe::Esquerdo);
+        }
+        let previa = st.previa_missao().expect("formulário");
+        let f = &previa.rascunho.filtros;
+        assert!(f.referencia.is_none() && f.atributos_dominantes.is_empty(), "sem as habilidades, esses filtros não valem");
+        assert_eq!(f.potencial, FiltrosMissao::default().potencial);
+        assert_eq!(f.pe, Some(FiltroPe::Esquerdo), "o Perfil Físico ele tem");
+        assert!(previa.tem(quality::Habilidade::PerfilFisico) && !previa.tem(quality::Habilidade::JogadorDeReferencia));
+        assert!(st.confirmar_nova_missao());
+        let salva = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("Missão salva");
+        assert_eq!(salva.habilidades, Some(vec![quality::Habilidade::PerfilFisico]));
+        assert!(salva.filtros.referencia.is_none() && salva.filtros.atributos_dominantes.is_empty());
+        assert!(!salva.tem(quality::Habilidade::OlhoParaContratos));
     }
 
     #[test]

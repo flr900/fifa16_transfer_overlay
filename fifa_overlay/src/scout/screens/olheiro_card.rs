@@ -11,7 +11,7 @@
 
 use imgui::{DrawListMut, MouseButton, Ui};
 
-use super::componentes::{self, badge_tier, desenhar_badge, desenhar_estrelas, texto_em, EstiloBadge};
+use super::componentes::{self, badge_habilidade, badge_tier, desenhar_badge, desenhar_estrelas, texto_em};
 use super::olheiros::{chips_do_olheiro, desenhar_chips, sigla, texto_estrelas, Nacoes};
 use super::relatorio::truncar;
 use super::theme::{self, Fonts};
@@ -20,7 +20,7 @@ use crate::scout::quality::Estrelas;
 use crate::scout::state::{Especializacao, OfertaOlheiro, Olheiro};
 
 pub const LARGURA: f32 = 340.0;
-pub const ALTURA: f32 = 332.0;
+pub const ALTURA: f32 = 356.0;
 const ALTURA_NOVO: f32 = 120.0;
 const LADO_AVATAR: f32 = 40.0;
 const ALTURA_RODAPE: f32 = 58.0;
@@ -64,7 +64,7 @@ pub fn linhas_de_estrelas(o: &Olheiro) -> Vec<(&'static str, Estrelas, [f32; 4])
     linhas
 }
 
-/// Desenha o card de um Olheiro no cursor. `habilidades`: os selos dele.
+/// Desenha o card de um Olheiro no cursor (as habilidades dele viram selos).
 #[allow(clippy::too_many_arguments)]
 pub fn desenhar(
     ui: &Ui,
@@ -72,7 +72,6 @@ pub fn desenhar(
     chave: &str,
     olheiro: &Olheiro,
     nacoes: &Nacoes<'_>,
-    habilidades: &[EstiloBadge],
     rodape: &Rodape<'_>,
 ) -> Resultado {
     let _id = ui.push_id(chave);
@@ -136,12 +135,19 @@ pub fn desenhar(
     y = divisor(&dl, x, direita, y);
 
     // ---- as habilidades
+    let habilidades = olheiro.habilidades_efetivas();
     if habilidades.is_empty() {
         texto_em(ui, meta, &dl, [x, y], theme::TEXT_DISABLED, "Sem habilidades");
     } else {
-        let mut xb = x;
-        for badge in habilidades {
-            let tamanho = desenhar_badge(ui, fonts, &dl, badge, [xb, y], altura_linha);
+        let (mut xb, mut yb) = (x, y);
+        for habilidade in habilidades {
+            let badge = badge_habilidade(habilidade);
+            let largura = com_fonte(ui, fonts.map(|f| f.badge), || ui.calc_text_size(badge.texto)[0]) + theme::ESPACO_2 * 3.0;
+            if xb > x && xb + largura > direita {
+                xb = x;
+                yb += altura_linha + theme::ESPACO_1;
+            }
+            let tamanho = desenhar_badge(ui, fonts, &dl, &badge, [xb, yb], altura_linha);
             xb += tamanho[0] + theme::ESPACO_2;
         }
     }

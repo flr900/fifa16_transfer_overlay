@@ -307,6 +307,7 @@ mod tests {
             pe: None,
             similaridade: None,
             fit: None,
+            fit_alvo: None,
             variacao_overall: None,
             ritmo_ataque: None,
             ritmo_defesa: None,

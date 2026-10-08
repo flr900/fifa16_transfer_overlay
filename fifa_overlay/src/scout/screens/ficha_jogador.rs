@@ -193,7 +193,8 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, ficha: &FichaAb
     y += texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, &j.nome)[1] + theme::ESPACO_1;
     // posição nativa + Fit Posicional (Story 3.5)
     let [w_bio, h_bio] = texto_em(ui, fonts.map(|f| f.body), &dl, [x, y], theme::TEXT_SECONDARY, &linha_bio(j));
-    if let Some(alvo) = perfil.alvo {
+    let alvo_do_fit = j.fit_alvo.or(perfil.alvo);
+    if let Some(alvo) = alvo_do_fit {
         let texto = format!("FIT {}", texto_fit(alvo, j.fit, j.variacao_overall, perfil.aproximado));
         desenhar_badge_texto(ui, fonts, &dl, &badge_fit(), &texto, [x + w_bio + theme::ESPACO_2, y], h_bio);
     }
@@ -201,7 +202,7 @@ fn cabecalho(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, ficha: &FichaAb
     if let Some(caracteristicas) = linha_caracteristicas(j) {
         y += texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::TEXT_SECONDARY, &caracteristicas)[1];
     }
-    if let (Some(alvo), Some(texto)) = (perfil.alvo, texto_overall_no_alvo(j)) {
+    if let (Some(alvo), Some(texto)) = (alvo_do_fit, texto_overall_no_alvo(j)) {
         let linha = format!("Como {}: {texto} (estimativa)", alvo.nome());
         y += texto_em(ui, fonts.map(|f| f.meta), &dl, [x, y], theme::ACCENT_PRIMARY, &linha)[1];
     }
@@ -353,6 +354,7 @@ mod tests {
             pe: Some(Pe::Esquerdo),
             similaridade: None,
             fit: None,
+            fit_alvo: None,
             variacao_overall: None,
             ritmo_ataque: None,
             ritmo_defesa: None,

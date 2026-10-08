@@ -14,7 +14,6 @@ mod demissao;
 mod escolher_olheiro;
 mod missoes;
 mod campo_atributo;
-mod campo_fit;
 mod escolhidos;
 mod lista_jogadores;
 mod olheiro_card;
@@ -581,11 +580,6 @@ fn conteudo_da_tela(
         }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::CampoAtributo) => {
             if campo_atributo::render(ui, fonts, state, focar) {
-                *pedido = Some(Pedido::FecharCampo);
-            }
-        }
-        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::CampoFit) => {
-            if campo_fit::render(ui, fonts, state, focar) {
                 *pedido = Some(Pedido::FecharCampo);
             }
         }
