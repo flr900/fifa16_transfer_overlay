@@ -40,10 +40,11 @@ const ATRIBUTOS_DESCONHECIDO: usize = 6;
 /// O que o jogo sabe de um jogador: `(nível 0–198, campo "a")`.
 pub type Conhecimento = (i32, i32);
 
-/// A partir deste nível o jogo mostra o jogador aberto (Overall, Potencial e
-/// atributos), como o Felipe confirmou no Mbappé e no Camarda, os dois no 178
-/// (com `a` = 0x10FFFF e 0x100002).
-const NIVEL_ABERTO: i32 = 178;
+/// A partir deste nível o jogo mostra o jogador aberto (Overall, Potencial,
+/// atributos e contrato): o Felipe confirmou no Mbappé e no Camarda (178) e
+/// em jogadores em 162–168 (Haaland, Saka, Bellingham...); o jogo mostra
+/// valor e salário desde o 140, e a Central parte daí.
+const NIVEL_ABERTO: i32 = NIVEL_REVELADO;
 
 /// O campo `a` tem os 16 bits de baixo todos ligados (visto no Mbappé, que o
 /// tem em 0x10FFFF)? Só o jogo mexe nele: a Central nunca o altera.
@@ -107,7 +108,7 @@ pub struct Sincronia {
     /// A foto na precisão do nível.
     pub jogador: JogadorEncontrado,
     /// A foto exata e completa, se o jogo pode estar mostrando o jogador
-    /// aberto (nível a partir do 178, ou o campo `a` aberto).
+    /// aberto (nível a partir do 140, ou o campo `a` aberto).
     pub exato: Option<JogadorEncontrado>,
 }
 
@@ -261,6 +262,7 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
         // `a` aberto ou o nível máximo mostram o jogador aberto.
         let so_do_jogo = escolhido == Some(true) || (escolhido.is_none() && mapeado_da_lista);
         let aberto = sincronia.campo_aberto || sincronia.nivel >= NIVEL_COMPLETO || (so_do_jogo && sincronia.nivel >= NIVEL_ABERTO);
+        let mostra_contrato = aberto || so_do_jogo;
         let foto = match (&sincronia.exato, aberto) {
             (Some(exato), true) => exato.clone(),
             _ => sincronia.jogador.clone(),
@@ -287,6 +289,22 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
                     }
                 }
                 mudou = true;
+            }
+        }
+        // o contrato que o jogo mostra e a Central ainda não tinha (as fotos
+        // antigas não o traziam)
+        if mostra_contrato && foto.contrato_ate.is_some() {
+            if let Some(e) = dados.escolhidos.iter_mut().find(|e| e.jogador.player_id == id) {
+                if e.jogador.contrato_ate.is_none() && (aberto || e.importado) {
+                    e.jogador.contrato_ate = foto.contrato_ate;
+                    mudou = true;
+                }
+            }
+            for x in dados.mapeados.iter_mut().filter(|x| x.jogador.player_id == id && x.motivo != MotivoMapeamento::ExClube) {
+                if x.jogador.contrato_ate.is_none() {
+                    x.jogador.contrato_ate = foto.contrato_ate;
+                    mudou = true;
+                }
             }
         }
         // Base: o jogador está aberto no jogo e a Central ainda não o tem
@@ -422,32 +440,35 @@ mod tests {
         let raw = &p.jogadores[0];
         let mut dados = ScoutStateFile::default();
         // um Escolhido importado com o nível 178 (±5, 24 atributos), como o Mbappé
-        let (precisao, atributos) = revelacao(Some((170, 0x100002)));
-        assert_eq!((precisao, atributos), (7, 24), "abaixo do 178 e sem o campo aberto: parcial");
+        let (precisao, atributos) = revelacao(Some((130, 0x100002)));
+        assert_eq!((precisao, atributos), (PRECISAO_DESCONHECIDO, ATRIBUTOS_DESCONHECIDO), "abaixo do 140 e sem o campo aberto: o básico");
+        assert_eq!(revelacao(Some((140, 0x100002))), (0, Atributo::TODOS.len()), "140: aberto no jogo, exato e completo");
         assert_eq!(revelacao(Some((178, 0x100002))), (0, Atributo::TODOS.len()), "178: aberto no jogo, exato e completo");
         assert_eq!(revelacao(Some((166, 0x10FFFF))), (0, Atributo::TODOS.len()), "campo aberto: exato e completo");
         // veio da lista do jogo (como o Mbappé e o Camarda): a Central nunca escreveu o nível dele
         let mut importado = escolhido(search::fotografar(raw, &p, HOJE, 5, 24), 5);
         importado.importado = true;
+        importado.jogador.contrato_ate = None; // as fotos antigas não traziam o contrato
         dados.escolhidos.push(importado);
-        // o jogo mostra o jogador aberto (nível 178 em diante)
+        // o jogo mostra o jogador aberto (nível 140 em diante)
         let abertos: HashMap<u32, Conhecimento> = [(40, (178, 0x100002))].into_iter().collect();
         let r = aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE);
         assert!(r.mudou());
         let e = &dados.escolhidos[0];
         assert_eq!(e.jogador.atributos.len(), crate::scout::lista::ATRIBUTOS_DETALHADO, "agora tem todos");
         assert_eq!(e.precisao, 0, "Overall, Potencial e atributos exatos, como o jogo mostra");
+        assert_eq!(e.jogador.contrato_ate, Some(2028), "e o contrato");
         assert_eq!((e.jogador.overall.min, e.jogador.overall.max), (80, 80));
         assert_eq!((e.jogador.potencial.min, e.jogador.potencial.max), (85, 85));
         // a Base também o tem completo
         assert!(dados.mapeados.iter().any(|m| m.jogador.player_id == 40 && m.jogador.atributos.len() == e.jogador.atributos.len()));
         assert!(!aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE).mudou(), "idempotente");
-        // abaixo do 178 e sem o campo aberto, nada muda
+        // abaixo do 140 e sem o campo aberto, nada muda
         let mut outro = ScoutStateFile::default();
         let mut imp = escolhido(search::fotografar(raw, &p, HOJE, precisao, atributos), precisao);
         imp.importado = true;
         outro.escolhidos.push(imp);
-        let fechados: HashMap<u32, Conhecimento> = [(40, (170, 0x100002))].into_iter().collect();
+        let fechados: HashMap<u32, Conhecimento> = [(40, (130, 0x100002))].into_iter().collect();
         assert!(!aplicar(&mut outro, montar(&p, HOJE, &[], &fechados, &HashSet::new()), HOJE).mudou());
         // quem a Central achou (não importado): o 178 pode ser o que ELA escreveu
         // (±5), então não abre; só o campo `a` aberto abre
