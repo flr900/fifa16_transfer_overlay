@@ -296,6 +296,11 @@ impl Scout {
         self.painel_aberto
     }
 
+    /// O jogador em foco na tela do jogo, como a Central o leu por último.
+    pub fn foco_no_jogo(&self) -> Option<(u32, String)> {
+        self.state.foco_no_jogo()
+    }
+
     /// Detecção de borda do atalho (AD-14): só alterna na transição
     /// solta→pressionada. Devolve `true` quando alternou.
     pub fn atualizar_atalho(&mut self, pressionada: bool) -> bool {

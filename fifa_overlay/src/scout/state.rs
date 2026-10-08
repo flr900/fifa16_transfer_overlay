@@ -3124,6 +3124,13 @@ impl ScoutState {
         self.valor_do_jogo(player_id).filter(|v| v.vale_em(self.data_da_carreira())).map(|v| v.valor)
     }
 
+    /// O jogador em foco na tela do jogo (id e nome), pela última leitura da
+    /// linha de valor. É só o que o jogo mostra: pode ser alguém que a
+    /// Central não conhece.
+    pub fn foco_no_jogo(&self) -> Option<(u32, String)> {
+        self.ultimo_foco.as_ref().map(|(id, _, nome)| (*id, nome.clone()))
+    }
+
     /// Olha a linha de valor do jogador em foco no jogo e, se for um jogador
     /// que a Central conhece (Escolhidos ou Relatórios, conferindo id E
     /// nome), guarda o valor com a data. Leitura de 48 bytes, de meio em meio

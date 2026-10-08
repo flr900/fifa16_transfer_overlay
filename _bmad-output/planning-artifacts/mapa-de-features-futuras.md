@@ -14,7 +14,8 @@
 | **Story 7.7**: e-mail nativo do GTN | Épico 7 | Opcional, a de menor prioridade. A mais cara (objeto e strings localizadas). Alternativa barata: mostrar o "e-mail" só no overlay. |
 | **Núcleo de olheiros detalhistas**: 2ª etapa de aprofundamento de um jogador já achado | PRD §6.2 | **Feito em 2026-10-08 (Story 6.2, "Aprofundar agora")**, estendendo o Generalista, só a partir dos Escolhidos (decisão do Felipe). Testado em jogo pelo Felipe, funcionando. |
 | **Conhecimento progressivo por região** entre Missões (estilo Football Manager) | PRD §5 e §6.2 | Não implementado. A Base do Scout cobre uma parte (novas Missões consultam a Base primeiro). |
-| **Limite de slots de Olheiros** | PRD §6.2 | Nada encontrado no código. |
+| **Limite de slots de Olheiros** | PRD §6.2 | **Adiado a pedido do Felipe (2026-10-08)**: o impacto no equilíbrio ainda não está claro. Nada no código. |
+| **Integração com a negociação do jogo**: abrir compra, empréstimo e oferta salarial a partir da Central, e gerenciar negociações | Pedido do Felipe, 2026-10-08 | Em andamento; plano e fases em `integracao-negociacao.md`. Fase 0 (gravador de controle) pronta, falta gravar os caminhos no jogo. Vem antes do e-mail nativo (7.7). |
 | **Salário exato do jogo** | `integracao-scout-nativo.md`; Story 7.6 | Só o valor de transferência é exato, e só do jogador em foco. O salário segue estimado. Resolver exige chamar funções do jogo (caminho D, engenharia reversa do `fifa16.exe` com packer). |
 | **Pendências do experimento nativo** | `integracao-scout-nativo.md` §3b; Story 7.6 | Achar os ponteiros sem varrer 1,9 GB (20-25 s por varredura); saber se a entrada de Escolhidos persiste no save; evitar que o jogo reescreva o `b` no estágio de 3 dias; conferir se o offset da linha de valor se mantém depois de reabrir o jogo. |
 

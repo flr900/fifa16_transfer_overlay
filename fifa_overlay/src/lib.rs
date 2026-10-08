@@ -14,6 +14,7 @@
 mod async_task;
 mod dds;
 mod gamepad;
+mod gravador;
 // Infraestrutura de memória (AD-2): usada só através do `save_repo`;
 // partes dela (escrita, CZUM, pointer scan) servem a stories futuras.
 #[allow(dead_code)]
@@ -35,7 +36,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v25 — Aprofundar agora (Escolhidos)";
+const BUILD_TAG: &str = "7.6-v26 — Gravador de controle (desenvolvimento)";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.
@@ -71,6 +72,8 @@ struct FifaOverlay {
     scout: Scout,
     fonts: Option<FontSlots>,
     controle: gamepad::Controle,
+    /// Registra o controle no log quando o arquivo de pedido existe (desenvolvimento).
+    gravador: gravador::Gravador,
     /// Leitura do controle feita em `before_render`, usada no `render`.
     ultimo_controle: Option<gamepad::EstadoControle>,
     proxima_verificacao_pedido: std::time::Instant,
@@ -85,6 +88,7 @@ impl FifaOverlay {
             scout: Scout::new(),
             fonts: None,
             controle: gamepad::Controle::new(),
+            gravador: gravador::Gravador::new(),
             ultimo_controle: None,
             proxima_verificacao_pedido: std::time::Instant::now(),
             descarregando: false,
@@ -145,6 +149,8 @@ impl ImguiRenderLoop for FifaOverlay {
         io.config_flags.insert(ConfigFlags::NAV_ENABLE_GAMEPAD | ConfigFlags::NAV_ENABLE_KEYBOARD);
         io.backend_flags.insert(BackendFlags::HAS_GAMEPAD);
         self.ultimo_controle = self.controle.ler();
+        let foco = self.scout.foco_no_jogo();
+        self.gravador.registrar(self.ultimo_controle, foco.as_ref().map(|(id, nome)| (*id, nome.as_str())));
         let navegacao = self.ultimo_controle.filter(|_| aberto).map(gamepad::para_navegacao);
         gamepad::alimentar_imgui(io, navegacao);
     }
