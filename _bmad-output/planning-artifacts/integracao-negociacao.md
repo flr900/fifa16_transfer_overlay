@@ -170,6 +170,32 @@ Consequência para o roteiro: cada passo pode ser **conferido pelo evento
 esperado** (e abortado com `B` se vier outro evento ou nenhum em ~1 s), mas
 escolher a opção continua às cegas dentro do menu.
 
+## Fase 1: roteiro "Abrir no jogo" (build 7.6-v30, 2026-10-08)
+
+Implementado, ainda **sem teste em jogo**. `telas.rs` lê o evento de tela (acha a
+entrada de eventos pelo vocabulário, porque o endereço muda a cada sessão),
+`scout/roteiro.rs` é a máquina de estados e o gancho do XInput (`gamepad::injetar`)
+aperta os botões para o jogo; o controle de verdade fica de fora enquanto roda,
+e `Select` cancela.
+
+Decisões:
+
+- **Parte da lista de Escolhidos do jogo já aberta.** No hub está o bloco
+  "Avançar" (`FluxTile_Advance`) e um `A` errado avançaria o calendário.
+  A lista conta como aberta depois de `ViewShortlist` (sem ter voltado ao hub).
+- **Varre a lista**, uma linha por vez: `A`, espera `ActionPopup`, espera o foco
+  mostrar o jogador (~0,8 s), compara com o alvo; se não for, `B`, espera a lista
+  voltar (`NotifyScreenLoadedAndRefresh`) e `↓`. Para com o menu do alvo aberto.
+  A ordem da lista não precisa ser conhecida.
+- **Paradas seguras**: evento esperado que não chega no prazo, jogador em foco
+  ilegível, a mesma linha duas vezes (lista sem volta), lista inteira sem o
+  jogador, painel aberto ou `Select`. Nenhum botão sai fora da lista.
+- Só para quem está na lista do jogo (`no_jogo` ou `importado`).
+
+Falta (próximas fases): escolher a opção do menu (contrato, compra, empréstimo via
+`RB` na tela de compra), acelerar a busca (hoje ~1,2 s por linha), entrar na lista
+a partir do hub, e gerenciar negociações.
+
 ## Fora do escopo por ora
 
 O limite de slots de Olheiros foi adiado a pedido do Felipe (2026-10-08): o

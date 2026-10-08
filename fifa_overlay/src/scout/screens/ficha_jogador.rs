@@ -123,6 +123,12 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 state.alternar_prioridade_escolhido(pid);
             }
             ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+            // Abrir no jogo: o roteiro leva o FIFA até o menu do jogador (só para quem
+            // está na lista de Escolhidos do jogo)
+            if componentes::botao(ui, fonts, "Abrir no jogo##abrir_no_jogo", EstiloBotao::Secundario, state.pode_abrir_no_jogo(pid)) {
+                state.pedir_abrir_no_jogo(pid);
+            }
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
             // Aprofundar agora: só com um Generalista designado e enquanto faltar revelar algo
             let aprofundando = e.escolhido.aprofundando_ativo();
             let rotulo = if aprofundando { "Aprofundando##aprofundar" } else { "Aprofundar agora##aprofundar" };

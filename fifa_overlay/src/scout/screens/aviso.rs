@@ -91,6 +91,12 @@ pub fn texto_jogadores(n: usize) -> String {
 
 pub fn render(ui: &Ui, fonts: Option<&Fonts>, aviso: &TipoAviso) {
     let (titulo, detalhe, cor) = textos(aviso);
+    render_texto(ui, fonts, &titulo, &detalhe, cor);
+}
+
+/// O mesmo banner com um título e um detalhe quaisquer (o roteiro "Abrir no
+/// jogo" o usa enquanto navega e ao terminar).
+pub fn render_texto(ui: &Ui, fonts: Option<&Fonts>, titulo: &str, detalhe: &str, cor: [f32; 4]) {
     let [largura_tela, _] = ui.io().display_size;
 
     let _fundo = ui.push_style_color(StyleColor::WindowBg, theme::BG_PANEL_RAISED);
@@ -115,8 +121,8 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, aviso: &TipoAviso) {
             let inicio = ui.cursor_screen_pos();
             ui.indent_by(LARGURA_BARRA + theme::ESPACO_3);
             ui.group(|| {
-                com_fonte(ui, fonts.map(|f| f.heading), || ui.text(&titulo));
-                com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, &detalhe));
+                com_fonte(ui, fonts.map(|f| f.heading), || ui.text(titulo));
+                com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, detalhe));
             });
             ui.unindent_by(LARGURA_BARRA + theme::ESPACO_3);
             let fim = ui.item_rect_max();

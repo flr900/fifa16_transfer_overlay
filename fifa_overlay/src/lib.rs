@@ -15,6 +15,7 @@ mod async_task;
 mod dds;
 mod gamepad;
 mod gravador;
+mod telas;
 // Infraestrutura de memória (AD-2): usada só através do `save_repo`;
 // partes dela (escrita, CZUM, pointer scan) servem a stories futuras.
 #[allow(dead_code)]
@@ -36,7 +37,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v29 — Gravador de tela em anel (desenvolvimento)";
+const BUILD_TAG: &str = "7.6-v30 — Abrir no jogo (roteiro)";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.
