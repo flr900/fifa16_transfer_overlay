@@ -286,6 +286,34 @@ jogador selecionado, ou achar e chamar a função do menu. Risco de derrubar o j
 incerto. **Linha pausada.** O que resta de útil: o roteiro de botões com salto por ordenação
 por nome.
 
+## Estado ao fim de 2026-10-08 e próximos passos
+
+**Funciona:** o roteiro "Abrir no jogo" (7.6-v31), testado pelo Felipe: de dentro da lista de Escolhidos do jogo, abre o
+menu do jogador pedido, conferindo cada evento de tela e o foco. **Não é usável ainda por dois motivos:**
+
+1. **Lento**: ~3,2 s por linha da lista (a lista de 80 jogadores leva minutos no pior caso). Onde o tempo vai: esperar 0,8 s
+   pelo foco que chega em ~0,1 s; esperar 1,3 s a lista assentar depois do `B` (menos que isso e o jogo ignora o `A`);
+   `↓` e assentar 0,5 s.
+2. **Só da lista**: o roteiro não toca no hub (bloco "Avançar"), então exige a lista de Escolhidos do jogo já aberta.
+
+**Próximos passos, em ordem de valor:**
+
+- **Salto por ordenação por nome.** Com a lista em ordem alfabética a Central sabe a posição exata de cada jogador:
+  1 sondagem para saber onde o cursor está, `↓`/`↑` o número exato de vezes (~0,2 s cada), 1 sondagem de conferência
+  (corrige se errar por poucas linhas). Estimativa 8 a 13 s. Perguntas em aberto para o Felipe: (a) o jogo guarda a
+  ordenação ao sair e voltar? (b) quais as colunas, da esquerda para a direita, e qual vem selecionada? (c) o que a
+  coluna "nome" mostra e como ordena (sobrenome?)? (d) `↓` no último vai ao primeiro?
+- **Esperar a lista em vez de recusar** (até 60 s, avisando "Abra a lista de Escolhidos no jogo", sem bloquear o
+  controle), **sair das telas de negociação com `B`** (hoje só trata o menu) e **reconhecer a lista** mesmo se o overlay
+  entrou depois do `ViewShortlist`.
+- Tirar o tempo morto óbvio: foco em ~0,2 s (hoje 0,8 s).
+- **Escolher a opção do menu** (contrato, compra; empréstimo via `RB` na tela de compra), depois de saber quais opções o
+  jogador tem. Nunca contar `↓` às cegas até o início do menu: "Adicionar/remover escolhido" tira o jogador da lista.
+- **Gerenciar negociações**: tela com as propostas de `career_transferoffer` (`QWbR`: `isloan`, `stage`, `result`,
+  valores), dado do último save.
+- **E-mail nativo (7.7)**: as ações `EnterHireScoutFromTransfers` e `EnterGTNScoutReportFromGTNHub` existem na máquina de estados.
+- Caminho direto (sem botões): pausado; só retomar com um motivo novo (por exemplo, achar a função do menu de ações).
+
 ## Fora do escopo por ora
 
 O limite de slots de Olheiros foi adiado a pedido do Felipe (2026-10-08): o

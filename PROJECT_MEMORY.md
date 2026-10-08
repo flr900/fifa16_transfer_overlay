@@ -1540,6 +1540,74 @@ jogo e valor de transferência exato. Mapeamento em
   (7.5), e-mail nativo (7.7), calibrar a estimativa de valor com as leituras
   exatas, e conferir o offset da linha de valor depois de reabrir o jogo.
 
+## Sessão 16 — Mapa de features, Aprofundar agora, "Abrir no jogo" e a investigação do caminho direto (2026-10-08)
+
+Branch `claude/integracao-negociacao` (18 commits à frente do `main`, ainda sem push/PR), builds `7.6-v24` a `7.6-v37`, instalador `1.2.0`. 431 testes.
+
+**Entregue e já no `main`:** o mapa de features futuras e a contabilidade do BMAD (PR #21); o texto
+nítido com FreeType (PR #22, `7.6-v24`); **Aprofundar agora** (PR #23, `7.6-v25`, Story 6.2: o
+Generalista designado se dedica a um Escolhido, 40% a 15% do prazo normal, custo
+`quality::custo_aprofundamento`, testado em jogo pelo Felipe).
+
+**Decidido:** o limite de slots de Olheiros foi **adiado** (impacto no equilíbrio incerto). A prioridade passou a ser
+abrir a tela de negociação do jogo a partir da Central (compra, empréstimo, contrato) antes do e-mail nativo (7.7).
+
+### Sinal de tela (como saber em que tela o FIFA está)
+- O ponteiro `fifa16.exe+0x3357378` aponta para uma tabela de 16 entradas de 64 bytes; uma delas guarda o
+  **nome do último evento de tela** e muda 70 a 200 ms depois do botão. O endereço da tabela muda por sessão:
+  `telas.rs` acha a entrada pelo vocabulário (primeiro texto da entrada vale).
+- Eventos: hub `MainMenuHub`/`CacheTeamSheet`; entrar na lista `ViewShortlist` e depois
+  `NotifyScreenLoadedAndRefresh`; menu do jogador `ActionPopup`; compra `EnterTransferOfferActionPopup`/`TransferOffer`;
+  contrato `EnterPreContractOfferFromActionPopup`/`ContractOffer`; `SendReadyOnLoadComplete` ao voltar.
+- Compra e empréstimo abrem a **mesma tela** (`TransferOffer`); `RB` troca para a aba de empréstimo, `LB` volta, sem
+  evento. A tela aberta pela opção de empréstimo não volta para a compra.
+- O menu do jogador varia (contrato só existe para quem está no fim do contrato, "pre-contract"). Os rótulos das
+  opções não aparecem em memória.
+- O foco do jogo (`foco.rs`) atualiza ~0,1 s depois do menu abrir, não enquanto se anda na lista.
+
+### Roteiro "Abrir no jogo" (7.6-v30/v31)
+`scout/roteiro.rs` (máquina de estados pura e testada) + `gamepad::injetar` (o gancho do XInput soma botões ao que
+o jogo lê; o controle real fica de fora; Select cancela). Varre a lista: `A`, espera `ActionPopup`, confere o foco,
+`B`, espera a lista **assentar 1,3 s** (o jogo ignora botões logo depois do `B`: o primeiro teste perdeu o `A`),
+`↓`. **Nunca aperta botão no hub** (bloco "Avançar" avançaria o calendário), então só funciona com a lista de
+Escolhidos do jogo já aberta. ~3,2 s por linha, minutos no pior caso: **lento demais** (o Felipe disse que não é
+factível assim). Plano: salto por ordenação por nome (precisa das respostas sobre colunas, persistência da ordem e
+`↓` no fim da lista), esperar a lista abrir em vez de recusar, sair das telas de negociação com `B`.
+
+### Investigação do caminho direto (sem apertar botões) — pausada
+- `despejo.rs` copia a imagem do `fifa16.exe` da memória (156 MB, 1 s, só leitura): o **código está desempacotado**
+  na seção ofuscada `.tls em` (RVA `0x39FC000`), a base é sempre `0x140000000` (sem ASLR). Análise offline em
+  `fifa_process_identifier/analisar_imagem.py` e `re_*.py` (usam `capstone`).
+- Os eventos são **Actions de uma máquina de estados** (204 tokens nomeados no objeto: compra `+0xE98`, empréstimo
+  `+0xEB0`, negociação `+0xEC8`, contrato `+0xEE0`, pré-contrato `+0xEF8`; também `EnterHireScoutFromTransfers` e
+  `EnterGTNScoutReportFromGTNHub`, úteis para o e-mail nativo). A vtable das Actions é sobrescrita pela do tipo
+  de cada uma: só o ponteiro do nome serve para achar o objeto (`maquina.rs`, varredura de ~22 s).
+- A máquina tem uma **caixa de correio** (`+0x10 = 1`, `+0x18 = ponteiro` por ~20 ms; mensagens com vtable
+  `RVA 0x308D2E8`, classe genérica de eventos da interface, referenciada em dezenas de lugares). `B` manda um par de
+  mensagens (e `+0x13A0` alterna `0x1300/0x1301`), `A` numa opção manda uma mensagem com contadores de sequência e
+  uma carga com um nome de ação (`"ActionP..."`). **Nenhum campo simples de "ação pendente"** para escrever.
+  Disparar uma tela direto exigiria construir uma mensagem válida e o contexto do jogador, ou chamar a função do menu:
+  risco alto, ganho incerto. Detalhes em `_bmad-output/planning-artifacts/integracao-negociacao.md`.
+
+### Ferramentas de desenvolvimento (inertes sem arquivo de pedido em `%TEMP%`)
+`fifa_gravar_controle.pedido` (gravador de botões, tela e foco, e com ele o observador/amostrador da máquina),
+`fifa_despejar_imagem.pedido` (despejo), `fifa_achar_maquina.pedido` (busca da máquina). Log em
+`%TEMP%\fifa_overlay.log` (linhas `[gravador]`, `[telas]`, `[roteiro]`, `[despejo]`, `[maquina]`, `[amostrador]`).
+`fifa_process_identifier/scout_probe.py` ganhou `--str`; `capturar_tela.ps1` existe mas a abordagem externa por
+captura foi abandonada (lenta e perigosa).
+
+### Incidente
+Um script de análise meu entrou em loop infinito (acumulava numa lista), foi para segundo plano por passar de 120 s e
+consumiu **77,5 GB de memória virtual**: o Windows travou e precisou reiniciar (evento 2004 do Windows). Regra daqui
+para frente: todo script rodado na máquina do Felipe tem `timeout`, e um comando que vai para segundo plano é
+encerrado explicitamente.
+
+### Instalador
+`1.2.0` (`installer/Output/CentralDeScout_Setup_1.2.0.exe`), traz a `7.6-v37` mais `7.6-v23`, `5.0-v4` e
+`4.2-v2`; atualiza a instalação existente sobre a mesma pasta (mesmo `AppId`), e o jogo pode estar aberto (a Central roda
+uma cópia da DLL em `runtime\`). **A pasta `installer/versoes/` (DLLs arquivadas, ignorada pelo git) mora no checkout que
+gerou os instaladores: copie-a ao gerar de outro worktree**, senão o histórico some e a versão instalada não é reconhecida.
+
 ## Próximos passos sugeridos (não implementados)
 
 Em ordem aproximada de valor/esforço. **Atualizado após sessão 3** —
