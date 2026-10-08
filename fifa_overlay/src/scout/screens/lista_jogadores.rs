@@ -171,8 +171,14 @@ pub fn preparar<'a>(state: &ScoutState, id: ListaId, itens: Vec<ItemLista<'a>>) 
 // Visão Tabular
 // ---------------------------------------------------------------------
 
-/// A tabela. Devolve o jogador cuja linha foi ativada (clique ou A).
-pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaId, itens: &[ItemLista<'_>]) -> Option<u32> {
+/// A posição de `item` em `itens` (as telas devolvem o ÍNDICE ativado: o
+/// mesmo jogador pode estar em vários Relatórios).
+fn indice_do_item(itens: &[ItemLista<'_>], item: &ItemLista<'_>) -> usize {
+    itens.iter().position(|i| i.chave == item.chave).unwrap_or(0)
+}
+
+/// A tabela. Devolve o ÍNDICE do item cuja linha foi ativada (clique ou A).
+pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaId, itens: &[ItemLista<'_>]) -> Option<usize> {
     let mut ativado = None;
     let ordenacao = state.ordenacao_da_lista(id);
     let hoje = state.data_da_carreira();
@@ -219,11 +225,10 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
         let Some(item) = usize::try_from(indice).ok().and_then(|i| itens.get(i)) else {
             continue;
         };
-        let j = item.jogador;
-        let _id = ui.push_id_usize(j.player_id as usize);
+        let _id = ui.push_id_usize(item.chave as usize);
         ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
         if linha_selecionavel(ui) {
-            ativado = Some(j.player_id);
+            ativado = Some(indice_do_item(itens, item));
         }
         for (i, coluna) in todas.iter().enumerate() {
             ui.table_set_column_index(i);
@@ -234,6 +239,26 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     }
     if let Some(ordem) = nova_ordem {
         state.definir_ordenacao_da_lista(id, ordem);
+    }
+    ativado
+}
+
+/// Cards em grade (quantos couberem por linha). `desenhar` desenha o card do
+/// item e devolve se foi ativado; devolve o ÍNDICE ativado.
+pub fn grade(ui: &Ui, largura_card: f32, itens: &[ItemLista<'_>], mut desenhar: impl FnMut(&ItemLista<'_>) -> bool) -> Option<usize> {
+    let mut ativado = None;
+    let disponivel = ui.content_region_avail()[0];
+    let por_linha = (((disponivel + theme::ESPACO_3) / (largura_card + theme::ESPACO_3)).floor() as usize).max(1);
+    for (indice, item) in itens.iter().enumerate() {
+        if indice % por_linha != 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+        }
+        if desenhar(item) {
+            ativado = Some(indice);
+        }
+        if indice % por_linha == por_linha - 1 {
+            ui.dummy([0.0, theme::ESPACO_1]);
+        }
     }
     ativado
 }

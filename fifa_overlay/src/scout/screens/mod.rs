@@ -7,6 +7,7 @@
 
 mod acompanhamento;
 pub mod aviso;
+mod base_scout;
 mod componentes;
 mod confirmacao_contratacao;
 mod demissao;
@@ -186,6 +187,16 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         }
         Some(Pedido::FecharCampo) => nav.pop(),
         Some(Pedido::Demitir(id)) => state.pedir_demissao(id),
+        Some(Pedido::AbrirJogadorDoRelatorio(relatorio, player_id)) => {
+            state.abrir_relatorio(relatorio);
+            if state.relatorio_aberto().is_some() {
+                nav.push(Satelite::Relatorio);
+                state.abrir_ficha(player_id);
+                if state.ficha_aberta().is_some() {
+                    nav.push(Satelite::FichaJogador);
+                }
+            }
+        }
         Some(Pedido::AbrirRelatorio(id)) => {
             state.abrir_relatorio(id);
             if state.relatorio_aberto().is_some() {
@@ -454,6 +465,9 @@ enum Pedido {
     FecharCampo,
     /// "Demitir" num Olheiro: abre o aviso de confirmação.
     Demitir(uuid::Uuid),
+    /// Abre o Relatório de origem de um jogador e, por cima, a Ficha dele
+    /// (aba Relatórios por jogador, Base do Scout).
+    AbrirJogadorDoRelatorio(uuid::Uuid, u32),
 }
 
 fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState, focar: bool) -> Option<Pedido> {
@@ -584,17 +598,23 @@ fn conteudo_da_tela(
                 missoes::Acao::AbrirRelatorio(id) => *pedido = Some(Pedido::AbrirRelatorio(id)),
                 missoes::Acao::Nenhuma => {}
             },
-            Aba::Relatorios => {
-                if let Some(id) = relatorios::render(ui, fonts, state) {
-                    *pedido = Some(Pedido::AbrirRelatorio(id));
+            Aba::Relatorios => match relatorios::render(ui, fonts, state) {
+                relatorios::Acao::AbrirRelatorio(id) => *pedido = Some(Pedido::AbrirRelatorio(id)),
+                relatorios::Acao::AbrirJogador { relatorio, player_id } => {
+                    *pedido = Some(Pedido::AbrirJogadorDoRelatorio(relatorio, player_id));
                 }
-            }
+                relatorios::Acao::Nenhuma => {}
+            },
             Aba::Escolhidos => match escolhidos::render(ui, fonts, state) {
                 escolhidos::Acao::GerenciarAcompanhamento => *pedido = Some(Pedido::AbrirCampo(Satelite::AcompanhamentoOlheiros)),
                 escolhidos::Acao::AbrirFicha(player_id) => *pedido = Some(Pedido::AbrirFichaDeEscolhido(player_id)),
                 escolhidos::Acao::Nenhuma => {}
             },
-            Aba::Base => mensagem(ui, fonts, "Base do Scout: em construção."),
+            Aba::Base => {
+                if let Some((relatorio, player_id)) = base_scout::render(ui, fonts, state) {
+                    *pedido = Some(Pedido::AbrirJogadorDoRelatorio(relatorio, player_id));
+                }
+            }
         },
     }
 }

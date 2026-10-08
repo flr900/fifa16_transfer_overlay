@@ -31,8 +31,10 @@ use crate::scout::lista::{ItemLista, ListaId};
 use crate::scout::minifaces::Rosto;
 use crate::scout::state::{meio_da_faixa, Densidade, FaixaAtributo, JogadorEncontrado, PosicaoAlvo, Qualidade, RelatorioNaLista, ScoutState};
 
-const LARGURA_CARD: f32 = 460.0;
+pub(super) const LARGURA_CARD: f32 = 460.0;
 const ALTURA_CARD: f32 = 196.0;
+/// A linha "Visto por…" a mais nos cards das listas por jogador.
+const ALTURA_ORIGEM: f32 = 22.0;
 const LADO_ROSTO: f32 = 112.0;
 /// Atributos mostrados em cada card (os primeiros que o Olheiro observou).
 const ATRIBUTOS_NO_CARD: usize = 3;
@@ -343,7 +345,9 @@ fn lista(
     ui.child_window("##cards_relatorio").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
         super::rolar_com_analogico(ui, state.rolagem());
         if tabular {
-            ativado = lista_jogadores::tabela(ui, fonts, state, ListaId::RelatorioAberto, visiveis);
+            ativado = lista_jogadores::tabela(ui, fonts, state, ListaId::RelatorioAberto, visiveis)
+                .and_then(|i| visiveis.get(i))
+                .map(|item| item.jogador.player_id);
             return;
         }
         let disponivel = ui.content_region_avail()[0];
@@ -352,7 +356,7 @@ fn lista(
             if indice % por_linha != 0 {
                 ui.same_line_with_spacing(0.0, theme::ESPACO_3);
             }
-            if card_jogador(ui, fonts, state, item.jogador, perfil, hoje) {
+            if card_jogador(ui, fonts, state, &item.jogador.player_id.to_string(), item.jogador, perfil, hoje, None) {
                 ativado = Some(item.jogador.player_id);
             }
             if indice % por_linha == por_linha - 1 {
@@ -363,9 +367,22 @@ fn lista(
     ativado
 }
 
-/// Card de um jogador; `true` = ativado.
-fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorEncontrado, perfil: &PerfilPedido, hoje: Option<Date>) -> bool {
-    let c = card_com_largura(ui, &j.player_id.to_string(), LARGURA_CARD, ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
+/// Card de um jogador; `true` = ativado. `id`: a identidade do card (o mesmo
+/// jogador pode estar em vários Relatórios); `origem`: a linha "Visto por…"
+/// das listas de Relatórios por jogador e da Base (o card fica mais alto).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn card_jogador(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    state: &ScoutState,
+    id: &str,
+    j: &JogadorEncontrado,
+    perfil: &PerfilPedido,
+    hoje: Option<Date>,
+    origem: Option<&str>,
+) -> bool {
+    let altura = ALTURA_CARD + if origem.is_some() { ALTURA_ORIGEM } else { 0.0 };
+    let c = card_com_largura(ui, id, LARGURA_CARD, altura, theme::BORDER_HAIRLINE_SUBTLE);
     let ativo = ui.is_item_hovered() || (ui.is_item_focused() && ui.io().nav_visible);
     // Rosto só para cards visíveis: a lista pode ser longa (carga preguiçosa).
     let visivel = ui.is_rect_visible(c.min, c.max);
@@ -452,6 +469,11 @@ fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorE
         }
     } else {
         texto_em(ui, meta, &dl, [x_largo, y], theme::TEXT_DISABLED, MSG_EM_OBSERVACAO);
+    }
+    if let Some(origem) = origem {
+        let (linha, _) = truncar(&format!("Visto por {origem}"), largura_larga, medir(meta));
+        let h = com_fonte(ui, meta, || ui.text_line_height());
+        texto_em(ui, meta, &dl, [x_largo, c.max[1] - theme::ESPACO_2 - h], theme::ACCENT_PRIMARY, &linha);
     }
 
     if ativo && (nome_cortado || cortou2 || cortou3) {

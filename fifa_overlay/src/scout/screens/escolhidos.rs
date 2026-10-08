@@ -146,8 +146,8 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         return acao;
     }
     if state.modo_da_lista(ListaId::Escolhidos) == Densidade::Tabular {
-        if let Some(player_id) = lista_jogadores::tabela(ui, fonts, state, ListaId::Escolhidos, &visiveis) {
-            acao = Acao::AbrirFicha(player_id);
+        if let Some(item) = lista_jogadores::tabela(ui, fonts, state, ListaId::Escolhidos, &visiveis).and_then(|i| visiveis.get(i)) {
+            acao = Acao::AbrirFicha(item.jogador.player_id);
         }
         return acao;
     }

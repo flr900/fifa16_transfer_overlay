@@ -47,7 +47,7 @@ pub use super::quality::{Atalho, NivelEquipe, Perfil, PosicaoAlvo};
 
 use super::lista::{FiltrosLista, ListaId, Ordenacao, PrefsLista};
 use super::minifaces::{Minifaces, Rosto};
-pub use super::persistence::Densidade;
+pub use super::persistence::{Densidade, VisaoRelatorios};
 use super::persistence::{self, EstadoPersistido, UiPrefs};
 use super::quality;
 use super::search::{self, CareerSnapshot, CareerSource, SaveRepoSource};
@@ -789,6 +789,41 @@ pub struct MultaDeContrato {
     pub ate: Date,
 }
 
+/// Onde uma Missão procura, em texto: continentes, países e ligas do filtro
+/// geográfico, no máximo três e "e mais N"; sem filtro, "o mundo todo".
+pub fn texto_regiao(filtros: &FiltrosMissao, ligas: &[Liga], nacoes: &[Nacao]) -> String {
+    let mut lugares: Vec<String> = filtros.continentes.iter().map(|c| c.nome().to_string()).collect();
+    lugares.extend(filtros.paises_dos_clubes.iter().map(|id| {
+        nacoes.iter().find(|n| n.id == *id).map_or_else(|| format!("país {id}"), |n| n.nome.clone())
+    }));
+    lugares.extend(filtros.ligas.iter().map(|id| ligas.iter().find(|l| l.id == *id).map_or_else(|| format!("liga {id}"), |l| l.nome.clone())));
+    match lugares.len() {
+        0 => "o mundo todo".to_string(),
+        1..=3 => lugares.join(", "),
+        n => format!("{} e mais {}", lugares[..3].join(", "), n - 3),
+    }
+}
+
+/// Junta os registros de cada jogador na Base: o melhor primeiro. Ordem
+/// estável (por `player_id`).
+pub fn montar_base<'a>(ocorrencias: impl Iterator<Item = &'a Ocorrencia>) -> Vec<JogadorDaBase> {
+    let mut por_jogador: HashMap<u32, Vec<Ocorrencia>> = HashMap::new();
+    for o in ocorrencias {
+        por_jogador.entry(o.jogador.player_id).or_default().push(o.clone());
+    }
+    let mut base: Vec<JogadorDaBase> = por_jogador
+        .into_values()
+        .filter_map(|mut vistos| {
+            let melhor = (0..vistos.len()).fold(0, |m, i| if vistos[i].melhor_que(&vistos[m]) { i } else { m });
+            let melhor = vistos.remove(melhor);
+            vistos.insert(0, melhor.clone());
+            Some(JogadorDaBase { melhor, vistos })
+        })
+        .collect();
+    base.sort_by_key(|b| b.melhor.jogador.player_id);
+    base
+}
+
 /// Encerra uma Missão contínua: os jogadores JÁ REVELADOS em `hoje` viram o
 /// Relatório final (os que ainda não tinham aparecido são descartados) e o
 /// Olheiro fica livre. Não mexe no orçamento.
@@ -904,6 +939,104 @@ pub struct RelatorioNaLista {
     /// `None` se a Missão sumiu do arquivo (não deveria acontecer).
     pub missao: Option<Missao>,
     pub olheiro: Option<Olheiro>,
+}
+
+/// Um jogador visto num Relatório (2026-10-08): o que o Olheiro revelou e
+/// quem o viu, em que Missão e onde. A aba Relatórios, na visão por jogador,
+/// mostra uma por jogador de cada Relatório.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ocorrencia {
+    pub jogador: JogadorEncontrado,
+    pub relatorio_id: Uuid,
+    pub missao_id: Option<Uuid>,
+    /// Nome do Olheiro (`None` = ele foi demitido).
+    pub olheiro: Option<String>,
+    pub tipo: Option<quality::TipoMissao>,
+    pub modo: Option<ModoBusca>,
+    /// Onde a Missão procurou ("Europa", "Brasil", "o mundo todo").
+    pub regiao: String,
+    /// Quando o Relatório foi gerado (ou a Missão, sem a data dele).
+    pub quando: Option<Date>,
+    /// O que a Missão pediu de perfil (Fit, referência) e a Qualidade do
+    /// Relatório, para o card do jogador.
+    pub fit_alvo: Option<PosicaoAlvo>,
+    pub referencia: Option<String>,
+    pub qualidade: Qualidade,
+    pub arquivado: bool,
+}
+
+impl Ocorrencia {
+    /// "Rodrigo Pires · Missão Jovens · França": com o onde.
+    pub fn origem_completa(&self) -> String {
+        if self.regiao.is_empty() {
+            self.origem()
+        } else {
+            format!("{} · {}", self.origem(), self.regiao)
+        }
+    }
+
+    /// Identidade na tela: o mesmo jogador em dois Relatórios são dois itens.
+    pub fn chave(&self) -> u64 {
+        (u64::from(self.jogador.player_id) << 32) | (self.relatorio_id.as_u128() as u32 as u64)
+    }
+
+    /// "Rodrigo Pires · Missão Jovens" (a origem numa coluna ou linha).
+    pub fn origem(&self) -> String {
+        let olheiro = self.olheiro.clone().unwrap_or_else(|| "Olheiro removido".to_string());
+        match self.tipo {
+            Some(tipo) => format!("{olheiro} · Missão {}", crate::scout::state::nome_do_tipo(tipo)),
+            None => olheiro,
+        }
+    }
+
+    /// Entre dois registros do mesmo jogador, este é melhor? Mais atributos
+    /// mapeados; empate, faixa de Overall mais estreita; empate, o mais novo.
+    fn melhor_que(&self, outro: &Ocorrencia) -> bool {
+        let largura = |o: &Ocorrencia| o.jogador.overall.max.saturating_sub(o.jogador.overall.min);
+        (self.jogador.atributos.len(), std::cmp::Reverse(largura(self)), self.quando)
+            > (outro.jogador.atributos.len(), std::cmp::Reverse(largura(outro)), outro.quando)
+    }
+}
+
+/// Um jogador da Base do Scout (2026-10-08): todo jogador que algum Olheiro
+/// do clube já encontrou, com o melhor registro e todos que o viram. A Base
+/// sai dos Relatórios (arquivados também); não é a Lista de Escolhidos.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JogadorDaBase {
+    pub melhor: Ocorrencia,
+    /// Todos os registros dele, do melhor para os outros.
+    pub vistos: Vec<Ocorrencia>,
+}
+
+impl JogadorDaBase {
+    /// "Rodrigo Pires · Missão Jovens", e "+2" se outros também o viram.
+    pub fn origem(&self) -> String {
+        match self.vistos.len() {
+            0 | 1 => self.melhor.origem(),
+            n => format!("{} +{}", self.melhor.origem(), n - 1),
+        }
+    }
+}
+
+/// "Jovens", "Medalhões", "Tática", "Geral".
+pub fn nome_do_tipo(tipo: quality::TipoMissao) -> &'static str {
+    match tipo {
+        quality::TipoMissao::Jovens => "Jovens",
+        quality::TipoMissao::Medalhoes => "Medalhões",
+        quality::TipoMissao::Tatica => "Tática",
+        quality::TipoMissao::Geral => "Geral",
+    }
+}
+
+/// O que a Base e os Relatórios por jogador guardam entre frames: só refaz
+/// quando os dados gravados ou a data da carreira mudam.
+#[derive(Debug, Clone, Default)]
+struct CacheDeJogadores {
+    /// (geração dos dados gravados, data da carreira, ligas lidas).
+    chave: Option<(u64, Option<Date>, usize)>,
+    ativas: Arc<Vec<Ocorrencia>>,
+    arquivadas: Arc<Vec<Ocorrencia>>,
+    base: Arc<Vec<JogadorDaBase>>,
 }
 
 /// O mercado de Olheiros de uma semana (Épico 5): os candidatos de
@@ -1223,6 +1356,39 @@ impl JogadorEncontrado {
     /// O Olheiro já observou os atributos?
     pub fn atributos_observados(&self) -> bool {
         self.observacao == quality::Observacao::Completa
+    }
+}
+
+#[cfg(test)]
+impl JogadorEncontrado {
+    /// Jogador mínimo para testes: sem atributos, observação completa.
+    pub fn de_teste(player_id: u32, nome: &str, posicao: u8, overall: (u8, u8)) -> JogadorEncontrado {
+        JogadorEncontrado {
+            player_id,
+            nome: nome.to_string(),
+            idade: 22,
+            posicao,
+            nacao_id: 54,
+            nacao: "Brasil".to_string(),
+            clube: "Clube".to_string(),
+            clube_id: Some(1),
+            contrato_ate: Some(2030),
+            observacao: quality::Observacao::Completa,
+            overall: FaixaAtributo { min: overall.0, max: overall.1 },
+            potencial: FaixaAtributo { min: overall.0 + 4, max: overall.1 + 4 },
+            atributos: Vec::new(),
+            pe: Some(Pe::Direito),
+            similaridade: None,
+            fit: None,
+            variacao_overall: None,
+            ritmo_ataque: Some(RitmoTrabalho::Medio),
+            ritmo_defesa: Some(RitmoTrabalho::Medio),
+            estrelas_drible: Some(3),
+            pe_fraco: Some(3),
+            altura: Some(180),
+            titular_elenco: None,
+            falso_positivo: false,
+        }
     }
 }
 
@@ -1741,6 +1907,8 @@ pub struct ScoutState {
     prefs_listas: HashMap<ListaId, PrefsLista>,
     /// O painel de filtros (Y) aberto, e de qual lista.
     painel_de_filtros: Option<ListaId>,
+    /// A Base do Scout e os Relatórios por jogador, já montados.
+    cache_jogadores: std::sync::Mutex<CacheDeJogadores>,
     /// Filtro de continente da tela "Contratar Olheiro" (`None` = todos).
     filtro_continente: Option<Confederacao>,
     /// Pixels a rolar neste frame pelo analógico direito (positivo = para
@@ -1841,6 +2009,7 @@ impl ScoutState {
             opcoes_neste_frame: false,
             prefs_listas: HashMap::new(),
             painel_de_filtros: None,
+            cache_jogadores: std::sync::Mutex::new(CacheDeJogadores::default()),
             filtro_continente: None,
             rolagem: 0.0,
             detalhes_da_missao: false,
@@ -3444,6 +3613,23 @@ impl ScoutState {
         }
     }
 
+    /// A visão da aba Relatórios: por jogador (padrão) ou por Relatório.
+    pub fn visao_dos_relatorios(&self) -> VisaoRelatorios {
+        self.estado_ativo().map_or(VisaoRelatorios::PorJogador, |e| e.ler(|d| d.ui_prefs.visao_relatorios))
+    }
+
+    pub fn definir_visao_dos_relatorios(&mut self, visao: VisaoRelatorios) {
+        let Some(estado) = self.estado_ativo() else {
+            return;
+        };
+        if self.visao_dos_relatorios() == visao {
+            return;
+        }
+        if let Err(err) = estado.mutar(|d| d.ui_prefs.visao_relatorios = visao) {
+            tracing::warn!("[scout::state] Visão dos Relatórios não foi salva: {err:?}");
+        }
+    }
+
     pub fn filtros_da_lista(&self, id: ListaId) -> FiltrosLista {
         self.prefs_listas.get(&id).map(|p| p.filtros.clone()).unwrap_or_default()
     }
@@ -4240,6 +4426,81 @@ impl ScoutState {
                 .map(|r| Self::montar_relatorio_na_lista(dados, r, self.data_progresso))
                 .collect()
         })
+    }
+
+    // -----------------------------------------------------------------
+    // Relatórios por jogador e Base do Scout (2026-10-08)
+    // -----------------------------------------------------------------
+
+    /// O texto de onde uma Missão procura: continentes, países e ligas do
+    /// filtro geográfico ("Europa", "Brasil, Argentina", "o mundo todo").
+    pub fn regiao_da_missao(&self, filtros: &FiltrosMissao) -> String {
+        let ligas = self.ligas_carregadas();
+        let nacoes = self.nacoes().unwrap_or_default();
+        texto_regiao(filtros, &ligas, &nacoes)
+    }
+
+    /// Os jogadores da lista de Relatórios (um por jogador de cada
+    /// Relatório) e a Base do Scout, refeitos só quando os dados gravados,
+    /// a data ou as ligas mudam.
+    fn jogadores_dos_relatorios(&self) -> CacheDeJogadores {
+        let Some(estado) = self.estado_ativo() else {
+            return CacheDeJogadores::default();
+        };
+        let ligas = self.ligas_carregadas();
+        let chave = (estado.geracao(), self.data_progresso, ligas.len());
+        let mut guarda = self.cache_jogadores.lock().unwrap_or_else(|p| p.into_inner());
+        if guarda.chave == Some(chave) {
+            return guarda.clone();
+        }
+        let nacoes = self.nacoes().unwrap_or_default();
+        let hoje = self.data_progresso;
+        let (ativas, arquivadas) = estado.ler(|dados| {
+            let (mut ativas, mut arquivadas) = (Vec::new(), Vec::new());
+            for r in dados.relatorios.iter().rev() {
+                let item = Self::montar_relatorio_na_lista(dados, r, hoje);
+                let regiao = item.missao.as_ref().map_or_else(String::new, |m| texto_regiao(&m.filtros, &ligas, &nacoes));
+                let quando = r.gerado_em.or_else(|| item.missao.as_ref().map(|m| m.criada_em));
+                let destino = if r.arquivado { &mut arquivadas } else { &mut ativas };
+                for jogador in item.relatorio.jogadores {
+                    destino.push(Ocorrencia {
+                        jogador,
+                        relatorio_id: r.id,
+                        missao_id: item.missao.as_ref().map(|m| m.id),
+                        olheiro: item.olheiro.as_ref().map(Olheiro::nome_exibicao),
+                        tipo: item.missao.as_ref().map(|m| m.tipo),
+                        modo: item.missao.as_ref().map(|m| m.modo_busca),
+                        regiao: regiao.clone(),
+                        quando,
+                        fit_alvo: item.missao.as_ref().and_then(|m| m.filtros.fit_posicional),
+                        referencia: item.missao.as_ref().and_then(|m| m.filtros.referencia.as_ref()).map(|j| j.nome.clone()),
+                        qualidade: r.qualidade,
+                        arquivado: r.arquivado,
+                    });
+                }
+            }
+            (ativas, arquivadas)
+        });
+        let base = montar_base(ativas.iter().chain(arquivadas.iter()));
+        *guarda = CacheDeJogadores { chave: Some(chave), ativas: Arc::new(ativas), arquivadas: Arc::new(arquivadas), base: Arc::new(base) };
+        guarda.clone()
+    }
+
+    /// Um registro por jogador de cada Relatório (os já revelados), dos mais
+    /// novos aos mais antigos; `arquivados` escolhe a lista.
+    pub fn ocorrencias(&self, arquivados: bool) -> Arc<Vec<Ocorrencia>> {
+        let cache = self.jogadores_dos_relatorios();
+        if arquivados {
+            cache.arquivadas
+        } else {
+            cache.ativas
+        }
+    }
+
+    /// A Base do Scout: todo jogador que algum Olheiro já encontrou (nos
+    /// Relatórios ativos e arquivados), um por jogador.
+    pub fn base_do_scout(&self) -> Arc<Vec<JogadorDaBase>> {
+        self.jogadores_dos_relatorios().base
     }
 
     /// Abre um Relatório: a tela passa a mostrá-lo e o "novo" some
@@ -5407,6 +5668,86 @@ mod tests {
         assert!(st.olheiros_contratados()[0].em_missao);
         // demitir um que já saiu não faz nada
         assert!(!st.confirmar_demissao());
+    }
+
+    /// Um Relatório já concluído, com estes jogadores, de uma Missão do `olheiro`.
+    fn relatorio_com(olheiro: &Olheiro, criada: i32, tipo: quality::TipoMissao, jogadores: Vec<JogadorEncontrado>) -> (Missao, Relatorio) {
+        let mut m = missao_com_prazo(olheiro, criada, Date(criada).mais_dias(5).0);
+        m.status = StatusMissao::Concluida;
+        m.tipo = tipo;
+        m.blocos_buscados = 1;
+        let mut r = Relatorio::de_teste(m.id);
+        r.gerado_em = Some(Date(criada).mais_dias(5));
+        r.jogadores = jogadores;
+        (m, r)
+    }
+
+    #[test]
+    fn the_scout_base_merges_every_report_keeping_the_best_record_of_each_player() {
+        use crate::scout::persistence::EstadoPersistido;
+        let pasta = PastaTemporaria::nova();
+        let mut o = olheiro(Especializacao::Tatico, Tier::Elite);
+        o.nome = "Rodrigo".to_string();
+        let mut detalhado = JogadorEncontrado::de_teste(7, "Craque", 25, (80, 82));
+        detalhado.atributos = Atributo::TODOS
+            .iter()
+            .take(28)
+            .map(|&a| AtributoRevelado { atributo: a, valor: FaixaAtributo { min: 80, max: 82 } })
+            .collect();
+        let raso = JogadorEncontrado::de_teste(7, "Craque", 25, (76, 86));
+        let (m1, r1) = relatorio_com(&o, 20260610, quality::TipoMissao::Jovens, vec![raso, JogadorEncontrado::de_teste(8, "Outro", 5, (70, 74))]);
+        let (m2, mut r2) = relatorio_com(&o, 20260620, quality::TipoMissao::Tatica, vec![detalhado]);
+        r2.arquivado = true; // arquivar não tira da Base
+        let (st, _busca, _) = estado_com_datas(&pasta, &[20260701], vec![m1, m2], &o);
+        EstadoPersistido::carregar(Some(&pasta.0), ID_A).mutar(move |d| d.relatorios = vec![r1, r2]).expect("gravou");
+        let mut st = st;
+        st.ao_abrir_painel();
+
+        let base = st.base_do_scout();
+        assert_eq!(base.len(), 2, "dois jogadores diferentes");
+        let craque = base.iter().find(|b| b.melhor.jogador.player_id == 7).expect("craque");
+        assert_eq!(craque.vistos.len(), 2, "visto em dois Relatórios");
+        assert_eq!(craque.melhor.jogador.atributos.len(), 28, "o registro com todos os atributos vence");
+        assert!(craque.melhor.arquivado, "o melhor está no Relatório arquivado");
+        assert_eq!(craque.melhor.tipo, Some(quality::TipoMissao::Tatica));
+        assert_eq!(craque.origem(), "Rodrigo · Missão Tática +1");
+        let outro = base.iter().find(|b| b.melhor.jogador.player_id == 8).expect("outro");
+        assert_eq!((outro.vistos.len(), outro.origem()), (1, "Rodrigo · Missão Jovens".to_string()));
+        // a lista de Relatórios: um registro por jogador de cada Relatório
+        assert_eq!(st.ocorrencias(false).len(), 2, "os ativos: os dois do 1º Relatório");
+        assert_eq!(st.ocorrencias(true).len(), 1, "o arquivado: um");
+        assert_eq!(st.ocorrencias(false)[0].regiao, "o mundo todo");
+    }
+
+    #[test]
+    fn the_base_follows_the_saved_data_and_is_rebuilt_only_when_it_changes() {
+        use crate::scout::persistence::EstadoPersistido;
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Tatico, Tier::Elite);
+        let (m1, r1) = relatorio_com(&o, 20260610, quality::TipoMissao::Geral, vec![JogadorEncontrado::de_teste(1, "A", 25, (70, 72))]);
+        let (st, _busca, _) = estado_com_datas(&pasta, &[20260701], vec![m1], &o);
+        EstadoPersistido::carregar(Some(&pasta.0), ID_A).mutar(move |d| d.relatorios = vec![r1]).expect("gravou");
+        let mut st = st;
+        st.ao_abrir_painel();
+        let a = st.base_do_scout();
+        let b = st.base_do_scout();
+        assert!(Arc::ptr_eq(&a, &b), "sem mudança, o mesmo cache");
+        st.estado_ativo().map(|e| e.mutar(|d| d.relatorios[0].jogadores.push(JogadorEncontrado::de_teste(2, "B", 5, (60, 64))))).expect("estado").expect("gravou");
+        let c = st.base_do_scout();
+        assert!(!Arc::ptr_eq(&a, &c) && c.len() == 2, "gravou: a Base é refeita");
+    }
+
+    #[test]
+    fn the_region_of_a_missao_reads_in_words() {
+        let mut f = FiltrosMissao::default();
+        assert_eq!(texto_regiao(&f, &[], &[]), "o mundo todo");
+        f.continentes = vec![Confederacao::Europa];
+        f.paises_dos_clubes = vec![54];
+        let nacoes = vec![Nacao { id: 54, nome: "Brasil".to_string(), iso: "BR".to_string(), confederacao: Confederacao::AmericaDoSul }];
+        assert_eq!(texto_regiao(&f, &[], &nacoes), "Europa, Brasil");
+        f.ligas = vec![13, 14, 15];
+        let ligas = vec![Liga { id: 13, nome: "Premier League".to_string(), pais: Some(14), pais_nome: "England".to_string(), continente: Confederacao::Europa, nivel: 1, clubes: 20 }];
+        assert_eq!(texto_regiao(&f, &ligas, &nacoes), "Europa, Brasil, Premier League e mais 2");
     }
 
     #[test]

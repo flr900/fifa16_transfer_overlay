@@ -27,6 +27,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -118,6 +119,9 @@ pub struct UiPrefs {
     pub modo_relatorios: Densidade,
     pub modo_base: Densidade,
     pub modo_relatorio_aberto: Densidade,
+    /// A aba Relatórios: um registro por jogador (padrão) ou um card por
+    /// Relatório (2026-10-08).
+    pub visao_relatorios: VisaoRelatorios,
     /// Épico 7: "Sincronizar com o FIFA". Ligado por padrão (decisão de
     /// 2026-10-06); só vai para o arquivo quando desligado.
     #[serde(skip_serializing_if = "e_verdadeiro")]
@@ -138,6 +142,7 @@ impl Default for UiPrefs {
             modo_relatorios: Densidade::Cards,
             modo_base: Densidade::Tabular,
             modo_relatorio_aberto: Densidade::Cards,
+            visao_relatorios: VisaoRelatorios::PorJogador,
             sincronizar_com_o_jogo: true,
         }
     }
@@ -150,6 +155,17 @@ pub enum Densidade {
     #[default]
     Tabular,
     Cards,
+}
+
+/// A aba Relatórios: os jogadores encontrados (com quem os viu e em que
+/// Missão) ou a lista dos Relatórios. No JSON: `"por_jogador"` /
+/// `"por_relatorio"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisaoRelatorios {
+    #[default]
+    PorJogador,
+    PorRelatorio,
 }
 
 /// Desserializa `T`; se o valor não servir, usa `T::default()` e avisa.
@@ -187,9 +203,21 @@ pub struct EstadoPersistido {
     dados: Arc<Mutex<ScoutStateFile>>,
     /// `None` = somente leitura (ver `ErroPersistencia::SomenteLeitura`).
     caminho: Option<PathBuf>,
+    /// Sobe a cada mutação gravada: quem guarda algo derivado dos dados
+    /// (a Base do Scout) sabe quando refazer.
+    geracao: Arc<AtomicU64>,
 }
 
 impl EstadoPersistido {
+    fn montar(dados: ScoutStateFile, caminho: Option<PathBuf>) -> Self {
+        EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho, geracao: Arc::new(AtomicU64::new(0)) }
+    }
+
+    /// Quantas mutações já foram gravadas neste estado (só cresce).
+    pub fn geracao(&self) -> u64 {
+        self.geracao.load(Ordering::Relaxed)
+    }
+
     /// Carrega (ou cria) o arquivo de `id_save` em `diretorio`. Nunca
     /// falha: no pior caso devolve um estado vazio somente leitura.
     pub fn carregar(diretorio: Option<&Path>, id_save: &str) -> Self {
@@ -242,7 +270,7 @@ impl EstadoPersistido {
                     VERSAO_FORMATO
                 );
                 dados.versao = VERSAO_FORMATO;
-                EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: Some(caminho) }
+                EstadoPersistido::montar(dados, Some(caminho))
             }
             Ok(dados) if dados.versao > VERSAO_FORMATO => {
                 tracing::warn!(
@@ -261,7 +289,7 @@ impl EstadoPersistido {
                     dados.missoes.len(),
                     dados.relatorios.len()
                 );
-                EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: Some(caminho) }
+                EstadoPersistido::montar(dados, Some(caminho))
             }
             Err(err) => {
                 tracing::warn!("[scout::persistence] Arquivo de estado corrompido ({err}): {}", caminho.display());
@@ -282,7 +310,7 @@ impl EstadoPersistido {
     }
 
     fn somente_leitura(dados: ScoutStateFile) -> Self {
-        EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: None }
+        EstadoPersistido::montar(dados, None)
     }
 
     /// Estado vazio já gravado em disco (o arquivo existe a partir do
@@ -292,7 +320,7 @@ impl EstadoPersistido {
         if let Err(err) = gravar(&caminho, &dados) {
             tracing::warn!("[scout::persistence] Falha ao criar {}: {err:?}", caminho.display());
         }
-        EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: Some(caminho) }
+        EstadoPersistido::montar(dados, Some(caminho))
     }
 
     /// Aceita mutações (há um arquivo em disco por trás).
@@ -321,6 +349,7 @@ impl EstadoPersistido {
         let resultado = f(&mut novo);
         gravar(caminho, &novo)?;
         *guarda = novo;
+        self.geracao.fetch_add(1, Ordering::Relaxed);
         Ok(resultado)
     }
 }
@@ -433,7 +462,8 @@ pub(crate) mod tests {
                     "modo_escolhidos": "cards",
                     "modo_relatorios": "cards",
                     "modo_base": "tabular",
-                    "modo_relatorio_aberto": "cards"
+                    "modo_relatorio_aberto": "cards",
+                    "visao_relatorios": "por_jogador"
                 }
             })
         );

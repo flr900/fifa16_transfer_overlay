@@ -33,6 +33,7 @@ pub enum ListaId {
 }
 
 impl ListaId {
+    #[allow(dead_code)] // usado nos testes
     pub const TODAS: [ListaId; 4] = [ListaId::Escolhidos, ListaId::Relatorios, ListaId::Base, ListaId::RelatorioAberto];
 }
 
@@ -45,13 +46,23 @@ pub struct ItemLista<'a> {
     pub detalhado: bool,
     /// "Olheiro · Missão", para a coluna e a ordenação por origem.
     pub origem: String,
+    /// Identidade do item na tela (ids do ImGui): o `player_id`, ou, na lista
+    /// de Relatórios por jogador (o mesmo jogador em vários Relatórios), o
+    /// `player_id` junto com o Relatório.
+    pub chave: u64,
 }
 
 impl<'a> ItemLista<'a> {
     /// Detalhado = os 28 atributos do Relatório já revelados.
     pub fn novo(jogador: &'a JogadorEncontrado, origem: String) -> Self {
         let detalhado = jogador.atributos.len() >= ATRIBUTOS_DETALHADO;
-        ItemLista { jogador, detalhado, origem }
+        ItemLista { jogador, detalhado, origem, chave: u64::from(jogador.player_id) }
+    }
+
+    /// Com a identidade própria (o mesmo jogador em mais de um Relatório).
+    pub fn com_chave(mut self, chave: u64) -> Self {
+        self.chave = chave;
+        self
     }
 }
 
