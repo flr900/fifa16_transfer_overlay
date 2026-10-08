@@ -45,7 +45,6 @@ use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, RitmoTrabalho};
 pub use super::quality::{Atalho, NivelEquipe, Perfil, PosicaoAlvo};
 
-use super::cobertura::Cobertura;
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::Densidade;
 use super::persistence::{self, EstadoPersistido};
@@ -1714,8 +1713,6 @@ pub struct ScoutState {
     data_avisos: Option<Date>,
     /// Falha da última renovação/encerramento, por Missão (Story 2.10).
     erros_missao: HashMap<Uuid, ErroCompra>,
-    /// País escolhido no Sonar para o resumo (Story 4.2; não persiste).
-    pais_sonar: Option<u16>,
     /// Elenco do técnico, lido em background e marcado com a carreira dona
     /// (Stories 3.2/3.3).
     tarefa_elenco: AsyncTask<(String, Arc<Vec<JogadorElenco>>)>,
@@ -1733,6 +1730,8 @@ pub struct ScoutState {
     troca_de_aba_pendente: Option<Aba>,
     /// "Demitir" clicado num Olheiro: o aviso de confirmação está aberto.
     demissao_pendente: Option<Uuid>,
+    /// O jogador apertou Y neste frame (o menu de Opções da tela em foco).
+    opcoes_neste_frame: bool,
     /// Filtro de continente da tela "Contratar Olheiro" (`None` = todos).
     filtro_continente: Option<Confederacao>,
     /// Pixels a rolar neste frame pelo analógico direito (positivo = para
@@ -1823,7 +1822,6 @@ impl ScoutState {
             vendo_arquivados: false,
             data_avisos: None,
             erros_missao: HashMap::new(),
-            pais_sonar: None,
             tarefa_elenco: AsyncTask::new(),
             ficha: None,
             comparacao: None,
@@ -1831,6 +1829,7 @@ impl ScoutState {
             foco_geografico: FocoGeografico::Continentes,
             troca_de_aba_pendente: None,
             demissao_pendente: None,
+            opcoes_neste_frame: false,
             filtro_continente: None,
             rolagem: 0.0,
             detalhes_da_missao: false,
@@ -1907,7 +1906,6 @@ impl ScoutState {
         self.cancelar_nova_missao();
         self.fechar_relatorio();
         self.vendo_arquivados = false;
-        self.pais_sonar = None;
         self.troca_de_aba_pendente = None;
         self.demissao_pendente = None;
     }
@@ -3395,6 +3393,16 @@ impl ScoutState {
     // Filtro de continente do mercado e demissão (2026-10-05)
     // -----------------------------------------------------------------
 
+    /// O jogador apertou Y neste frame: a tela abre as Opções do item em
+    /// foco (ou os filtros da lista). Vale só no frame do aperto.
+    pub fn opcoes_pedidas(&self) -> bool {
+        self.opcoes_neste_frame
+    }
+
+    pub fn definir_opcoes(&mut self, pedidas: bool) {
+        self.opcoes_neste_frame = pedidas;
+    }
+
     pub fn filtro_continente(&self) -> Option<Confederacao> {
         self.filtro_continente
     }
@@ -4218,23 +4226,6 @@ impl ScoutState {
         self.vendo_arquivados = arquivados;
     }
 
-    /// Cobertura do Sonar (Story 4.1), recalculada das Missões gravadas da
-    /// carreira pronta; `ligas` são as de `listar_ligas` (país de cada
-    /// liga). `None` sem carreira pronta.
-    pub fn cobertura(&self, ligas: &[Liga]) -> Option<Cobertura> {
-        let estado = self.estado_ativo()?;
-        Some(estado.ler(|dados| Cobertura::de(&dados.missoes, ligas)))
-    }
-
-    /// País do resumo do Sonar (Story 4.2).
-    pub fn pais_sonar(&self) -> Option<u16> {
-        self.pais_sonar
-    }
-
-    pub fn escolher_pais_sonar(&mut self, pais: u16) {
-        self.pais_sonar = Some(pais);
-    }
-
     /// Pode arquivar: já foi aberto ao menos uma vez e a Missão terminou
     /// (Story 2.7). Arquivar nunca apaga nada.
     pub fn pode_arquivar(item: &RelatorioNaLista) -> bool {
@@ -4889,8 +4880,8 @@ mod tests {
         assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Olheiros));
         assert_eq!(st.tomar_aba_restaurada(), None, "restaura uma vez só");
 
-        st.definir_aba_ativa(Aba::Sonar);
-        assert_eq!(aba_no_arquivo(&pasta, ID_A), "sonar");
+        st.definir_aba_ativa(Aba::Base);
+        assert_eq!(aba_no_arquivo(&pasta, ID_A), "base");
 
         // releitura periódica da mesma carreira não restaura de novo
         vencer_releitura(&mut st);
@@ -4905,7 +4896,7 @@ mod tests {
         assert_eq!(st.status(), &CarreiraStatus::Localizando);
         assert_eq!(st.tomar_aba_restaurada(), None);
         ticks_ate_terminar(&mut st);
-        assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Sonar));
+        assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Base));
     }
 
     #[test]
@@ -4918,20 +4909,20 @@ mod tests {
         );
         st.ao_abrir_painel();
         assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Olheiros));
-        st.definir_aba_ativa(Aba::Sonar);
+        st.definir_aba_ativa(Aba::Base);
 
         // trocou para a carreira B
         vencer_releitura(&mut st);
         st.tick();
         assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Olheiros), "B tem a própria aba");
         st.definir_aba_ativa(Aba::Relatorios);
-        assert_eq!(aba_no_arquivo(&pasta, ID_A), "sonar");
+        assert_eq!(aba_no_arquivo(&pasta, ID_A), "base");
         assert_eq!(aba_no_arquivo(&pasta, ID_B), "relatorios");
 
         // voltou para A: mesmo estado (mesmo mutex), aba de A
         vencer_releitura(&mut st);
         st.tick();
-        assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Sonar));
+        assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Base));
         assert_eq!(st.estados.len(), 2);
     }
 
@@ -4950,7 +4941,7 @@ mod tests {
         vencer_releitura(&mut st);
         st.tick();
         assert_eq!(st.status(), &CarreiraStatus::SemCarreira);
-        st.definir_aba_ativa(Aba::Sonar);
+        st.definir_aba_ativa(Aba::Base);
         assert_eq!(aba_no_arquivo(&pasta, ID_A), "missoes");
 
         // voltou à carreira: a navegação volta para a aba salva
@@ -4964,7 +4955,7 @@ mod tests {
         let (mut st, _) = estado(vec![Ok(snapshot())], Ok(()));
         st.ao_abrir_painel();
         assert_eq!(st.status(), &CarreiraStatus::Pronta(snapshot()));
-        st.definir_aba_ativa(Aba::Sonar); // só avisa no log
+        st.definir_aba_ativa(Aba::Base); // só avisa no log
         assert_eq!(st.tomar_aba_restaurada(), Some(Aba::Olheiros));
     }
 
@@ -5838,38 +5829,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn the_sonar_counts_archived_reports_as_coverage_and_forgets_the_country_on_close() {
-        use crate::scout::cobertura::{Contagem, EstadoPais};
-        let pasta = PastaTemporaria::nova();
-        let o = olheiro(Especializacao::Generalista, Tier::Junior);
-        let mut vencida = missao_com_prazo(&o, 20260701, 20260710);
-        vencida.filtros.paises_dos_clubes = vec![54];
-        // criada até a data do save (03/07): depois dela o Scout voltaria no tempo
-        let mut ativa = missao_com_prazo(&o, 20260701, 20260801);
-        ativa.filtros.paises_dos_clubes = vec![52];
-        let id_vencida = vencida.id;
-        let (mut st, _busca) = estado_com_missoes(&pasta, 20260712, vec![vencida, ativa], &o);
-        assert!(st.cobertura(&[]).is_none(), "sem carreira pronta");
-        st.ao_abrir_painel();
-        ticks_ate_buscar(&mut st);
-
-        let lista = st.relatorios(false);
-        let id = lista.iter().find(|r| r.relatorio.missao_id == id_vencida).expect("Relatório da vencida").relatorio.id;
-        st.abrir_relatorio(id);
-        st.fechar_relatorio();
-        assert!(st.arquivar_relatorio(id));
-        let cobertura = st.cobertura(&esperar_ligas(&st)).expect("carreira pronta");
-        assert_eq!(cobertura.estado(54), EstadoPais::MissaoConcluida, "arquivar não apaga cobertura");
-        assert_eq!(cobertura.estado(52), EstadoPais::MissaoAtiva);
-        assert_eq!(cobertura.contagem(54), Contagem { ativas: 0, concluidas: 1 });
-
-        st.escolher_pais_sonar(54);
-        assert_eq!(st.pais_sonar(), Some(54));
-        st.ao_fechar_painel();
-        assert_eq!(st.pais_sonar(), None);
     }
 
     #[test]

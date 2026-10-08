@@ -14,7 +14,6 @@ mod escolher_olheiro;
 mod missoes;
 mod campo_atributo;
 mod campo_fit;
-mod cartograma;
 mod escolhidos;
 mod ficha_jogador;
 mod nova_missao;
@@ -24,7 +23,6 @@ mod relatorio;
 mod relatorios;
 mod selecao_geografica;
 mod seletor_elenco;
-mod sonar;
 pub mod theme;
 
 use imgui::{Condition, FontId, StyleColor, StyleVar, Ui, WindowFlags};
@@ -588,7 +586,7 @@ fn conteudo_da_tela(
                 escolhidos::Acao::AbrirFicha(player_id) => *pedido = Some(Pedido::AbrirFichaDeEscolhido(player_id)),
                 escolhidos::Acao::Nenhuma => {}
             },
-            Aba::Sonar => sonar::render(ui, fonts, state),
+            Aba::Base => mensagem(ui, fonts, "Base do Scout: em construção."),
         },
     }
 }

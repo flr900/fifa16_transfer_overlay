@@ -22,7 +22,6 @@
 //! (`bloqueia_controle`, aplicado em `crate::gamepad`): sem isso o B ou o
 //! START que fechou o painel chegaria ao FIFA ao ser solto.
 
-pub mod cobertura;
 pub mod minifaces;
 pub mod nomes;
 pub mod persistence;
@@ -52,6 +51,9 @@ pub struct ComandosControle {
     pub aba_anterior: bool,
     pub proxima_aba: bool,
     pub voltar: bool,
+    /// Y: o menu de Opções da tela (filtros, ou o que fazer com o Olheiro
+    /// em foco). Cada tela decide o que ele abre (`ScoutState::opcoes_pedidas`).
+    pub opcoes: bool,
 }
 
 pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> ComandosControle {
@@ -61,6 +63,7 @@ pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> Com
         aba_anterior: borda(botao::LB),
         proxima_aba: borda(botao::RB),
         voltar: borda(botao::B),
+        opcoes: borda(botao::Y),
     }
 }
 
@@ -71,19 +74,20 @@ const ATALHO_PAINEL: VIRTUAL_KEY = VK_F10;
 
 /// As abas fixas, na ordem da barra de abas. Persistida em `ui_prefs`
 /// como `"olheiros"`, `"missoes"`, `"relatorios"`, `"escolhidos"`,
-/// `"sonar"` (Escolhidos chegou no Épico 6).
+/// `"base"` (a Base do Scout, 2026-10-08, tomou o lugar do Sonar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Aba {
     Olheiros,
     Missoes,
     Relatorios,
+    /// Os jogadores que já passaram pelo scout do clube (2026-10-08).
+    Base,
     Escolhidos,
-    Sonar,
 }
 
 impl Aba {
-    pub const TODAS: [Aba; 5] = [Aba::Olheiros, Aba::Missoes, Aba::Relatorios, Aba::Escolhidos, Aba::Sonar];
+    pub const TODAS: [Aba; 5] = [Aba::Olheiros, Aba::Missoes, Aba::Relatorios, Aba::Base, Aba::Escolhidos];
 
     /// Aba vizinha na barra (LB/RB), dando a volta nas pontas.
     pub fn vizinha(self, passo: isize) -> Aba {
@@ -98,8 +102,8 @@ impl Aba {
             Aba::Olheiros => "Olheiros",
             Aba::Missoes => "Missões",
             Aba::Relatorios => "Relatórios",
+            Aba::Base => "Base do Scout",
             Aba::Escolhidos => "Escolhidos",
-            Aba::Sonar => "Sonar",
         }
     }
 }
@@ -323,6 +327,9 @@ impl Scout {
     fn aplicar_controle(&mut self, atual: EstadoControle, ja_alternou: bool) {
         let comandos = comandos_controle(self.controle_anterior, atual);
         self.controle_anterior = atual;
+        // o Y vale por um frame só, e só sem aviso por cima (as telas leem
+        // `opcoes_pedidas` no render deste mesmo frame)
+        self.state.definir_opcoes(false);
         // `ja_alternou` com o painel fechado agora = o F10 acabou de fechá-lo
         let estava_aberto = self.painel_aberto || ja_alternou;
 
@@ -343,6 +350,9 @@ impl Scout {
                     self.nav.pedir_foco();
                 }
             } else {
+                if comandos.opcoes {
+                    self.state.definir_opcoes(true);
+                }
                 if comandos.aba_anterior || comandos.proxima_aba {
                     let passo = if comandos.proxima_aba { 1 } else { -1 };
                     let aba = self.nav.aba_ativa().vizinha(passo);
@@ -526,7 +536,7 @@ mod tests {
         let mut scout = Scout::new();
         scout.atualizar_atalho(true);
         scout.atualizar_atalho(false);
-        scout.nav.trocar_aba(Aba::Sonar);
+        scout.nav.trocar_aba(Aba::Base);
         scout.nav.push(Satelite::FichaJogador);
 
         // fecha e reabre
@@ -534,7 +544,7 @@ mod tests {
         scout.atualizar_atalho(false);
         scout.atualizar_atalho(true);
         assert!(scout.painel_aberto());
-        assert_eq!(scout.nav, Navigation::new(Aba::Sonar));
+        assert_eq!(scout.nav, Navigation::new(Aba::Base));
     }
 
     /// Carreira sempre pronta, sem varrer memória.
@@ -586,14 +596,14 @@ mod tests {
         abrir(&mut scout);
         assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
         // o que a barra de abas faz no clique
-        scout.nav.trocar_aba(Aba::Sonar);
-        scout.state.definir_aba_ativa(Aba::Sonar);
+        scout.nav.trocar_aba(Aba::Base);
+        scout.state.definir_aba_ativa(Aba::Base);
 
-        // jogo reiniciado: Scout novo começa em Olheiros e vai para Sonar
+        // jogo reiniciado: Scout novo começa em Olheiros e vai para a Base
         let mut scout = novo_scout();
         assert_eq!(scout.nav.aba_ativa(), Aba::Olheiros);
         abrir(&mut scout);
-        assert_eq!(scout.nav.aba_ativa(), Aba::Sonar);
+        assert_eq!(scout.nav.aba_ativa(), Aba::Base);
     }
 
     #[test]
@@ -691,7 +701,7 @@ mod tests {
         scout.nav.push(Satelite::FichaJogador);
         scout.aplicar_controle(controle(botao::RB), false);
         scout.aplicar_controle(controle(0), false);
-        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Escolhidos), "saiu da Ficha");
+        assert_eq!(scout.nav.tela_atual(), ScoutScreen::Aba(Aba::Base), "saiu da Ficha");
         assert_eq!(scout.nav.profundidade(), 1);
 
         // com a Nova Missão aberta: pergunta antes
@@ -725,7 +735,7 @@ mod tests {
         scout.aplicar_controle(controle(botao::LB), false);
         scout.aplicar_controle(controle(0), false);
         scout.aplicar_controle(controle(botao::LB), false);
-        assert_eq!(scout.nav.aba_ativa(), Aba::Sonar, "dá a volta");
+        assert_eq!(scout.nav.aba_ativa(), Aba::Escolhidos, "dá a volta");
 
         // com uma tela satélite aberta, LB/RB também trocam (2026-10-03)
         scout.aplicar_controle(controle(0), false);
@@ -817,15 +827,32 @@ mod tests {
     }
 
     #[test]
+    fn y_asks_for_the_options_for_one_frame_only_with_no_warning_on_top() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        assert!(!scout.state.opcoes_pedidas());
+        scout.aplicar_controle(controle(botao::Y), false);
+        assert!(scout.state.opcoes_pedidas(), "borda do Y");
+        scout.aplicar_controle(controle(botao::Y), false);
+        assert!(!scout.state.opcoes_pedidas(), "segurar não repete");
+        scout.aplicar_controle(controle(0), false);
+        // com o aviso de demissão aberto, o Y não chega às telas de baixo
+        scout.state.definir_troca_de_aba_pendente(Some(Aba::Missoes));
+        scout.aplicar_controle(controle(botao::Y), false);
+        assert!(!scout.state.opcoes_pedidas());
+    }
+
+    #[test]
     fn neighbour_tabs_wrap_around() {
-        assert_eq!(Aba::Olheiros.vizinha(-1), Aba::Sonar);
-        assert_eq!(Aba::Sonar.vizinha(1), Aba::Olheiros);
+        assert_eq!(Aba::Olheiros.vizinha(-1), Aba::Escolhidos);
+        assert_eq!(Aba::Escolhidos.vizinha(1), Aba::Olheiros);
         assert_eq!(Aba::Missoes.vizinha(1), Aba::Relatorios);
     }
 
     #[test]
     fn tab_labels_follow_the_bar_order() {
         let rotulos: Vec<&str> = Aba::TODAS.iter().map(|a| a.rotulo()).collect();
-        assert_eq!(rotulos, ["Olheiros", "Missões", "Relatórios", "Escolhidos", "Sonar"]);
+        assert_eq!(rotulos, ["Olheiros", "Missões", "Relatórios", "Base do Scout", "Escolhidos"]);
     }
 }

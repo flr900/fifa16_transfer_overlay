@@ -380,9 +380,11 @@ const LIMIAR_ANALOGICO_NAV: f32 = 0.5;
 ///   rolaria a janela) e deixa de ser repassado como analógico, para não
 ///   rolar e mover ao mesmo tempo;
 /// - ←/→ (D-pad ou analógico) navegam SEMPRE dentro da tela: trocar de
-///   aba é só LB/RB (`scout`).
+///   aba é só LB/RB (`scout`);
+/// - o Y não vai para o ImGui (ali ele abre o modo de janelas): é o botão
+///   "Opções" do Scout, lido à parte (`scout::comandos_controle`).
 pub fn para_navegacao(estado: EstadoControle) -> EstadoControle {
-    let mut botoes = estado.botoes;
+    let mut botoes = estado.botoes & !botao::Y;
     let x = normalizar_eixo(estado.lx, ZONA_MORTA_ANALOGICO);
     let y = normalizar_eixo(estado.ly, ZONA_MORTA_ANALOGICO);
     if y >= LIMIAR_ANALOGICO_NAV {
@@ -463,5 +465,14 @@ mod tests {
         assert!(!EstadoControle { rt: 200, ..Default::default() }.solto());
         assert!(!EstadoControle { botoes: botao::B, ..Default::default() }.solto());
         assert!(EstadoControle { botoes: botao::L3 | botao::START, ..Default::default() }.segura(botao::L3 | botao::START));
+    }
+
+    #[test]
+    fn y_never_reaches_the_imgui_navigation_but_the_other_buttons_do() {
+        let estado = EstadoControle { botoes: botao::Y | botao::A | botao::DPAD_BAIXO, ..Default::default() };
+        let nav = para_navegacao(estado);
+        assert_eq!(nav.botoes, botao::A | botao::DPAD_BAIXO, "o Y é do Scout, não da navegação");
+        let eventos = eventos_imgui(Some(nav));
+        assert!(eventos.iter().all(|(tecla, apertada, _)| !(*tecla == Key::GamepadFaceUp && *apertada)));
     }
 }

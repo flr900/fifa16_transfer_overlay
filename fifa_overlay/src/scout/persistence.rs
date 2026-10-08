@@ -425,13 +425,13 @@ pub(crate) mod tests {
     fn mutation_writes_the_whole_file_and_survives_a_reload() {
         let pasta = PastaTemporaria::nova();
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        estado.mutar(|d| d.ui_prefs.aba_ativa = Aba::Sonar).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(json_do_arquivo(&pasta, ID_A)["ui_prefs"]["aba_ativa"], "sonar");
+        estado.mutar(|d| d.ui_prefs.aba_ativa = Aba::Base).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(json_do_arquivo(&pasta, ID_A)["ui_prefs"]["aba_ativa"], "base");
         assert_eq!(pasta.arquivos(), [format!("{ID_A}.json")], "sem .tmp sobrando");
 
         // "reiniciar o jogo": novo carregamento do mesmo arquivo
         let recarregado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        assert_eq!(recarregado.ler(|d| d.ui_prefs.aba_ativa), Aba::Sonar);
+        assert_eq!(recarregado.ler(|d| d.ui_prefs.aba_ativa), Aba::Base);
     }
 
     #[test]
@@ -559,13 +559,13 @@ pub(crate) mod tests {
     #[test]
     fn newer_format_is_read_but_never_overwritten() {
         let pasta = PastaTemporaria::nova();
-        let conteudo = r#"{"versao": 3, "ui_prefs": {"aba_ativa": "sonar"}, "campo_novo": 1}"#;
+        let conteudo = r#"{"versao": 3, "ui_prefs": {"aba_ativa": "base"}, "campo_novo": 1}"#;
         let _ = fs::write(pasta.0.join(format!("{ID_A}.json")), conteudo);
 
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Sonar);
+        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Base);
         assert_eq!(estado.mutar(|d| d.ui_prefs.aba_ativa = Aba::Missoes), Err(ErroPersistencia::SomenteLeitura));
-        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Sonar, "memória não mudou");
+        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Base, "memória não mudou");
         assert_eq!(fs::read_to_string(pasta.0.join(format!("{ID_A}.json"))).unwrap_or_default(), conteudo);
     }
 
@@ -574,10 +574,10 @@ pub(crate) mod tests {
         let pasta = PastaTemporaria::nova();
         let a = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
         let b = EstadoPersistido::carregar(Some(&pasta.0), ID_B);
-        a.mutar(|d| d.ui_prefs.aba_ativa = Aba::Sonar).unwrap_or_else(|e| panic!("{e:?}"));
+        a.mutar(|d| d.ui_prefs.aba_ativa = Aba::Base).unwrap_or_else(|e| panic!("{e:?}"));
         b.mutar(|d| d.ui_prefs.aba_ativa = Aba::Relatorios).unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert_eq!(json_do_arquivo(&pasta, ID_A)["ui_prefs"]["aba_ativa"], "sonar");
+        assert_eq!(json_do_arquivo(&pasta, ID_A)["ui_prefs"]["aba_ativa"], "base");
         assert_eq!(json_do_arquivo(&pasta, ID_B)["ui_prefs"]["aba_ativa"], "relatorios");
     }
 
