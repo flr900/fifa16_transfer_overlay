@@ -34,7 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::state::{Escolhido, Missao, Olheiro, Relatorio};
+use super::state::{Escolhido, JogadorEncontrado, JogadorMapeado, Missao, Olheiro, Relatorio};
 use super::Aba;
 
 /// Versão do formato do arquivo. Um arquivo com versão MAIOR foi gravado
@@ -77,6 +77,21 @@ pub struct ScoutStateFile {
     /// `(período, atratividade)`.
     #[serde(default)]
     pub mercado_do_mes: Option<(u32, u8)>,
+    /// O elenco do clube na última leitura, uma foto exata de cada jogador
+    /// (2026-10-08). Quem sair dele vira um registro da Base do Scout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elenco: Vec<JogadorEncontrado>,
+    /// O clube (`teamid`) a que `elenco` se refere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elenco_clube: Option<i64>,
+    /// Jogadores da Base do Scout que não vieram de um Relatório: ex-jogadores
+    /// do clube e os da lista de escolhidos do jogo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mapeados: Vec<JogadorMapeado>,
+    /// Jogadores que o técnico tirou dos Escolhidos: a lista do jogo não os
+    /// traz de volta.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub importacao_ignorada: Vec<u32>,
     /// Preferência de UI inválida (ex. aba que não existe mais) não pode
     /// custar os Olheiros: só esta seção volta ao padrão.
     #[serde(default, deserialize_with = "ou_padrao")]
@@ -95,6 +110,10 @@ impl Default for ScoutStateFile {
             nivel_original: std::collections::BTreeMap::new(),
             valores_do_jogo: std::collections::BTreeMap::new(),
             mercado_do_mes: None,
+            elenco: Vec::new(),
+            elenco_clube: None,
+            mapeados: Vec::new(),
+            importacao_ignorada: Vec::new(),
             ui_prefs: UiPrefs::default(),
         }
     }

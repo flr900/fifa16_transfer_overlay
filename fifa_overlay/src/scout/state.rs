@@ -46,6 +46,7 @@ pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, Ritm
 pub use super::quality::{Atalho, NivelEquipe, Perfil, PosicaoAlvo};
 
 use super::lista::{FiltrosLista, ListaId, Ordenacao, PrefsLista};
+use super::mapeamento;
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::{Densidade, VisaoRelatorios};
 use super::persistence::{self, EstadoPersistido, UiPrefs};
@@ -892,6 +893,61 @@ pub fn montar_base<'a>(ocorrencias: impl Iterator<Item = &'a Ocorrencia>) -> Vec
     base
 }
 
+/// Um jogador mapeado sem Relatório como um registro da Base: sem Olheiro
+/// nem Missão (a "origem" diz de onde veio) e sem Relatório (`relatorio_id`
+/// nulo: a Ficha abre direto, `ScoutState::abrir_ficha_da_base`).
+pub fn ocorrencia_do_mapeado(m: &JogadorMapeado) -> Ocorrencia {
+    Ocorrencia {
+        jogador: m.jogador.clone(),
+        relatorio_id: Uuid::nil(),
+        missao_id: None,
+        olheiro: Some(m.motivo.nome().to_string()),
+        tipo: None,
+        modo: None,
+        regiao: String::new(),
+        quando: Some(m.desde),
+        fit_alvo: None,
+        referencia: None,
+        qualidade: qualidade_da_precisao(m.jogador.overall.max.saturating_sub(m.jogador.overall.min).div_ceil(2)),
+        arquivado: false,
+    }
+}
+
+/// A Qualidade que uma precisão (±) corresponde.
+fn qualidade_da_precisao(precisao: u8) -> Qualidade {
+    match precisao {
+        0..=2 => Qualidade::Alta,
+        3..=6 => Qualidade::Media,
+        _ => Qualidade::Baixa,
+    }
+}
+
+/// Um Relatório de uma linha para a Ficha de um registro da Base sem
+/// Relatório: o jogador sozinho, na data em que o clube o viu.
+fn relatorio_avulso(registro: &Ocorrencia) -> RelatorioNaLista {
+    let precisao = registro.jogador.overall.max.saturating_sub(registro.jogador.overall.min).div_ceil(2);
+    RelatorioNaLista {
+        relatorio: Relatorio {
+            id: registro.relatorio_id,
+            missao_id: registro.missao_id.unwrap_or_else(Uuid::nil),
+            gerado_em: registro.quando,
+            qualidade: qualidade_da_precisao(precisao),
+            precisao_mais_menos: precisao,
+            jogadores: vec![registro.jogador.clone()],
+            aberto: false,
+            arquivado: false,
+            vistos: 1,
+            notificados: 1,
+            da_base: Vec::new(),
+        },
+        previstos: 1,
+        parcial: false,
+        novo: false,
+        missao: None,
+        olheiro: None,
+    }
+}
+
 /// Encerra uma Missão contínua: os jogadores JÁ REVELADOS em `hoje` viram o
 /// Relatório final (os que ainda não tinham aparecido são descartados) e o
 /// Olheiro fica livre. Não mexe no orçamento.
@@ -1462,6 +1518,73 @@ impl JogadorEncontrado {
     }
 }
 
+impl JogadorEncontrado {
+    /// Um registro em branco, só com o id: ponto de partida de uma observação
+    /// (`search::fotografar`), que preenche o resto.
+    pub fn vazio(player_id: u32) -> JogadorEncontrado {
+        JogadorEncontrado {
+            player_id,
+            nome: String::new(),
+            idade: 0,
+            posicao: 0,
+            nacao_id: 0,
+            nacao: String::new(),
+            clube: String::new(),
+            clube_id: None,
+            contrato_ate: None,
+            observacao: quality::Observacao::Completa,
+            overall: FaixaAtributo { min: 1, max: 1 },
+            potencial: FaixaAtributo { min: 1, max: 1 },
+            atributos: Vec::new(),
+            pe: None,
+            similaridade: None,
+            fit: None,
+            fit_alvo: None,
+            variacao_overall: None,
+            ritmo_ataque: None,
+            ritmo_defesa: None,
+            estrelas_drible: None,
+            pe_fraco: None,
+            altura: None,
+            da_base: false,
+            dias_de_curadoria: 0,
+            visto_em: None,
+            titular_elenco: None,
+            falso_positivo: false,
+        }
+    }
+}
+
+/// De onde veio um jogador mapeado sem Relatório.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MotivoMapeamento {
+    /// Jogou no clube e saiu.
+    ExClube,
+    /// Estava na lista de escolhidos do jogo.
+    ListaDoJogo,
+}
+
+impl MotivoMapeamento {
+    /// O que a coluna "Visto por" mostra.
+    pub fn nome(self) -> &'static str {
+        match self {
+            MotivoMapeamento::ExClube => "Ex-jogador do clube",
+            MotivoMapeamento::ListaDoJogo => "Lista do jogo",
+        }
+    }
+}
+
+/// Um jogador da Base do Scout sem Relatório (`scout::mapeamento`): a última
+/// observação que o clube tem dele e quando ela vale.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JogadorMapeado {
+    pub jogador: JogadorEncontrado,
+    /// Quando saiu do clube, ou entrou na lista do jogo.
+    pub desde: Date,
+    pub motivo: MotivoMapeamento,
+}
+
 #[cfg(test)]
 impl JogadorEncontrado {
     /// Jogador mínimo para testes: sem atributos, observação completa.
@@ -1597,6 +1720,11 @@ pub struct Escolhido {
     /// só quem ela pôs ela tira de lá quando ele sai dos Escolhidos.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_jogo: bool,
+    /// Veio da lista de escolhidos do jogo (`scout::mapeamento`), não de um
+    /// Relatório: a Central não mexe no conhecimento do jogo sobre ele (a
+    /// não ser que um Generalista o acompanhe) nem o tira da lista do jogo.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub importado: bool,
 }
 
 /// O acompanhamento de um Escolhido por um Generalista: de onde partiu e
@@ -1804,6 +1932,11 @@ fn pedidos_de_nivel(dados: &persistence::ScoutStateFile, hoje: Date, cobre: impl
     }
     for escolhido in &dados.escolhidos {
         let Ok(id) = i32::try_from(escolhido.jogador.player_id) else { continue };
+        // quem veio da lista do jogo já tem o que o jogo sabe: só um
+        // Generalista acompanhando mexe nisso
+        if escolhido.importado && !cobre(escolhido.jogador.player_id) {
+            continue;
+        }
         let agora = escolhido_em(escolhido, hoje, cobre(escolhido.jogador.player_id));
         let parcial = escolhido
             .relatorio_id
@@ -1815,6 +1948,26 @@ fn pedidos_de_nivel(dados: &persistence::ScoutStateFile, hoje: Date, cobre: impl
         pedidos.insert(escolhido.jogador.player_id, PedidoNivel { jogador: id, alvo, original });
     }
     pedidos.into_values().collect()
+}
+
+/// A lista de escolhidos do jogo agora, com o nível de conhecimento de cada
+/// um (`None` = o jogo não tem registro). Vazia se a sincronização está
+/// desligada ou o jogo não foi localizado.
+fn lista_do_jogo() -> Vec<(u32, Option<i32>)> {
+    use crate::save_repo::nativo;
+    if !nativo::sincronizacao_ligada() {
+        return Vec::new();
+    }
+    let Ok(lista) = nativo::read_native_shortlist() else { return Vec::new() };
+    let conhecimento = nativo::read_native_knowledge().unwrap_or_default();
+    lista
+        .iter()
+        .filter_map(|e| u32::try_from(e.jogador).ok())
+        .map(|id| {
+            let nivel = conhecimento.iter().find(|r| u32::try_from(r.jogador) == Ok(id)).map(|r| r.nivel);
+            (id, nivel)
+        })
+        .collect()
 }
 
 /// Épico 7: tira da lista do jogo um jogador que a Central pôs lá.
@@ -2086,6 +2239,14 @@ pub struct ScoutState {
     /// A Ficha aberta é de um jogador da Lista de Escolhidos (não do
     /// Relatório aberto).
     ficha_de_escolhido: bool,
+    /// A Ficha aberta é de um jogador da Base do Scout, sem Relatório
+    /// (ex-jogador do clube ou da lista do jogo).
+    ficha_da_base: bool,
+    /// O mapeamento do elenco e da lista do jogo (`scout::mapeamento`).
+    tarefa_mapeamento: AsyncTask<(String, Date, mapeamento::Mapeamento)>,
+    mapeamento_pendente: bool,
+    /// Pediram outro mapeamento enquanto um rodava.
+    remapear: bool,
 }
 
 /// Nível aberto no filtro geográfico: a lista de continentes (o filtro
@@ -2168,6 +2329,10 @@ impl ScoutState {
             atualizacao_escolhidos_pendente: false,
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
+            ficha_da_base: false,
+            tarefa_mapeamento: AsyncTask::new(),
+            mapeamento_pendente: false,
+            remapear: false,
         }
     }
 
@@ -2214,6 +2379,7 @@ impl ScoutState {
             self.data_progresso = Some(hoje);
             self.despachar_missoes(hoje);
             self.atualizar_escolhidos(hoje);
+            self.mapear(hoje, false);
         }
     }
 
@@ -2284,6 +2450,7 @@ impl ScoutState {
             self.ficha = Some(player_id);
             self.comparacao = None;
             self.ficha_de_escolhido = false;
+            self.ficha_da_base = false;
         }
     }
 
@@ -2294,6 +2461,18 @@ impl ScoutState {
             self.ficha = Some(player_id);
             self.comparacao = None;
             self.ficha_de_escolhido = true;
+            self.ficha_da_base = false;
+        }
+    }
+
+    /// Abre a Ficha de um jogador da Base do Scout que não tem Relatório
+    /// (ex-jogador do clube, lista do jogo).
+    pub fn abrir_ficha_da_base(&mut self, player_id: u32) {
+        if self.base_do_scout().iter().any(|b| b.melhor.jogador.player_id == player_id) {
+            self.ficha = Some(player_id);
+            self.comparacao = None;
+            self.ficha_de_escolhido = false;
+            self.ficha_da_base = true;
         }
     }
 
@@ -2301,6 +2480,7 @@ impl ScoutState {
         self.ficha = None;
         self.comparacao = None;
         self.ficha_de_escolhido = false;
+        self.ficha_da_base = false;
     }
 
     /// A Ficha na tela, ou `None` (a tela deve fechar: o jogador saiu do
@@ -2313,6 +2493,11 @@ impl ScoutState {
             let escolhido = escolhido?;
             let item = self.relatorio_do_escolhido(&escolhido);
             return Some(FichaAberta { item, jogador: escolhido.jogador.clone(), comparacao, escolhido: Some(escolhido), da_lista: true });
+        }
+        if self.ficha_da_base {
+            let registro = self.base_do_scout().iter().find(|b| b.melhor.jogador.player_id == player_id)?.melhor.clone();
+            let item = relatorio_avulso(&registro);
+            return Some(FichaAberta { item, jogador: registro.jogador, comparacao, escolhido, da_lista: false });
         }
         let item = self.relatorio_aberto()?;
         let jogador = item.relatorio.jogadores.iter().find(|j| j.player_id == player_id)?.clone();
@@ -2436,10 +2621,15 @@ impl ScoutState {
             acompanhamento: None,
             alvo: ficha.jogador.fit_alvo.or_else(|| missao.and_then(|m| m.filtros.fit_posicional)),
             referencia: missao.and_then(|m| m.filtros.referencia.clone()),
-            relatorio_id: Some(r.id),
+            relatorio_id: Some(r.id).filter(|id| !id.is_nil()),
             no_jogo: false,
+            importado: false,
         };
-        match estado.mutar(move |d| d.escolhidos.push(escolhido)) {
+        let id_escolhido = escolhido.jogador.player_id;
+        match estado.mutar(move |d| {
+            d.importacao_ignorada.retain(|id| *id != id_escolhido);
+            d.escolhidos.push(escolhido);
+        }) {
             Ok(()) => {
                 tracing::info!("[scout::state] {} entrou na Lista de Escolhidos.", ficha.jogador.nome);
                 // Épico 7: põe também na lista do jogo (nunca falha a ação)
@@ -2475,7 +2665,12 @@ impl ScoutState {
         let resultado = estado.mutar(|d| {
             let antes = d.escolhidos.len();
             d.escolhidos.retain(|e| e.jogador.player_id != player_id);
-            antes != d.escolhidos.len()
+            let saiu = antes != d.escolhidos.len();
+            // o técnico tirou: a lista do jogo não o traz de volta
+            if saiu && !d.importacao_ignorada.contains(&player_id) {
+                d.importacao_ignorada.push(player_id);
+            }
+            saiu
         });
         match resultado {
             Ok(saiu) => {
@@ -2615,6 +2810,8 @@ impl ScoutState {
         self.ultima_sync_nativa = Some(Instant::now());
         let CarreiraStatus::Pronta(carreira) = &self.status else { return };
         let hoje = carreira.data_atual;
+        // o que o técnico pôs na lista do jogo vem para a Central
+        self.mapear(hoje, true);
         let Some(estado) = self.estado_ativo().cloned() else { return };
         let pedidos = estado.ler(|dados| {
             let cobertos = Self::acompanhados(dados);
@@ -2903,6 +3100,71 @@ impl ScoutState {
         }
     }
 
+    /// Mapeia o elenco do clube e a lista de escolhidos do jogo
+    /// (`scout::mapeamento`): lê o `pool` em background e, ao fim, grava os
+    /// ex-jogadores e o que veio da lista do jogo. `so_com_novidade`: só roda
+    /// se a lista do jogo tem alguém que a Central ainda não conhece (a
+    /// leitura do elenco, mais cara, fica para a abertura do painel e a
+    /// mudança de data).
+    fn mapear(&mut self, hoje: Date, so_com_novidade: bool) {
+        let Some(estado) = self.estado_ativo().cloned() else { return };
+        let Some(id_save) = self.save_ativo.clone() else { return };
+        if !estado.gravavel() {
+            return;
+        }
+        let lista = lista_do_jogo();
+        let conhecidos: std::collections::HashSet<u32> =
+            estado.ler(|d| d.escolhidos.iter().map(|e| e.jogador.player_id).chain(d.importacao_ignorada.iter().copied()).collect());
+        if so_com_novidade && !lista.iter().any(|(id, _)| !conhecidos.contains(id)) {
+            return;
+        }
+        if self.mapeamento_pendente {
+            self.remapear = true;
+            return;
+        }
+        let fonte = Arc::clone(&self.fonte);
+        self.mapeamento_pendente = self.tarefa_mapeamento.start(move || {
+            let pool = fonte.read_players_for_mapping()?;
+            Ok((id_save, hoje, mapeamento::montar(&pool, hoje, &lista, &conhecidos)))
+        });
+    }
+
+    /// Trata o mapeamento que terminou (roda a cada frame).
+    fn processar_mapeamento(&mut self) {
+        if !self.mapeamento_pendente {
+            return;
+        }
+        match self.tarefa_mapeamento.poll() {
+            TaskState::Running | TaskState::Idle => {}
+            TaskState::Done((dono, hoje, resultado)) => {
+                self.mapeamento_pendente = false;
+                self.tarefa_mapeamento.reset();
+                if let Some(estado) = self.estados.get(&dono).cloned() {
+                    match estado.mutar(|d| mapeamento::aplicar(d, resultado, hoje)) {
+                        Ok(resumo) if resumo.mudou() => tracing::info!(
+                            "[scout::state] Mapeamento: {} ex-jogador(es) do clube, {} da lista do jogo.",
+                            resumo.sairam,
+                            resumo.importados
+                        ),
+                        Ok(_) => {}
+                        Err(err) => tracing::warn!("[scout::state] Mapeamento não foi salvo: {err:?}"),
+                    }
+                }
+                if std::mem::take(&mut self.remapear) {
+                    if let Some(hoje) = self.data_progresso {
+                        self.mapear(hoje, false);
+                    }
+                }
+            }
+            TaskState::Failed(err) => {
+                self.mapeamento_pendente = false;
+                self.tarefa_mapeamento.reset();
+                self.remapear = false;
+                tracing::warn!("[scout::state] Mapeamento falhou: {err:?}");
+            }
+        }
+    }
+
     /// Jogador do elenco escolhido para sobrepor no Radar (`None` tira).
     pub fn comparar_com(&mut self, player_id: Option<u32>) {
         self.comparacao = player_id;
@@ -2923,6 +3185,7 @@ impl ScoutState {
         }
         self.processar_buscas();
         self.processar_escolhidos();
+        self.processar_mapeamento();
         self.processar_times();
         self.processar_nativo();
         self.minifaces.tick();
@@ -3043,6 +3306,7 @@ impl ScoutState {
             if self.painel_aberto {
                 self.despachar_missoes(snapshot.data_atual);
                 self.atualizar_escolhidos(snapshot.data_atual);
+                self.mapear(snapshot.data_atual, false);
             }
         }
     }
@@ -4806,7 +5070,7 @@ impl ScoutState {
         }
         let nacoes = self.nacoes().unwrap_or_default();
         let hoje = self.data_progresso;
-        let (ativas, arquivadas) = estado.ler(|dados| {
+        let (ativas, arquivadas, mapeados) = estado.ler(|dados| {
             let (mut ativas, mut arquivadas) = (Vec::new(), Vec::new());
             for r in dados.relatorios.iter().rev() {
                 let item = Self::montar_relatorio_na_lista(dados, r, hoje);
@@ -4831,9 +5095,10 @@ impl ScoutState {
                     });
                 }
             }
-            (ativas, arquivadas)
+            let mapeados: Vec<Ocorrencia> = dados.mapeados.iter().map(ocorrencia_do_mapeado).collect();
+            (ativas, arquivadas, mapeados)
         });
-        let base = montar_base(ativas.iter().chain(arquivadas.iter()));
+        let base = montar_base(ativas.iter().chain(arquivadas.iter()).chain(mapeados.iter()));
         *guarda = CacheDeJogadores { chave: Some(chave), base: Arc::new(base) };
         guarda.clone()
     }
@@ -5300,6 +5565,11 @@ mod tests {
             while !self.liberar_busca.load(Ordering::SeqCst) && inicio.elapsed() < Duration::from_secs(5) {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            self.jogadores.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+
+        /// O mapeamento não conta como busca de Missão (nem espera por ela).
+        fn read_players_for_mapping(&self) -> Result<PlayerPool, SaveRepoError> {
             self.jogadores.lock().unwrap_or_else(|p| p.into_inner()).clone()
         }
 
@@ -6146,6 +6416,55 @@ mod tests {
         assert_eq!(visiveis, vec![5, 6]);
         // a lista de Missões conta os da Base junto dos revelados
         assert!(st.missoes().iter().any(|l| l.missao.id == nova_id && l.previstos == alvo + 2));
+    }
+
+    /// Espera o mapeamento do elenco (background) terminar e ser gravado.
+    fn esperar_mapeamento(st: &mut ScoutState) {
+        let inicio = Instant::now();
+        while st.mapeamento_pendente {
+            st.processar_mapeamento();
+            assert!(inicio.elapsed() < Duration::from_secs(5), "mapeamento falso travou");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_player_who_leaves_the_club_reaches_the_base_and_can_be_chosen_from_his_ficha() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, busca, _) = estado_com_datas(&pasta, &[20260801], vec![], &o);
+        trocar_jogadores(&busca, Ok(pool_com_elenco()));
+        st.ao_abrir_painel();
+        esperar_mapeamento(&mut st);
+        assert!(st.base_do_scout().is_empty(), "quem está no clube não aparece na Base");
+        assert_eq!(st.estado_ativo().map(|e| e.ler(|d| d.elenco.len())), Some(3));
+
+        // o jogador 2 é vendido para outro clube
+        let mut depois = pool_com_elenco();
+        depois.jogadores.iter_mut().find(|j| j.player_id == 2).expect("jogador 2").clube_id = Some(5);
+        trocar_jogadores(&busca, Ok(depois));
+        st.ao_fechar_painel();
+        st.ao_abrir_painel();
+        esperar_mapeamento(&mut st);
+        let base = st.base_do_scout();
+        assert_eq!(base.len(), 1);
+        let registro = &base[0].melhor;
+        assert_eq!(registro.jogador.player_id, 2);
+        assert_eq!(registro.relatorio_id, Uuid::nil());
+        assert_eq!(base[0].origem(), "Ex-jogador do clube");
+        assert_eq!(registro.jogador.atributos.len(), crate::scout::lista::ATRIBUTOS_DETALHADO, "com os atributos que tinha ao sair");
+
+        // a Ficha abre sem Relatório e dá para escolhê-lo
+        st.abrir_ficha_da_base(2);
+        let ficha = st.ficha_aberta().expect("ficha da Base");
+        assert_eq!((ficha.jogador.player_id, ficha.da_lista, ficha.escolhido.is_none()), (2, false, true));
+        assert!(st.adicionar_escolhido_da_ficha());
+        let escolhido = st.estado_ativo().and_then(|e| e.ler(|d| d.escolhidos.first().cloned())).expect("escolhido");
+        assert_eq!((escolhido.jogador.player_id, escolhido.relatorio_id, escolhido.importado), (2, None, false));
+        // tirar dos Escolhidos: não volta sozinho
+        assert!(st.remover_escolhido(2));
+        assert_eq!(st.estado_ativo().map(|e| e.ler(|d| d.importacao_ignorada.clone())), Some(vec![2]));
+        st.fechar_ficha();
     }
 
     #[test]
@@ -7611,6 +7930,7 @@ mod tests {
             referencia: None,
             relatorio_id: None,
             no_jogo: false,
+            importado: false,
         }
     }
 

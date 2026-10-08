@@ -202,15 +202,7 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
             let escolhida = ordenacao.coluna == *coluna;
             let cor = if escolhida { theme::ACCENT_PRIMARY } else { theme::TEXT_SECONDARY };
             let _cor = ui.push_style_color(StyleColor::Text, cor);
-            let _realce = ui.push_style_color(StyleColor::HeaderHovered, theme::ACCENT_PRIMARY_DIM);
-            let _ativo = ui.push_style_color(StyleColor::Header, theme::ACCENT_PRIMARY_DIM);
-            let clicou = ui
-                .selectable_config(format!("{}##cabecalho", titulo_da_coluna(id, *coluna)))
-                .size([0.0, ALTURA_LINHA - 8.0])
-                .build();
-            if escolhida {
-                seta_de_ordem(ui, ordenacao.decrescente);
-            }
+            let clicou = cabecalho(ui, titulo_da_coluna(id, *coluna), cor, escolhida.then_some(ordenacao.decrescente));
             if clicou {
                 nova_ordem = Some(ordenacao.alternar(*coluna));
             }
@@ -338,6 +330,32 @@ fn texto_na_celula(ui: &Ui, fonte: Option<imgui::FontId>, texto: &str, cor: [f32
         ui.set_cursor_pos([x, y + ((ALTURA_LINHA - 4.0 - ui.text_line_height()) * 0.5).max(0.0)]);
         ui.text_colored(cor, texto);
     });
+}
+
+/// O título de uma coluna: um botão do tamanho da célula, desenhado à mão.
+/// Tem de ser botão (e não `Selectable`): a área do `Selectable` numa célula
+/// invade as vizinhas e o D-pad → não passava de um cabeçalho para o
+/// seguinte (teste `the_controller_can_walk_the_table_headers_and_sort_with_a`).
+/// `true` = ativado (clique ou A). `ordem`: `Some(decrescente)` na coluna que
+/// ordena a lista.
+fn cabecalho(ui: &Ui, titulo: &str, cor: [f32; 4], ordem: Option<bool>) -> bool {
+    let largura = ui.content_region_avail()[0];
+    let clicou = ui.invisible_button("##cabecalho", [largura, ALTURA_LINHA - 8.0]);
+    let [x0, y0] = ui.item_rect_min();
+    let [x1, y1] = ui.item_rect_max();
+    let destaque = ui.is_item_hovered() || componentes::focado_pelo_controle(ui);
+    {
+        let dl = ui.get_window_draw_list();
+        if destaque {
+            dl.add_rect([x0, y0], [x1, y1], theme::ACCENT_PRIMARY_DIM).filled(true).rounding(theme::RAIO_SM).build();
+            dl.add_rect([x0, y0], [x1, y1], theme::ACCENT_PRIMARY).rounding(theme::RAIO_SM).build();
+        }
+        dl.add_text([x0 + theme::ESPACO_1, y0 + (y1 - y0 - ui.text_line_height()) * 0.5], cor, titulo);
+    }
+    if let Some(decrescente) = ordem {
+        seta_de_ordem(ui, decrescente);
+    }
+    clicou
 }
 
 /// Triângulo no canto direito do cabeçalho: para baixo = maior primeiro.
@@ -576,6 +594,89 @@ fn linha_posicoes(ui: &Ui, fonts: Option<&Fonts>, filtros: &mut FiltrosLista) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Um ImGui de verdade, sem tela: quadros, teclas do controle e o que a
+    /// tabela faz com elas.
+    struct Mesa {
+        ctx: imgui::Context,
+    }
+
+    impl Mesa {
+        fn nova() -> Mesa {
+            let mut ctx = imgui::Context::create();
+            ctx.set_ini_filename(None);
+            ctx.io_mut().display_size = [1600.0, 900.0];
+            ctx.io_mut().config_flags |= imgui::ConfigFlags::NAV_ENABLE_GAMEPAD;
+            ctx.io_mut().backend_flags |= imgui::BackendFlags::HAS_GAMEPAD;
+            ctx.fonts().build_rgba32_texture();
+            Mesa { ctx }
+        }
+
+        /// Um quadro com a tabela; `tecla` apertada neste quadro.
+        fn quadro(&mut self, estado: &mut ScoutState, itens: &[ItemLista<'_>], tecla: Option<imgui::Key>) -> Option<usize> {
+            let io = self.ctx.io_mut();
+            io.delta_time = 1.0 / 60.0;
+            for k in [
+                imgui::Key::GamepadDpadUp,
+                imgui::Key::GamepadDpadDown,
+                imgui::Key::GamepadDpadLeft,
+                imgui::Key::GamepadDpadRight,
+                imgui::Key::GamepadFaceDown,
+            ] {
+                io.add_key_analog_event(k, tecla == Some(k), if tecla == Some(k) { 1.0 } else { 0.0 });
+            }
+            let ui = self.ctx.new_frame();
+            let mut ativado = None;
+            ui.window("teste").size([1500.0, 800.0], Condition::Always).position([0.0, 0.0], Condition::Always).build(|| {
+                ui.child_window("conteudo").size([0.0, 0.0]).flags(super::super::flags_conteudo()).build(|| {
+                    ativado = tabela(ui, None, estado, ListaId::Base, itens);
+                });
+            });
+            self.ctx.render();
+            ativado
+        }
+
+        /// Aperta e solta `tecla` (dois quadros de cada).
+        fn tocar(&mut self, estado: &mut ScoutState, itens: &[ItemLista<'_>], tecla: imgui::Key) {
+            for _ in 0..2 {
+                self.quadro(estado, itens, Some(tecla));
+            }
+            for _ in 0..2 {
+                self.quadro(estado, itens, None);
+            }
+        }
+    }
+
+    #[test]
+    fn the_controller_can_walk_the_table_headers_and_sort_with_a() {
+        let jogadores: Vec<JogadorEncontrado> =
+            (1..=5).map(|i| JogadorEncontrado::de_teste(i, &format!("Jogador {i}"), 18, (60 + i as u8, 62 + i as u8))).collect();
+        let itens: Vec<ItemLista<'_>> = jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
+        let mut estado = ScoutState::new();
+        let mut mesa = Mesa::nova();
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        // o foco entra na tela pelo primeiro item e sobe até o cabeçalho
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadDown);
+        for _ in 0..8 {
+            mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadUp);
+        }
+        // → passa para o cabeçalho ao lado; A ordena por ele
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadRight);
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadFaceDown);
+        assert_eq!(estado.ordenacao_da_lista(ListaId::Base).coluna, Coluna::Idade, "→ vai do cabeçalho Jogador ao seguinte");
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadRight);
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadFaceDown);
+        assert_eq!(estado.ordenacao_da_lista(ListaId::Base).coluna, Coluna::Altura);
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadLeft);
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadFaceDown);
+        let ordem = estado.ordenacao_da_lista(ListaId::Base);
+        assert_eq!(ordem.coluna, Coluna::Idade, "← volta");
+        // A de novo no mesmo cabeçalho inverte o sentido
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadFaceDown);
+        assert_eq!(estado.ordenacao_da_lista(ListaId::Base), Ordenacao { decrescente: !ordem.decrescente, ..ordem });
+    }
 
     #[test]
     fn range_steppers_never_cross_and_stay_inside_the_limits() {

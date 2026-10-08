@@ -23,6 +23,7 @@
 //! START que fechou o painel chegaria ao FIFA ao ser solto.
 
 pub mod lista;
+pub mod mapeamento;
 pub mod minifaces;
 pub mod nomes;
 pub mod persistence;

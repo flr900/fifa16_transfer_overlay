@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v9 — Configurações (Select), carrossel de Olheiros e Relatórios por Olheiro";
+const BUILD_TAG: &str = "7.6-v10 — Ex-jogadores do clube e lista do jogo na Base do Scout";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.

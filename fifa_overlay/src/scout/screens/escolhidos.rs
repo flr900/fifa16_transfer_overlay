@@ -312,6 +312,7 @@ mod tests {
             referencia: None,
             relatorio_id: None,
             no_jogo: false,
+            importado: false,
         }
     }
 

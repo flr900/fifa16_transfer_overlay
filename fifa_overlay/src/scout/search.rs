@@ -64,6 +64,11 @@ pub trait CareerSource: Send + Sync {
     fn read_all_players(&self) -> Result<PlayerPool, SaveRepoError>;
     /// Nações do banco estático, para o mapa (lê disco: `AsyncTask`).
     fn read_nations(&self) -> Result<Vec<Nacao>, SaveRepoError>;
+    /// Os jogadores para o mapeamento do elenco e da lista do jogo
+    /// (`scout::mapeamento`; lê o save: `AsyncTask`). Por padrão, todos.
+    fn read_players_for_mapping(&self) -> Result<PlayerPool, SaveRepoError> {
+        self.read_all_players()
+    }
     /// Elenco do técnico (lê o save: `AsyncTask`). Por padrão, os jogadores
     /// do clube do técnico em `read_all_players`.
     fn read_squad_players(&self) -> Result<PlayerPool, SaveRepoError> {
@@ -597,6 +602,13 @@ pub fn reobservar(
     novo.variacao_overall = variacao;
     novo.similaridade = similaridade;
     novo
+}
+
+/// Uma foto do jogador como está no `pool`, com a `precisao` e os
+/// `atributos` primeiros dados (0 e todos = valores exatos). Serve ao que a
+/// Central sabe sem Missão: o elenco do clube e a lista do jogo.
+pub fn fotografar(jogador: &PlayerRaw, pool: &PlayerPool, hoje: Date, precisao: u8, atributos: usize) -> JogadorEncontrado {
+    reobservar(&JogadorEncontrado::vazio(jogador.player_id), jogador, pool, hoje, precisao, atributos, None, None)
 }
 
 /// O que o Relatório mostra de um jogador: faixas de Overall/Potencial e

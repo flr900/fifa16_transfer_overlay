@@ -204,6 +204,12 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
                 }
             }
         }
+        Some(Pedido::AbrirFichaDaBase(player_id)) => {
+            state.abrir_ficha_da_base(player_id);
+            if state.ficha_aberta().is_some() {
+                nav.push(Satelite::FichaJogador);
+            }
+        }
         Some(Pedido::AbrirRelatorio(id)) => {
             state.abrir_relatorio(id);
             if state.relatorio_aberto().is_some() {
@@ -520,6 +526,9 @@ enum Pedido {
     /// Abre o Relatório de origem de um jogador e, por cima, a Ficha dele
     /// (aba Relatórios por jogador, Base do Scout).
     AbrirJogadorDoRelatorio(uuid::Uuid, u32),
+    /// Ficha de um jogador da Base do Scout sem Relatório (ex-jogador do
+    /// clube, lista do jogo).
+    AbrirFichaDaBase(u32),
 }
 
 fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState, focar: bool) -> Option<Pedido> {
@@ -657,7 +666,12 @@ fn conteudo_da_tela(
             },
             Aba::Base => {
                 if let Some((relatorio, player_id)) = base_scout::render(ui, fonts, state) {
-                    *pedido = Some(Pedido::AbrirJogadorDoRelatorio(relatorio, player_id));
+                    // sem Relatório (ex-jogador do clube, lista do jogo): só a Ficha
+                    *pedido = Some(if relatorio.is_nil() {
+                        Pedido::AbrirFichaDaBase(player_id)
+                    } else {
+                        Pedido::AbrirJogadorDoRelatorio(relatorio, player_id)
+                    });
                 }
             }
         },
