@@ -268,6 +268,10 @@ pub fn detalhe(item: &RelatorioNaLista) -> String {
     if let Some(data) = r.gerado_em {
         partes.push(format!("gerado em {}", formatar_data(data)));
     }
+    let da_base = r.jogadores.iter().filter(|j| j.da_base).count();
+    if da_base > 0 {
+        partes.push(format!("{da_base} da Base do Scout"));
+    }
     partes.push(if item.parcial {
         format!("parcial: {} de {} jogadores até agora", r.jogadores.len(), item.previstos)
     } else {
@@ -404,17 +408,19 @@ pub(super) fn card_jogador(
     let meta = fonts.map(|f| f.meta);
     let mono = fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body));
 
-    // Já na Lista de Escolhidos (Épico 6): badge ao lado do nome.
+    // Já na Lista de Escolhidos (Épico 6) e/ou vindo da Base do Scout
+    // (2026-10-08): badges ao lado do nome.
     let escolhido = state.esta_nos_escolhidos(j.player_id);
-    let largura_badge = if escolhido {
-        com_fonte(ui, fonts.map(|f| f.badge), || ui.calc_text_size(badge_escolhido().texto)[0]) + theme::ESPACO_2 * 3.0
-    } else {
-        0.0
-    };
+    let largura_do = |b: &componentes::EstiloBadge| com_fonte(ui, fonts.map(|f| f.badge), || ui.calc_text_size(b.texto)[0]) + theme::ESPACO_2 * 3.0;
+    let largura_badge = if escolhido { largura_do(&badge_escolhido()) } else { 0.0 } + if j.da_base { largura_do(&componentes::badge_base()) } else { 0.0 };
     let (nome, nome_cortado) = truncar(&j.nome, largura_texto - largura_badge, medir(fonts.map(|f| f.heading)));
     let [w_nome, h_nome] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, &nome);
+    let mut x_badge = x + w_nome + theme::ESPACO_2;
+    if j.da_base {
+        x_badge += componentes::desenhar_badge(ui, fonts, &dl, &componentes::badge_base(), [x_badge, y], h_nome)[0] + theme::ESPACO_2;
+    }
     if escolhido {
-        componentes::desenhar_badge(ui, fonts, &dl, &badge_escolhido(), [x + w_nome + theme::ESPACO_2, y], h_nome);
+        componentes::desenhar_badge(ui, fonts, &dl, &badge_escolhido(), [x_badge, y], h_nome);
     }
     y += h_nome;
 
@@ -551,6 +557,9 @@ mod tests {
             pe_fraco: None,
             titular_elenco: None,
             altura: None,
+            da_base: false,
+            dias_de_curadoria: 0,
+            visto_em: None,
             falso_positivo: false,
         }
     }

@@ -773,6 +773,20 @@ pub fn falsos_positivos(qualidade: Qualidade, quantos: usize) -> usize {
     quantos * pct / 100
 }
 
+/// Dias de carreira que a curadoria da Base do Scout leva para entregar um
+/// jogador a uma Missão nova (2026-10-08), pelo detalhe que o clube já tem
+/// dele: com os 28 atributos mapeados, na hora; com quase nada, 4 dias. Os
+/// jogadores da Base não ocupam o limite do Olheiro (`Relatorio::da_base`).
+pub fn dias_de_curadoria(atributos_mapeados: usize) -> u8 {
+    match atributos_mapeados {
+        28.. => 0,
+        20..=27 => 1,
+        12..=19 => 2,
+        6..=11 => 3,
+        _ => 4,
+    }
+}
+
 /// Folgas do filtro "quase" dos falsos positivos.
 pub const FOLGA_OVERALL: u8 = 4;
 pub const FOLGA_IDADE: u8 = 1;
@@ -3131,6 +3145,18 @@ mod tests {
         assert_eq!(capacidade_acompanhamento(Estrelas(5)), 5);
         assert_eq!(capacidade_acompanhamento(Estrelas(9)), 9);
         assert_eq!(capacidade_acompanhamento(Estrelas(10)), 10);
+    }
+
+    #[test]
+    fn the_scout_base_delivers_faster_the_more_the_club_already_knows() {
+        assert_eq!(dias_de_curadoria(28), 0, "tudo mapeado: na hora");
+        assert_eq!(dias_de_curadoria(22), 1);
+        assert_eq!(dias_de_curadoria(15), 2);
+        assert_eq!(dias_de_curadoria(6), 3);
+        assert_eq!(dias_de_curadoria(0), 4, "quase nada: 4 dias");
+        let dias: Vec<u8> = (0..=33).map(dias_de_curadoria).collect();
+        assert!(dias.windows(2).all(|w| w[0] >= w[1]), "mais detalhe nunca atrasa");
+        assert!(dias.iter().all(|d| *d <= 4));
     }
 
     #[test]

@@ -314,6 +314,9 @@ mod tests {
             pe_fraco: None,
             titular_elenco: None,
             altura: None,
+            da_base: false,
+            dias_de_curadoria: 0,
+            visto_em: None,
             falso_positivo: false,
         }
     }

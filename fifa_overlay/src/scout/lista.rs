@@ -432,6 +432,9 @@ mod tests {
             pe_fraco: Some(3),
             altura: Some(180),
             titular_elenco: None,
+            da_base: false,
+            dias_de_curadoria: 0,
+            visto_em: None,
             falso_positivo: false,
         }
     }

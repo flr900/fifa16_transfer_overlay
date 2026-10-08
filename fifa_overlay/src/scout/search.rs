@@ -144,8 +144,18 @@ impl CareerSource for SaveRepoSource {
 // Busca de uma Missão (Story 2.4)
 // ---------------------------------------------------------------------
 
-/// Roda a Missão: lê os jogadores e escolhe até `quantos` novos (fora de
-/// `excluir`, os já encontrados), já na ORDEM DE DESCOBERTA — o Relatório
+/// O que a busca de uma Missão traz: os jogadores da pesquisa do próprio
+/// Olheiro e os que a curadoria da Base do Scout entregou (esses não contam
+/// no limite dele).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResultadoBusca {
+    pub novos: Vec<JogadorEncontrado>,
+    pub da_base: Vec<JogadorEncontrado>,
+}
+
+/// Roda a Missão: lê os jogadores, consulta a Base do Scout e escolhe até
+/// `quantos` novos (fora de `excluir`, os já encontrados, e de `base`, que a
+/// curadoria entrega à parte), já na ORDEM DE DESCOBERTA — o Relatório
 /// parcial (Story 2.10) revela essa lista aos poucos, então ela é
 /// embaralhada (determinística pela Missão) para os melhores não virem
 /// sempre primeiro. `hoje` é a data da carreira (idade dos jogadores).
@@ -155,19 +165,76 @@ pub fn executar_missao(
     hoje: Date,
     excluir: &HashSet<u32>,
     quantos: usize,
-) -> Result<Vec<JogadorEncontrado>, SaveRepoError> {
+    base: &[JogadorEncontrado],
+) -> Result<ResultadoBusca, SaveRepoError> {
     let inicio = std::time::Instant::now();
     let pool = fonte.read_all_players()?;
-    let mut jogadores = escolher_jogadores(missao, &pool, hoje, excluir, quantos);
-    let id = missao.id.as_u128();
-    jogadores.sort_by_key(|j| quality::semente(id, j.player_id, 3));
+    let resultado = buscar_no_pool(missao, &pool, hoje, excluir, quantos, base);
     tracing::info!(
-        "[scout::search] Missão {}: {} jogadores encontrados ({} ms, render não bloqueado).",
+        "[scout::search] Missão {}: {} jogadores encontrados e {} vindos da Base ({} ms, render não bloqueado).",
         missao.id,
-        jogadores.len(),
+        resultado.novos.len(),
+        resultado.da_base.len(),
         inicio.elapsed().as_millis()
     );
-    Ok(jogadores)
+    Ok(resultado)
+}
+
+/// A busca sobre um `pool` já lido: a curadoria da Base e a pesquisa do
+/// Olheiro, que não repete quem a Base já conhece nem conta a Base no
+/// limite `quantos`.
+pub fn buscar_no_pool(
+    missao: &Missao,
+    pool: &PlayerPool,
+    hoje: Date,
+    excluir: &HashSet<u32>,
+    quantos: usize,
+    base: &[JogadorEncontrado],
+) -> ResultadoBusca {
+    let da_base = consultar_base(missao, pool, hoje, base);
+    let mut fora = excluir.clone();
+    fora.extend(base.iter().map(|j| j.player_id));
+    let mut novos = escolher_jogadores(missao, pool, hoje, &fora, quantos);
+    let id = missao.id.as_u128();
+    novos.sort_by_key(|j| quality::semente(id, j.player_id, 3));
+    ResultadoBusca { novos, da_base }
+}
+
+/// A curadoria da Base do Scout (2026-10-08): dos jogadores que o clube já
+/// mapeou (`base`: o melhor registro de cada um), os que passam nos filtros
+/// da Missão pelos dados de HOJE — o Olheiro sabe o que procura — voltam com
+/// o que o clube já descobriu deles, sem refazer a observação, e chegam em 0
+/// a 4 dias (`quality::dias_de_curadoria`). O Fit e a similaridade são
+/// refeitos para o perfil desta Missão, com o que já foi visto.
+pub fn consultar_base(missao: &Missao, pool: &PlayerPool, hoje: Date, base: &[JogadorEncontrado]) -> Vec<JogadorEncontrado> {
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let elenco = nivel_do_elenco(pool);
+    let por_id: std::collections::HashMap<u32, &PlayerRaw> = pool.jogadores.iter().map(|j| (j.player_id, j)).collect();
+    let alvo = missao.filtros.fit_posicional;
+    let referencia = missao.filtros.referencia.as_ref();
+    base.iter()
+        .filter_map(|registro| {
+            let real = por_id.get(&registro.player_id)?;
+            if !passa_nos_filtros_com(missao, pool, real, hoje, &elenco) {
+                return None;
+            }
+            let mut j = registro.clone();
+            j.da_base = true;
+            j.falso_positivo = false;
+            j.dias_de_curadoria = quality::dias_de_curadoria(j.atributos.len());
+            j.titular_elenco = Some(elenco.titular(perfil_comparado(missao, real)));
+            let visto = |a: Atributo| j.valor_visto(a);
+            let fit = alvo.and_then(|alvo| quality::forca_fit(alvo, j.posicao, visto));
+            let variacao = alvo.and_then(|alvo| quality::variacao_overall(alvo, j.posicao, visto));
+            let similaridade = referencia.and_then(|r| quality::similaridade(visto, |a| r.atributo(a).map(f32::from), r.goleiro()));
+            j.fit = fit;
+            j.variacao_overall = variacao;
+            j.similaridade = similaridade;
+            Some(j)
+        })
+        .collect()
 }
 
 /// Relatório novo, vazio, de uma Missão.
@@ -183,6 +250,7 @@ pub fn relatorio_vazio(missao: &Missao, hoje: Date) -> Relatorio {
         arquivado: false,
         vistos: 0,
         notificados: 0,
+        da_base: Vec::new(),
     }
 }
 
@@ -481,6 +549,9 @@ pub fn reobservar(
         pe_fraco: Some(jogador.pe_fraco),
         altura: Some(jogador.altura),
         titular_elenco: anterior.titular_elenco,
+        da_base: false,
+        dias_de_curadoria: 0,
+        visto_em: None,
         falso_positivo: anterior.falso_positivo,
     };
     let visto = |a: Atributo| novo.valor_visto(a);
@@ -537,6 +608,9 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         pe_fraco: Some(jogador.pe_fraco),
         altura: Some(jogador.altura),
         titular_elenco: None,
+        da_base: false,
+        dias_de_curadoria: 0,
+        visto_em: None,
         falso_positivo: false,
     };
     // Similaridade e fit "pelo que o Olheiro viu" (nunca o valor real).
@@ -1071,5 +1145,48 @@ pub mod tests {
         assert_eq!((exato.overall.min, exato.overall.max), (72, 72));
         assert_eq!(exato.atributos.len(), 28);
         assert!(exato.fit.is_some(), "fit recalculado com o alvo da Missão de origem");
+    }
+
+    /// Registro da Base: o jogador `id` com `n` atributos mapeados.
+    fn registro_da_base(id: u32, overall: u8, n: usize) -> JogadorEncontrado {
+        let p = jogador(id, overall, overall + 5, 25);
+        let mut j = JogadorEncontrado::de_teste(id, &p.nome, 25, (overall - 1, overall + 1));
+        j.atributos = Atributo::TODOS.iter().take(n).map(|&a| AtributoRevelado { atributo: a, valor: FaixaAtributo { min: overall - 1, max: overall + 1 } }).collect();
+        j.visto_em = Some(Date(20260610));
+        j
+    }
+
+    #[test]
+    fn the_curation_returns_only_the_base_players_that_pass_the_filters_today() {
+        let p = pool(vec![jogador(1, 72, 80, 25), jogador(2, 72, 80, 25), jogador(3, 60, 70, 25)]);
+        let m = missao_com((70, 80), (70, 90));
+        // 1 e 3 estão na Base; o 2 nunca foi visto; o 3 hoje não passa no Overall
+        let base = vec![registro_da_base(1, 72, 28), registro_da_base(3, 60, 8)];
+        let da_base = consultar_base(&m, &p, HOJE, &base);
+        assert_eq!(da_base.iter().map(|j| j.player_id).collect::<Vec<_>>(), vec![1]);
+        let j = &da_base[0];
+        assert!(j.da_base && !j.falso_positivo);
+        assert_eq!(j.dias_de_curadoria, 0, "28 atributos: na hora");
+        assert_eq!(j.visto_em, Some(Date(20260610)), "guarda de quando o clube o viu");
+        assert_eq!(j.atributos.len(), 28, "o que o clube já descobriu, sem refazer a observação");
+        assert!(j.titular_elenco.is_some());
+        assert!(consultar_base(&m, &p, HOJE, &[]).is_empty());
+        // pouco detalhe demora mais
+        let raso = consultar_base(&m, &p, HOJE, &[registro_da_base(2, 72, 5)]);
+        assert_eq!(raso[0].dias_de_curadoria, 4);
+    }
+
+    #[test]
+    fn the_olheiros_own_search_skips_the_base_and_keeps_its_full_limit() {
+        let jogadores = (1..=60).map(|i| jogador(i, 70 + (i % 8) as u8, 75, 25)).collect();
+        let p = pool(jogadores);
+        let m = missao_com((60, 99), (60, 99));
+        let base: Vec<JogadorEncontrado> = (1..=5).map(|i| registro_da_base(i, 70 + (i % 8) as u8, 28)).collect();
+        let r = buscar_no_pool(&m, &p, HOJE, &HashSet::new(), 10, &base);
+        assert_eq!(r.da_base.len(), 5, "os 5 da Base passam nos filtros");
+        assert_eq!(r.novos.len(), 10, "a Base não ocupa o limite do Olheiro");
+        let ids_base: HashSet<u32> = base.iter().map(|j| j.player_id).collect();
+        assert!(r.novos.iter().all(|j| !ids_base.contains(&j.player_id)), "sem duplicar jogador");
+        assert!(r.novos.iter().all(|j| !j.da_base));
     }
 }

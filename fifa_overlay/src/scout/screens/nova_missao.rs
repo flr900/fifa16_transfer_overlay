@@ -927,7 +927,7 @@ pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
             ui.text_colored(
                 theme::TEXT_SECONDARY,
                 format!(
-                    "Relatório: até {} jogadores{}, {} atributos por jogador, precisão de ±{}.",
+                    "Relatório: até {} jogadores{}, {} atributos por jogador, precisão de ±{}; mais os já mapeados na Base do Scout (0 a 4 dias, fora do limite).",
                     e.alvo_jogadores,
                     if continua { " por mês" } else { "" },
                     e.atributos_revelados,

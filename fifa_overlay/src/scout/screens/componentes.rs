@@ -143,6 +143,12 @@ pub fn badge_escolhido() -> EstiloBadge {
     EstiloBadge { texto: "ESCOLHIDO", contorno: theme::FIELD_GREEN, fundo: theme::FIELD_GREEN_DIM, cor_texto: theme::FIELD_GREEN }
 }
 
+/// "BASE" em roxo: o jogador veio da Base do Scout (o clube já o tinha
+/// mapeado), não da pesquisa do Olheiro da Missão.
+pub fn badge_base() -> EstiloBadge {
+    EstiloBadge { texto: "BASE", contorno: theme::ACCENT_PRIMARY, fundo: theme::ACCENT_PRIMARY_DIM, cor_texto: theme::ACCENT_PRIMARY }
+}
+
 /// Estado de um Escolhido: ACOMPANHADO (roxo), ATUALIZADO (verde),
 /// ENVELHECENDO/DESATUALIZADO (dourado), VENCIDO (vermelho). Sempre com
 /// texto (NFR5).

@@ -832,8 +832,12 @@ fn encerrar_na(dados: &mut persistence::ScoutStateFile, id: Uuid, hoje: Option<D
         let encontrados = dados.relatorios.iter().find(|r| r.missao_id == id).map_or(0, |r| r.jogadores.len());
         m.revelados(encontrados, hoje)
     });
+    let criada = dados.missoes.iter().find(|m| m.id == id).map(|m| m.criada_em);
     if let Some(r) = dados.relatorios.iter_mut().find(|r| r.missao_id == id) {
         r.jogadores.truncate(revelados.unwrap_or(0));
+        // o que a Base ainda não tinha entregado também fica de fora
+        let entregues: Vec<u32> = r.entregues_da_base(criada, hoje).iter().map(|j| j.player_id).collect();
+        r.da_base.retain(|j| entregues.contains(&j.player_id));
     }
     if let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) {
         m.status = StatusMissao::Concluida;
@@ -983,9 +987,10 @@ impl Ocorrencia {
     /// "Rodrigo Pires · Missão Jovens" (a origem numa coluna ou linha).
     pub fn origem(&self) -> String {
         let olheiro = self.olheiro.clone().unwrap_or_else(|| "Olheiro removido".to_string());
+        let base = if self.jogador.da_base { " · da Base" } else { "" };
         match self.tipo {
-            Some(tipo) => format!("{olheiro} · Missão {}", crate::scout::state::nome_do_tipo(tipo)),
-            None => olheiro,
+            Some(tipo) => format!("{olheiro} · Missão {}{base}", crate::scout::state::nome_do_tipo(tipo)),
+            None => format!("{olheiro}{base}"),
         }
     }
 
@@ -993,8 +998,10 @@ impl Ocorrencia {
     /// mapeados; empate, faixa de Overall mais estreita; empate, o mais novo.
     fn melhor_que(&self, outro: &Ocorrencia) -> bool {
         let largura = |o: &Ocorrencia| o.jogador.overall.max.saturating_sub(o.jogador.overall.min);
-        (self.jogador.atributos.len(), std::cmp::Reverse(largura(self)), self.quando)
-            > (outro.jogador.atributos.len(), std::cmp::Reverse(largura(outro)), outro.quando)
+        // com o mesmo detalhe, vale o registro original (não a cópia que a
+        // Base entregou a outra Missão), e depois o mais novo
+        (self.jogador.atributos.len(), std::cmp::Reverse(largura(self)), !self.jogador.da_base, self.quando)
+            > (outro.jogador.atributos.len(), std::cmp::Reverse(largura(outro)), !outro.jogador.da_base, outro.quando)
     }
 }
 
@@ -1304,6 +1311,19 @@ pub struct JogadorEncontrado {
     /// Altura em cm (2026-10-08; `None` em Relatórios de antes).
     #[serde(default)]
     pub altura: Option<u8>,
+    /// Veio da Base do Scout (o clube já o tinha mapeado), não da pesquisa do
+    /// Olheiro da Missão: não conta no limite de jogadores dele
+    /// (2026-10-08).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub da_base: bool,
+    /// Dias de carreira, desde o início da Missão, até a curadoria da Base
+    /// entregar este jogador (0 a 4: quanto mais detalhe o clube já tinha,
+    /// mais rápido; `quality::dias_de_curadoria`).
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub dias_de_curadoria: u8,
+    /// Quando o clube o viu (a data do registro da Base de que ele veio).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visto_em: Option<Date>,
     /// Overall do titular do elenco na posição com que ele foi comparado
     /// (2026-10-03).
     #[serde(default)]
@@ -1386,6 +1406,9 @@ impl JogadorEncontrado {
             estrelas_drible: Some(3),
             pe_fraco: Some(3),
             altura: Some(180),
+            da_base: false,
+            dias_de_curadoria: 0,
+            visto_em: None,
             titular_elenco: None,
             falso_positivo: false,
         }
@@ -1748,6 +1771,10 @@ pub fn ordem_de_acompanhamento(escolhidos: &[Escolhido]) -> Vec<u32> {
     ordem.into_iter().map(|e| e.jogador.player_id).collect()
 }
 
+fn is_zero_u8(valor: &u8) -> bool {
+    *valor == 0
+}
+
 /// Relatório de uma Missão (Story 2.4). Campos novos com `default`: um
 /// arquivo antigo continua válido (AD-7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1774,6 +1801,24 @@ pub struct Relatorio {
     /// Jogadores já anunciados no banner "Relatório atualizado".
     #[serde(default)]
     pub notificados: u16,
+    /// Os jogadores que a curadoria da Base do Scout trouxe para esta Missão
+    /// (2026-10-08): chegam em 0 a 4 dias e não ocupam o limite do Olheiro
+    /// (`Missao::alvo_total`). Ficam à parte de `jogadores` (que é a pesquisa
+    /// do próprio Olheiro, revelada aos poucos).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub da_base: Vec<JogadorEncontrado>,
+}
+
+impl Relatorio {
+    /// Os jogadores da Base já entregues em `hoje`: a Missão começou há pelo
+    /// menos `dias_de_curadoria` dias. Sem data, nenhum.
+    pub fn entregues_da_base(&self, criada_em: Option<Date>, hoje: Option<Date>) -> Vec<&JogadorEncontrado> {
+        let (Some(criada), Some(hoje)) = (criada_em, hoje) else {
+            return Vec::new();
+        };
+        let passados = hoje.day_number() - criada.day_number();
+        self.da_base.iter().filter(|j| i64::from(j.dias_de_curadoria) <= passados).collect()
+    }
 }
 
 #[cfg(test)]
@@ -1791,6 +1836,7 @@ impl Relatorio {
             arquivado: false,
             vistos: 0,
             notificados: 0,
+            da_base: Vec::new(),
         }
     }
 }
@@ -1818,6 +1864,9 @@ struct BuscaNaFila {
     /// Jogadores já no Relatório (bloco anterior): a busca traz outros.
     excluir: std::collections::HashSet<u32>,
     quantos: usize,
+    /// O melhor registro de cada jogador da Base do Scout (menos os que já
+    /// estão neste Relatório): a curadoria entrega os que passam nos filtros.
+    base: Vec<JogadorEncontrado>,
 }
 
 pub struct ScoutState {
@@ -1861,7 +1910,7 @@ pub struct ScoutState {
     /// Missões `EmExecucao` esperando a vez, em ordem (AD-9: uma de cada
     /// vez, nunca em paralelo).
     fila_busca: VecDeque<BuscaNaFila>,
-    tarefa_busca: AsyncTask<Vec<JogadorEncontrado>>,
+    tarefa_busca: AsyncTask<search::ResultadoBusca>,
     /// A busca disparada e ainda não tratada (`poll` não consome).
     busca_atual: Option<BuscaNaFila>,
     /// Última falha de busca por Missão, para a aba Missões dizer.
@@ -2208,6 +2257,7 @@ impl ScoutState {
                 arquivado: false,
                 vistos: 1,
                 notificados: 1,
+                da_base: Vec::new(),
             },
             previstos: 1,
             parcial: false,
@@ -2278,9 +2328,16 @@ impl ScoutState {
         let r = &ficha.item.relatorio;
         let missao = ficha.item.missao.as_ref();
         let indice = r.jogadores.iter().position(|j| j.player_id == ficha.jogador.player_id).unwrap_or(0);
+        // quem veio da Base traz o que o clube já sabia, de quando foi visto
+        let da_base = ficha.jogador.da_base;
+        let largura = ficha.jogador.overall.max.saturating_sub(ficha.jogador.overall.min);
         let escolhido = Escolhido {
-            observado_em: data_da_observacao(missao, r.gerado_em, indice, hoje),
-            precisao: r.precisao_mais_menos,
+            observado_em: if da_base {
+                ficha.jogador.visto_em.unwrap_or(hoje).min(hoje)
+            } else {
+                data_da_observacao(missao, r.gerado_em, indice, hoje)
+            },
+            precisao: if da_base { largura.div_ceil(2) } else { r.precisao_mais_menos },
             jogador: ficha.jogador.clone(),
             adicionado_em: hoje,
             prioridade: false,
@@ -4071,7 +4128,8 @@ impl ScoutState {
                 .filter(|m| !dados.relatorios.iter().any(|r| r.missao_id == m.id && r.arquivado))
                 .map(|m| {
                     let relatorio = dados.relatorios.iter().find(|r| r.missao_id == m.id);
-                    let revelados = relatorio.map_or(0, |r| m.revelados(r.jogadores.len(), hoje));
+                    let da_base = relatorio.map_or(0, |r| r.entregues_da_base(Some(m.criada_em), hoje).len());
+                    let revelados = relatorio.map_or(0, |r| m.revelados(r.jogadores.len(), hoje) + da_base);
                     MissaoNaLista {
                         missao: m.clone(),
                         olheiro: dados.olheiros.iter().find(|o| o.id == m.olheiro_id).cloned(),
@@ -4084,7 +4142,7 @@ impl ScoutState {
                         relatorio_id: relatorio.filter(|_| revelados > 0 || m.status == StatusMissao::Concluida).map(|r| r.id),
                         relatorio_novo: relatorio.is_some_and(|r| revelados > usize::from(r.vistos) || (!r.aberto && revelados > 0)),
                         revelados,
-                        previstos: m.alvo_total(),
+                        previstos: m.alvo_total() + relatorio.map_or(0, |r| r.da_base.len()),
                     }
                 })
                 .collect()
@@ -4217,19 +4275,19 @@ impl ScoutState {
         let (Some(id_save), Some(estado)) = (self.save_ativo.clone(), self.estado_ativo().cloned()) else {
             return;
         };
-        let (mut a_buscar, a_concluir): (Vec<(Missao, Vec<u32>)>, Vec<Uuid>) = estado.ler(|dados| {
+        let base = self.base_para_curadoria();
+        let (mut a_buscar, a_concluir): (Vec<(Missao, Vec<u32>, usize)>, Vec<Uuid>) = estado.ler(|dados| {
             let pendentes = dados.missoes.iter().filter(|m| m.status == StatusMissao::Pendente);
             let buscar = pendentes
                 .clone()
                 .filter(|m| m.blocos_buscados < m.blocos.max(1))
                 .map(|m| {
-                    let ja = dados
-                        .relatorios
-                        .iter()
-                        .find(|r| r.missao_id == m.id)
-                        .map(|r| r.jogadores.iter().map(|j| j.player_id).collect())
-                        .unwrap_or_default();
-                    (m.clone(), ja)
+                    // já no Relatório: a pesquisa do Olheiro e o que a Base entregou;
+                    // só a pesquisa do Olheiro conta no limite dele
+                    let relatorio = dados.relatorios.iter().find(|r| r.missao_id == m.id);
+                    let ja: Vec<u32> =
+                        relatorio.map(|r| r.jogadores.iter().chain(r.da_base.iter()).map(|j| j.player_id).collect()).unwrap_or_default();
+                    (m.clone(), ja, relatorio.map_or(0, |r| r.jogadores.len()))
                 })
                 .collect();
             let concluir = pendentes
@@ -4251,8 +4309,8 @@ impl ScoutState {
         if a_buscar.is_empty() {
             return;
         }
-        a_buscar.sort_by_key(|(m, _)| (m.prazo_estimado, m.criada_em));
-        let ids: Vec<Uuid> = a_buscar.iter().map(|(m, _)| m.id).collect();
+        a_buscar.sort_by_key(|(m, _, _)| (m.prazo_estimado, m.criada_em));
+        let ids: Vec<Uuid> = a_buscar.iter().map(|(m, _, _)| m.id).collect();
         let marcou = estado.mutar(|dados| {
             for m in dados.missoes.iter_mut().filter(|m| ids.contains(&m.id)) {
                 m.status = StatusMissao::EmExecucao;
@@ -4264,18 +4322,14 @@ impl ScoutState {
             tracing::warn!("[scout::state] Não deu para marcar Missões em execução: {err:?}");
             return;
         }
-        for (mut missao, ja) in a_buscar {
+        for (mut missao, ja, proprios) in a_buscar {
             missao.status = StatusMissao::EmExecucao;
-            let quantos = missao.alvo_total().saturating_sub(ja.len());
+            let quantos = missao.alvo_total().saturating_sub(proprios);
             tracing::info!("[scout::state] Missão {} na fila de busca ({quantos} jogadores).", missao.id);
             self.falhas_busca.remove(&missao.id);
-            self.fila_busca.push_back(BuscaNaFila {
-                id_save: id_save.clone(),
-                missao,
-                hoje,
-                excluir: ja.into_iter().collect(),
-                quantos,
-            });
+            let ja: std::collections::HashSet<u32> = ja.into_iter().collect();
+            let da_base = base.iter().filter(|j| !ja.contains(&j.player_id)).cloned().collect();
+            self.fila_busca.push_back(BuscaNaFila { id_save: id_save.clone(), missao, hoje, excluir: ja, quantos, base: da_base });
         }
     }
 
@@ -4300,11 +4354,11 @@ impl ScoutState {
             return;
         };
         let fonte = Arc::clone(&self.fonte);
-        let (missao, hoje, excluir, quantos) =
-            (proxima.missao.clone(), proxima.hoje, proxima.excluir.clone(), proxima.quantos);
+        let (missao, hoje, excluir, quantos, base) =
+            (proxima.missao.clone(), proxima.hoje, proxima.excluir.clone(), proxima.quantos, proxima.base.clone());
         if self
             .tarefa_busca
-            .start(move || search::executar_missao(&missao, fonte.as_ref(), hoje, &excluir, quantos))
+            .start(move || search::executar_missao(&missao, fonte.as_ref(), hoje, &excluir, quantos, &base))
         {
             self.busca_atual = Some(proxima);
         } else {
@@ -4316,12 +4370,13 @@ impl ScoutState {
     /// existe) no arquivo da carreira DONA da busca (pode não ser a ativa).
     /// Prazo fixo já cumprido → `Concluida` (o Olheiro fica livre); senão a
     /// Missão segue `Pendente`, com o Relatório parcial crescendo.
-    fn concluir_busca(&mut self, busca: BuscaNaFila, encontrados: Vec<JogadorEncontrado>) {
+    fn concluir_busca(&mut self, busca: BuscaNaFila, resultado: search::ResultadoBusca) {
         let Some(estado) = self.estados.get(&busca.id_save).cloned() else {
             return;
         };
         let id = busca.missao.id;
-        let novos = encontrados.len();
+        let novos = resultado.novos.len();
+        let da_base = resultado.da_base.len();
         let concluida = !busca.missao.continua && busca.hoje >= busca.missao.prazo_estimado;
         let base = search::relatorio_vazio(&busca.missao, busca.hoje);
         let mut total = 0;
@@ -4338,14 +4393,20 @@ impl ScoutState {
                 }
             };
             if let Some(r) = dados.relatorios.get_mut(indice) {
-                r.jogadores.extend(encontrados);
+                r.jogadores.extend(resultado.novos);
+                // a Base entrega cada jogador uma vez só por Relatório
+                for j in resultado.da_base {
+                    if !r.da_base.iter().chain(r.jogadores.iter()).any(|x| x.player_id == j.player_id) {
+                        r.da_base.push(j);
+                    }
+                }
                 r.gerado_em = Some(busca.hoje);
                 total = r.jogadores.len();
             }
         });
         match gravou {
             Ok(()) => {
-                tracing::info!("[scout::state] Busca da Missão {id}: +{novos} jogadores (total {total}).");
+                tracing::info!("[scout::state] Busca da Missão {id}: +{novos} jogadores e {da_base} da Base (total {total}).");
                 if concluida {
                     self.avisar(TipoAviso::RelatorioPronto { tipo: busca.missao.tipo, jogadores: total });
                 }
@@ -4386,6 +4447,13 @@ impl ScoutState {
         let revelados = missao.as_ref().map_or(r.jogadores.len(), |m| m.revelados(r.jogadores.len(), hoje));
         let mut relatorio = r.clone();
         relatorio.jogadores.truncate(revelados);
+        // os da Base já entregues (0 a 4 dias) entram depois dos da pesquisa
+        let entregues: Vec<JogadorEncontrado> = r
+            .entregues_da_base(missao.as_ref().map(|m| m.criada_em).or(r.gerado_em), hoje)
+            .into_iter()
+            .cloned()
+            .collect();
+        let n_base = entregues.len();
         let parcial = missao.as_ref().is_some_and(|m| m.status != StatusMissao::Concluida);
         // Relatório parcial: quem acabou de aparecer ainda está sendo
         // observado (mercado → salário → atributos).
@@ -4401,9 +4469,16 @@ impl ScoutState {
                 }
             }
         }
+        relatorio.jogadores.extend(entregues.into_iter().map(|mut j| {
+            j.da_base = true;
+            j.observacao = quality::Observacao::Completa;
+            j
+        }));
+        relatorio.da_base.clear(); // já estão em `jogadores`
+        let revelados = revelados + n_base;
         RelatorioNaLista {
             novo: revelados > usize::from(r.vistos) || (!r.aberto && revelados > 0),
-            previstos: missao.as_ref().map_or(revelados, Missao::alvo_total),
+            previstos: missao.as_ref().map_or(revelados, Missao::alvo_total) + r.da_base.len(),
             parcial,
             relatorio,
             missao,
@@ -4440,14 +4515,28 @@ impl ScoutState {
         texto_regiao(filtros, &ligas, &nacoes)
     }
 
+    /// O melhor registro de cada jogador da Base, com a data em que o clube o
+    /// viu (`visto_em`), para a curadoria das Missões novas.
+    fn base_para_curadoria(&self) -> Vec<JogadorEncontrado> {
+        // sem os nomes das ligas (não precisa deles, e não dispara a leitura delas)
+        self.jogadores_dos_relatorios(Arc::new(Vec::new()))
+            .base
+            .iter()
+            .map(|b| {
+                let mut j = b.melhor.jogador.clone();
+                j.visto_em = j.visto_em.or(b.melhor.quando);
+                j
+            })
+            .collect()
+    }
+
     /// Os jogadores da lista de Relatórios (um por jogador de cada
     /// Relatório) e a Base do Scout, refeitos só quando os dados gravados,
     /// a data ou as ligas mudam.
-    fn jogadores_dos_relatorios(&self) -> CacheDeJogadores {
+    fn jogadores_dos_relatorios(&self, ligas: Arc<Vec<Liga>>) -> CacheDeJogadores {
         let Some(estado) = self.estado_ativo() else {
             return CacheDeJogadores::default();
         };
-        let ligas = self.ligas_carregadas();
         let chave = (estado.geracao(), self.data_progresso, ligas.len());
         let mut guarda = self.cache_jogadores.lock().unwrap_or_else(|p| p.into_inner());
         if guarda.chave == Some(chave) {
@@ -4489,7 +4578,7 @@ impl ScoutState {
     /// Um registro por jogador de cada Relatório (os já revelados), dos mais
     /// novos aos mais antigos; `arquivados` escolhe a lista.
     pub fn ocorrencias(&self, arquivados: bool) -> Arc<Vec<Ocorrencia>> {
-        let cache = self.jogadores_dos_relatorios();
+        let cache = self.jogadores_dos_relatorios(self.ligas_carregadas());
         if arquivados {
             cache.arquivadas
         } else {
@@ -4500,7 +4589,7 @@ impl ScoutState {
     /// A Base do Scout: todo jogador que algum Olheiro já encontrou (nos
     /// Relatórios ativos e arquivados), um por jogador.
     pub fn base_do_scout(&self) -> Arc<Vec<JogadorDaBase>> {
-        self.jogadores_dos_relatorios().base
+        self.jogadores_dos_relatorios(self.ligas_carregadas()).base
     }
 
     /// Abre um Relatório: a tela passa a mostrá-lo e o "novo" some
@@ -4644,7 +4733,7 @@ impl ScoutState {
                 .filter(|r| !r.arquivado)
                 .filter_map(|r| {
                     let m = dados.missoes.iter().find(|m| m.id == r.missao_id)?;
-                    let revelados = m.revelados(r.jogadores.len(), Some(hoje));
+                    let revelados = m.revelados(r.jogadores.len(), Some(hoje)) + r.entregues_da_base(Some(m.criada_em), Some(hoje)).len();
                     let novos = revelados.checked_sub(usize::from(r.notificados)).filter(|n| *n > 0)?;
                     Some((r.id, u16::try_from(revelados).unwrap_or(u16::MAX), m.tipo, novos))
                 })
@@ -5680,6 +5769,61 @@ mod tests {
         r.gerado_em = Some(Date(criada).mais_dias(5));
         r.jogadores = jogadores;
         (m, r)
+    }
+
+    #[test]
+    fn a_new_missao_checks_the_scout_base_first_and_the_players_do_not_use_up_the_olheiros_limit() {
+        use crate::scout::persistence::EstadoPersistido;
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        // Missão antiga já concluída: o clube mapeou o 5 (28 atributos) e o 6 (nenhum atributo)
+        let mut detalhado = JogadorEncontrado::de_teste(5, "Jogador 5", 5, (55, 60));
+        detalhado.atributos = Atributo::TODOS
+            .iter()
+            .take(28)
+            .map(|&a| AtributoRevelado { atributo: a, valor: FaixaAtributo { min: 55, max: 60 } })
+            .collect();
+        let raso = JogadorEncontrado::de_teste(6, "Jogador 6", 6, (55, 60));
+        let (antiga, r_antiga) = relatorio_com(&o, 20260610, quality::TipoMissao::Geral, vec![detalhado, raso]);
+        // Missão nova com os mesmos filtros (o mundo todo)
+        let nova = missao_com_prazo(&o, 20260701, 20260715);
+        let (nova_id, alvo) = (nova.id, nova.alvo_total());
+        let (mut st, _busca, _) = estado_com_datas(&pasta, &[20260702, 20260706], vec![antiga, nova], &o);
+        EstadoPersistido::carregar(Some(&pasta.0), ID_A).mutar(move |d| d.relatorios = vec![r_antiga]).expect("gravou");
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+
+        // gravado: a pesquisa do Olheiro tem o limite todo; a Base veio à parte
+        let (proprios, da_base) = st
+            .estado_ativo()
+            .map(|e| {
+                e.ler(|d| {
+                    let r = d.relatorios.iter().find(|r| r.missao_id == nova_id).expect("Relatório novo");
+                    (r.jogadores.iter().map(|j| j.player_id).collect::<Vec<_>>(), r.da_base.iter().map(|j| (j.player_id, j.dias_de_curadoria)).collect::<Vec<_>>())
+                })
+            })
+            .expect("estado");
+        assert_eq!(proprios.len(), alvo, "a Base não come o limite do Olheiro");
+        assert!(!proprios.contains(&5) && !proprios.contains(&6), "a pesquisa dele não repete quem a Base trouxe");
+        let mut da_base_ordenada = da_base.clone();
+        da_base_ordenada.sort();
+        assert_eq!(da_base_ordenada, vec![(5, 0), (6, 4)], "detalhado: na hora; sem atributos: 4 dias");
+
+        // dia 2 da Missão: só o detalhado já chegou
+        let nova_na_lista = |st: &ScoutState| st.relatorios(false).into_iter().find(|i| i.relatorio.missao_id == nova_id).expect("Relatório novo");
+        let hoje = nova_na_lista(&st);
+        let da_base_visiveis: Vec<u32> = hoje.relatorio.jogadores.iter().filter(|j| j.da_base).map(|j| j.player_id).collect();
+        assert_eq!(da_base_visiveis, vec![5]);
+        assert_eq!(hoje.previstos, alvo + 2, "a Base soma aos jogadores previstos");
+
+        // dia 6 (5 dias depois do início): o raso também chegou
+        reabrir(&mut st);
+        let depois = nova_na_lista(&st);
+        let mut visiveis: Vec<u32> = depois.relatorio.jogadores.iter().filter(|j| j.da_base).map(|j| j.player_id).collect();
+        visiveis.sort_unstable();
+        assert_eq!(visiveis, vec![5, 6]);
+        // a lista de Missões conta os da Base junto dos revelados
+        assert!(st.missoes().iter().any(|l| l.missao.id == nova_id && l.previstos == alvo + 2));
     }
 
     #[test]
