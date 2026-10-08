@@ -89,8 +89,9 @@ development_status:
   5-1-olheiros-with-identity-stars-markets-and-a-monthly-market: done
   epic-5-retrospective: optional
 
-  epic-6: done
+  epic-6: in-progress
   6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists: done
+  6-2-deep-dive-an-escolhido-on-demand: review
   epic-6-retrospective: optional
 
   epic-7: in-progress

@@ -386,6 +386,12 @@ impl Scout {
                     self.state.fechar_painel_de_filtros();
                     self.nav.pedir_foco();
                 }
+            } else if self.state.aprofundamento_pendente().is_some() {
+                // aviso "Aprofundar agora?" aberto: B cancela; A é dos botões
+                if comandos.voltar {
+                    self.state.cancelar_aprofundamento();
+                    self.nav.pedir_foco();
+                }
             } else if self.state.demissao_pendente().is_some() {
                 // aviso "Demitir Olheiro?" aberto: B cancela; A é dos botões
                 if comandos.voltar {

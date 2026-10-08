@@ -12,7 +12,7 @@
 |---|---|---|
 | **Story 7.5**: calibrar o nível `b` e o campo `a` do conhecimento por informação (contrato, atributos, valor, salário) | `epics.md` Épico 7; `integracao-scout-nativo.md` | Sem arquivo de história e sem entrada no `sprint-status`. Commits recentes (níveis 140-143, 144, 162+, 178+, campo `a`) parecem ter feito boa parte na prática, sem registro. |
 | **Story 7.7**: e-mail nativo do GTN | Épico 7 | Opcional, a de menor prioridade. A mais cara (objeto e strings localizadas). Alternativa barata: mostrar o "e-mail" só no overlay. |
-| **Núcleo de olheiros detalhistas**: 2ª etapa de aprofundamento de um jogador já achado | PRD §6.2 | Adiado para o v2; o PRD o chama de "candidato forte" para a primeira expansão. Pode sobrepor a observação em estágios e o Generalista que acompanha Escolhidos. |
+| **Núcleo de olheiros detalhistas**: 2ª etapa de aprofundamento de um jogador já achado | PRD §6.2 | **Feito em 2026-10-08 (Story 6.2, "Aprofundar agora")**, estendendo o Generalista, só a partir dos Escolhidos (decisão do Felipe). Falta o teste em jogo para calibrar custo e prazo. |
 | **Conhecimento progressivo por região** entre Missões (estilo Football Manager) | PRD §5 e §6.2 | Não implementado. A Base do Scout cobre uma parte (novas Missões consultam a Base primeiro). |
 | **Limite de slots de Olheiros** | PRD §6.2 | Nada encontrado no código. |
 | **Salário exato do jogo** | `integracao-scout-nativo.md`; Story 7.6 | Só o valor de transferência é exato, e só do jogador em foco. O salário segue estimado. Resolver exige chamar funções do jogo (caminho D, engenharia reversa do `fifa16.exe` com packer). |

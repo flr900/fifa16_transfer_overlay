@@ -6,6 +6,7 @@
 //! exibição (milhar, data dd/mm/aaaa) é responsabilidade desta camada.
 
 mod acompanhamento;
+mod aprofundamento;
 pub mod aviso;
 mod base_scout;
 mod componentes;
@@ -90,13 +91,18 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     if !demitindo {
         state.cancelar_demissao();
     }
+    // o Generalista do aviso "Aprofundar agora?" pode ter saído, ou o jogador ficado exato
+    let aprofundando = state.aprofundamento_pendente().is_some();
+    if !aprofundando {
+        state.cancelar_aprofundamento();
+    }
     let filtrando = state.painel_de_filtros().is_some();
     let com_opcoes = state.opcoes_do_olheiro().is_some();
     if !com_opcoes {
         state.fechar_opcoes_do_olheiro();
     }
     let configurando = state.configuracoes_abertas();
-    let modal = confirmando || trocando.is_some() || demitindo || filtrando || com_opcoes || configurando;
+    let modal = confirmando || trocando.is_some() || demitindo || aprofundando || filtrando || com_opcoes || configurando;
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -295,6 +301,16 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             demissao::Acao::Demitiu => nav.pedir_foco(),
             demissao::Acao::Cancelou => {
                 state.cancelar_demissao();
+                nav.pedir_foco();
+            }
+        }
+    }
+    if state.aprofundamento_pendente().is_some() {
+        match aprofundamento::render(ui, fonts, state) {
+            aprofundamento::Acao::Nenhuma => {}
+            aprofundamento::Acao::Confirmou => nav.pedir_foco(),
+            aprofundamento::Acao::Cancelou => {
+                state.cancelar_aprofundamento();
                 nav.pedir_foco();
             }
         }

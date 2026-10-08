@@ -865,6 +865,8 @@ Implemented 2026-10-04 as one story: [`5-1-olheiros-with-identity-stars-markets-
 
 Implemented 2026-10-04 as one story: [`6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists.md`](../implementation-artifacts/6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists.md).
 
+**Story 6.2 (2026-10-08): "Aprofundar agora".** The PRD's "núcleo de olheiros detalhistas" (a second, deeper stage on a player already found) was delivered by extending the Generalist, not with a new kind of Olheiro: from the Ficha of an Escolhido the user pays to make a designated Generalist dedicate himself to that player, who then becomes exact in 40% (2,5★) to 15% (5★) of the normal tracking time and sorts first in the vacancy queue. [`6-2-deep-dive-an-escolhido-on-demand.md`](../implementation-artifacts/6-2-deep-dive-an-escolhido-on-demand.md).
+
 ## Epic 7: Native scout integration (shortlist and knowledge level)
 
 Felipe's request (2026-10-05/06), after the memory experiment in [`integracao-scout-nativo.md`](integracao-scout-nativo.md): when a player enters the Central's Escolhidos (transfer value defined), add him to the game's native shortlist with the intermediate knowledge level (`b = 140`: value and wage shown by the game); when the Missão really finishes, raise him to complete (`b = 198`). The Central shows the game's exact transfer value (read from the focused-player row) when it has harvested one, and an estimate otherwise. Amended NFR1 above.

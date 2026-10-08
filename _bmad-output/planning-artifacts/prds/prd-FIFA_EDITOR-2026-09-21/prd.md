@@ -452,7 +452,9 @@ geral de onde a rede de scouting do usuário está atuando.
 ### 6.2 Fora de Escopo para o MVP
 
 - **Núcleo de olheiros detalhistas** (2ª etapa de aprofundamento de um
-  jogador já encontrado) — adiado para v2. `[NOTE FOR PM]`: essa ideia foi
+  jogador já encontrado) — adiado para v2. **Entregue em 2026-10-08 como
+  "Aprofundar agora" (Story 6.2)**: em vez de um novo tipo de Olheiro, o
+  Generalista designado se dedica, mediante pagamento, a um Escolhido. `[NOTE FOR PM]`: essa ideia foi
   claramente valorizada na elicitação inicial e é um candidato forte para a
   primeira expansão pós-validação do v1.
 - Demissão/venda de Olheiros contratados de volta. **Demissão implementada em 2026-10-08** ("Demitir", com confirmação, bloqueada durante uma Missão); a venda segue fora de escopo.

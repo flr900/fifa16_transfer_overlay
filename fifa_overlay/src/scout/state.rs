@@ -1728,6 +1728,29 @@ pub struct Escolhido {
     /// não ser que um Generalista o acompanhe) nem o tira da lista do jogo.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub importado: bool,
+    /// "Aprofundar agora": um Generalista se dedica a ele até os valores
+    /// ficarem exatos (acompanhamento mais rápido e vaga garantida).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aprofundando: Option<Aprofundamento>,
+}
+
+impl Escolhido {
+    /// Está sendo aprofundado agora: o pedido existe e ele ainda não está
+    /// exato (precisão 0 com todos os atributos observados).
+    pub fn aprofundando_ativo(&self) -> bool {
+        let total = total_de_atributos(self.jogador.goleiro());
+        self.aprofundando.is_some() && !(self.precisao == 0 && self.jogador.atributos.len() >= total)
+    }
+}
+
+/// O pedido de aprofundamento de um Escolhido (Épico 6, estendido em
+/// 2026-10-08): quando começou e quanto do prazo normal do acompanhamento
+/// sobra (`quality::percentual_aprofundamento`, fixado pelas estrelas do
+/// Generalista que o atendeu).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Aprofundamento {
+    pub desde: Date,
+    pub percentual: u8,
 }
 
 /// O acompanhamento de um Escolhido por um Generalista: de onde partiu e
@@ -1760,6 +1783,28 @@ pub struct EscolhidoNaLista {
     pub dias_para_exato: Option<u32>,
     /// Exato e fora do filtro da Missão de origem (falso positivo revelado).
     pub fora_do_filtro: bool,
+}
+
+/// O aviso "Aprofundar agora?": o que o aprofundamento custa e quanto
+/// encurta o acompanhamento.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviaAprofundamento {
+    pub player_id: u32,
+    pub nome: String,
+    /// O Generalista designado de mais estrelas, que atende o pedido.
+    pub generalista: String,
+    /// Precisão (±) e atributos que faltam de onde o aprofundamento parte.
+    pub precisao: u8,
+    pub faltam: usize,
+    /// Dias de carreira até o exato: pelo acompanhamento normal e aprofundando.
+    pub dias_normal: u32,
+    pub dias: u32,
+    /// Quanto do prazo normal sobra (`quality::percentual_aprofundamento`).
+    pub percentual: u8,
+    pub custo: i32,
+    /// O orçamento de agora (`None` sem carreira lida).
+    pub orcamento: Option<i32>,
+    pub erro: Option<ErroCompra>,
 }
 
 /// O resumo do acompanhamento (cabeçalho da aba Escolhidos).
@@ -1817,6 +1862,12 @@ pub fn escolhido_em(escolhido: &Escolhido, hoje: Date, acompanhado: bool) -> Esc
     }
 }
 
+/// O prazo de um acompanhamento que começa agora: o normal, ou o do
+/// aprofundamento se o Escolhido foi pedido para aprofundar.
+fn prazo_do_acompanhamento(e: &Escolhido, normal: u32) -> u32 {
+    e.aprofundando.map_or(normal, |a| quality::dias_para_aprofundar(normal, a.percentual))
+}
+
 /// Um passo do acompanhamento em `hoje`, com os valores atuais do save:
 /// - começando agora: parte do que a observação vale hoje (envelhecida),
 ///   ou de uma análise nova se ela venceu;
@@ -1835,7 +1886,7 @@ pub fn avancar_escolhido(e: &Escolhido, pool: &crate::save_repo::PlayerPool, hoj
                 inicio: hoje,
                 precisao_inicial: e.precisao,
                 atributos_iniciais: u8::try_from(e.jogador.atributos.len()).unwrap_or(u8::MAX),
-                dias_para_exato: quality::dias_para_exato(e.precisao, e.jogador.atributos.len(), total),
+                dias_para_exato: prazo_do_acompanhamento(e, quality::dias_para_exato(e.precisao, e.jogador.atributos.len(), total)),
                 dias: 0,
             },
             |a| Acompanhamento { dias: a.dias.saturating_add(desde), ..a },
@@ -1857,7 +1908,7 @@ pub fn avancar_escolhido(e: &Escolhido, pool: &crate::save_repo::PlayerPool, hoj
                 inicio: hoje,
                 precisao_inicial: precisao,
                 atributos_iniciais: u8::try_from(atributos).unwrap_or(u8::MAX),
-                dias_para_exato: quality::dias_para_exato(precisao, atributos, total),
+                dias_para_exato: prazo_do_acompanhamento(e, quality::dias_para_exato(precisao, atributos, total)),
                 dias: 0,
             }
         }
@@ -2018,11 +2069,11 @@ pub fn data_da_observacao(missao: Option<&Missao>, gerado_em: Option<Date>, indi
     data.min(hoje)
 }
 
-/// Ordem de vaga no acompanhamento: prioritários primeiro, depois os mais
-/// antigos na lista.
+/// Ordem de vaga no acompanhamento: quem está sendo aprofundado, depois os
+/// prioritários, depois os mais antigos na lista.
 pub fn ordem_de_acompanhamento(escolhidos: &[Escolhido]) -> Vec<u32> {
     let mut ordem: Vec<&Escolhido> = escolhidos.iter().collect();
-    ordem.sort_by_key(|e| (!e.prioridade, e.adicionado_em, e.jogador.player_id));
+    ordem.sort_by_key(|e| (!e.aprofundando_ativo(), !e.prioridade, e.adicionado_em, e.jogador.player_id));
     ordem.into_iter().map(|e| e.jogador.player_id).collect()
 }
 
@@ -2204,6 +2255,11 @@ pub struct ScoutState {
     troca_de_aba_pendente: Option<Aba>,
     /// "Demitir" clicado num Olheiro: o aviso de confirmação está aberto.
     demissao_pendente: Option<Uuid>,
+    /// "Aprofundar agora" clicado na Ficha de um Escolhido: o aviso de
+    /// confirmação (custo e prazo) está aberto para este jogador.
+    aprofundamento_pendente: Option<u32>,
+    /// Por que a última confirmação de aprofundamento não valeu (aparece no aviso).
+    erro_aprofundamento: Option<ErroCompra>,
     /// O jogador apertou Y neste frame (o menu de Opções da tela em foco).
     opcoes_neste_frame: bool,
     /// L2 (-1) / R2 (+1) neste frame: troca o grupo de posição da lista.
@@ -2345,6 +2401,8 @@ impl ScoutState {
             foco_geografico: FocoGeografico::Continentes,
             troca_de_aba_pendente: None,
             demissao_pendente: None,
+            aprofundamento_pendente: None,
+            erro_aprofundamento: None,
             opcoes_neste_frame: false,
             passo_de_grupo: 0,
             passo_de_coluna: 0,
@@ -2442,6 +2500,8 @@ impl ScoutState {
         self.vendo_arquivados = false;
         self.troca_de_aba_pendente = None;
         self.demissao_pendente = None;
+        self.aprofundamento_pendente = None;
+        self.erro_aprofundamento = None;
         self.painel_de_filtros = None;
         self.opcoes_do_olheiro = None;
         self.configuracoes = false;
@@ -2694,6 +2754,7 @@ impl ScoutState {
             relatorio_id: Some(r.id).filter(|id| !id.is_nil()),
             no_jogo: false,
             importado: false,
+            aprofundando: None,
         };
         let id_escolhido = escolhido.jogador.player_id;
         match estado.mutar(move |d| {
@@ -2815,6 +2876,122 @@ impl ScoutState {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Aprofundar agora (Épico 6 estendido, 2026-10-08)
+    // -----------------------------------------------------------------
+
+    /// O plano de aprofundar `player_id` em `hoje`, ou `None` se não dá: não
+    /// está nos Escolhidos, já está sendo aprofundado, já é exato, ou não há
+    /// Generalista designado para atendê-lo. A partida é a de um
+    /// acompanhamento que começa agora (a observação como vale hoje, ou uma
+    /// análise nova se venceu).
+    fn plano_de_aprofundamento(dados: &persistence::ScoutStateFile, player_id: u32, hoje: Date) -> Option<PreviaAprofundamento> {
+        let e = dados.escolhidos.iter().find(|e| e.jogador.player_id == player_id)?;
+        if e.aprofundando_ativo() {
+            return None;
+        }
+        let generalista = dados.olheiros.iter().filter(|o| o.acompanhando() && o.pode_acompanhar()).max_by_key(|o| o.perfil().generalista)?;
+        let atual = escolhido_em(e, hoje, false);
+        let (precisao, observados) = if atual.frescor == quality::Frescor::Vencido {
+            (quality::PRECISAO_ANALISE_NOVA, quality::ATRIBUTOS_ANALISE_NOVA)
+        } else {
+            (atual.precisao, atual.jogador.atributos.len())
+        };
+        let total = total_de_atributos(e.jogador.goleiro());
+        let faltam = total.saturating_sub(observados);
+        if precisao == 0 && faltam == 0 {
+            return None;
+        }
+        let normal = quality::dias_para_exato(precisao, observados, total);
+        let percentual = quality::percentual_aprofundamento(generalista.perfil().generalista);
+        Some(PreviaAprofundamento {
+            player_id,
+            nome: e.jogador.nome.clone(),
+            generalista: generalista.nome_exibicao(),
+            precisao,
+            faltam,
+            dias_normal: normal,
+            dias: quality::dias_para_aprofundar(normal, percentual),
+            percentual,
+            custo: quality::custo_aprofundamento(precisao, faltam),
+            orcamento: None,
+            erro: None,
+        })
+    }
+
+    /// Dá para aprofundar este Escolhido agora? (habilita o botão da Ficha)
+    pub fn pode_aprofundar(&self, player_id: u32) -> bool {
+        let (Some(estado), Some(hoje)) = (self.estado_ativo(), self.data_progresso) else {
+            return false;
+        };
+        estado.ler(|dados| Self::plano_de_aprofundamento(dados, player_id, hoje).is_some())
+    }
+
+    /// "Aprofundar agora": abre o aviso com o custo e o prazo.
+    pub fn pedir_aprofundamento(&mut self, player_id: u32) {
+        if self.pode_aprofundar(player_id) {
+            self.erro_aprofundamento = None;
+            self.aprofundamento_pendente = Some(player_id);
+        }
+    }
+
+    /// O aviso aberto, com o orçamento de agora; `None` se não há aviso ou o
+    /// aprofundamento deixou de ser possível (por exemplo, o Generalista saiu).
+    pub fn aprofundamento_pendente(&self) -> Option<PreviaAprofundamento> {
+        let player_id = self.aprofundamento_pendente?;
+        let (estado, hoje) = (self.estado_ativo()?, self.data_progresso?);
+        let mut previa = estado.ler(|dados| Self::plano_de_aprofundamento(dados, player_id, hoje))?;
+        previa.orcamento = self.orcamento();
+        previa.erro = self.erro_aprofundamento.clone();
+        Some(previa)
+    }
+
+    pub fn cancelar_aprofundamento(&mut self) {
+        self.aprofundamento_pendente = None;
+        self.erro_aprofundamento = None;
+    }
+
+    /// Confirma: debita o custo e grava o pedido. O jogador passa à frente da
+    /// fila de vagas e o acompanhamento recomeça do que ele vale hoje, no
+    /// prazo curto. `false` = não valeu (o motivo fica no aviso).
+    pub fn confirmar_aprofundamento(&mut self) -> bool {
+        let (Some(previa), Some(hoje)) = (self.aprofundamento_pendente(), self.data_progresso) else {
+            self.cancelar_aprofundamento();
+            return false;
+        };
+        let (player_id, percentual) = (previa.player_id, previa.percentual);
+        let pedido = Aprofundamento { desde: hoje, percentual };
+        match self.comprar(previa.custo, move |dados| {
+            if let Some(e) = dados.escolhidos.iter_mut().find(|e| e.jogador.player_id == player_id) {
+                e.aprofundando = Some(pedido);
+                e.acompanhamento = None;
+            }
+        }) {
+            Ok(()) => {
+                tracing::info!(
+                    "[scout::state] Aprofundamento de {} com {}: {} dias (normal {}), custo {}.",
+                    previa.nome,
+                    previa.generalista,
+                    previa.dias,
+                    previa.dias_normal,
+                    previa.custo
+                );
+                self.cancelar_aprofundamento();
+                self.reler();
+                self.atualizar_escolhidos(hoje);
+                true
+            }
+            Err(erro) => {
+                tracing::warn!("[scout::state] Aprofundamento não valeu: {erro:?}");
+                if matches!(erro, ErroCompra::OrcamentoMudou { .. }) {
+                    self.reler();
+                }
+                self.erro_aprofundamento = Some(erro);
+                false
+            }
+        }
+    }
+
     /// Atualiza o acompanhamento em `hoje` (abertura do painel, mudança de
     /// designação ou de lista): quem perdeu a vaga deixa de ser acompanhado
     /// (a observação volta a envelhecer); quem tem vaga e não foi observado
@@ -2838,7 +3015,7 @@ impl ScoutState {
             let perderam = dados
                 .escolhidos
                 .iter()
-                .any(|e| e.acompanhamento.is_some() && !cobertos.contains(&e.jogador.player_id));
+                .any(|e| (e.acompanhamento.is_some() || e.aprofundando.is_some()) && !cobertos.contains(&e.jogador.player_id));
             let a_observar: Vec<Escolhido> = dados
                 .escolhidos
                 .iter()
@@ -2851,6 +3028,7 @@ impl ScoutState {
             if let Err(err) = estado.mutar(|d| {
                 for e in d.escolhidos.iter_mut().filter(|e| !cobertos.contains(&e.jogador.player_id)) {
                     e.acompanhamento = None;
+                    e.aprofundando = None;
                 }
             }) {
                 tracing::warn!("[scout::state] Fim de acompanhamento não foi salvo: {err:?}");
@@ -3138,6 +3316,11 @@ impl ScoutState {
                 let gravou = estado.mutar(|d| {
                     for novo in novos {
                         if let Some(e) = d.escolhidos.iter_mut().find(|e| e.jogador.player_id == novo.jogador.player_id) {
+                            // um aprofundamento pedido enquanto a leitura rodava: ela
+                            // partiu do prazo normal, então a próxima refaz
+                            if e.aprofundando != novo.aprofundando {
+                                continue;
+                            }
                             // prioridade pode ter mudado enquanto a leitura rodava
                             *e = Escolhido { prioridade: e.prioridade, no_jogo: e.no_jogo, ..novo };
                         }
@@ -4893,7 +5076,7 @@ impl ScoutState {
         let depois = |d: Date| d > data_do_save;
         let desfeitos = estado.ler(|dados| {
             dados.olheiros.iter().filter(|o| o.contratado_em.is_some_and(depois) || o.acompanhando_desde.is_some_and(depois)).count()
-                + dados.escolhidos.iter().filter(|e| depois(e.adicionado_em) || depois(e.observado_em)).count()
+                + dados.escolhidos.iter().filter(|e| depois(e.adicionado_em) || depois(e.observado_em) || e.aprofundando.is_some_and(|a| depois(a.desde))).count()
                 + dados
                     .missoes
                     .iter()
@@ -4921,6 +5104,12 @@ impl ScoutState {
             // do save, com os dias a mais descontados — não há como refazer
             // a observação daquele dia, só não deixar o tempo andar sozinho.
             dados.escolhidos.retain(|e| !depois(e.adicionado_em));
+            // um aprofundamento pedido depois do save é desfeito (o dinheiro
+            // volta sozinho: o orçamento é o do save carregado)
+            for e in dados.escolhidos.iter_mut().filter(|e| e.aprofundando.is_some_and(|a| depois(a.desde))) {
+                e.aprofundando = None;
+                e.acompanhamento = None;
+            }
             for e in dados.escolhidos.iter_mut().filter(|e| depois(e.observado_em)) {
                 let excesso = u32::try_from(e.observado_em.day_number() - data_do_save.day_number()).unwrap_or(0);
                 e.observado_em = data_do_save;
@@ -8122,6 +8311,7 @@ mod tests {
             relatorio_id: None,
             no_jogo: false,
             importado: false,
+            aprofundando: None,
         }
     }
 
@@ -8450,6 +8640,136 @@ mod tests {
         assert!(st.escolhidos().iter().all(|e| !e.acompanhado && e.escolhido.acompanhamento.is_none()));
         st.abrir_nova_missao(g.id);
         assert!(st.tem_nova_missao());
+    }
+
+    /// Como `estado_com_missoes`, mas com o orçamento à escolha e as escritas
+    /// de orçamento à vista, para conferir o débito.
+    fn estado_para_aprofundar(pasta: &PastaTemporaria, hoje: i32, orcamento: i32, olheiros: Vec<Olheiro>, escolhidos: Vec<Escolhido>) -> (ScoutState, Escritas) {
+        let escritas: Escritas = Arc::new(Mutex::new(Vec::new()));
+        let fonte = FonteFalsa {
+            leituras: Mutex::new(vec![Ok(CareerSnapshot { data_atual: Date(hoje), orcamento_transferencias: orcamento, ..snapshot() })]),
+            resultado_localizacao: Ok(()),
+            localizacoes: Arc::new(AtomicUsize::new(0)),
+            sinal: Arc::new(Mutex::new(false)),
+            resultados_escrita: Mutex::new(Vec::new()),
+            escritas: Arc::clone(&escritas),
+            jogadores: Arc::new(Mutex::new(Ok(pool_de_teste()))),
+            buscas: Arc::new(AtomicUsize::new(0)),
+            liberar_busca: Arc::new(AtomicBool::new(true)),
+        };
+        let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
+        estado.mutar(move |d| { d.olheiros = olheiros; d.escolhidos = escolhidos; }).expect("gravou");
+        (ScoutState::com_fonte(Box::new(fonte), Some(pasta.0.clone())), escritas)
+    }
+
+    #[test]
+    fn a_deep_dive_needs_a_designated_generalist_costs_money_jumps_the_queue_and_ends_exact_sooner() {
+        let pasta = PastaTemporaria::nova();
+        let g = olheiro(Especializacao::Generalista, Tier::Junior); // 2,5★: 5 vagas, 40% do prazo
+        let lista = (1..=6).map(|i| escolhido_de_teste(i, 20260601 + i as i32)).collect::<Vec<_>>();
+        let (mut st, escritas) = estado_para_aprofundar(&pasta, 20260712, 63_999_988, vec![g.clone()], lista);
+        st.ao_abrir_painel();
+
+        // sem Generalista designado, ninguém atende o pedido
+        assert!(!st.pode_aprofundar(6));
+        st.pedir_aprofundamento(6);
+        assert!(st.aprofundamento_pendente().is_none(), "sem aviso");
+
+        assert!(st.designar_acompanhamento(g.id, true));
+        ticks_ate_acompanhar(&mut st);
+        assert!(!st.escolhidos().iter().find(|e| e.escolhido.jogador.player_id == 6).expect("6").acompanhado, "o mais novo fica sem vaga");
+
+        // o aviso mostra prazo mais curto que o normal e o custo da tabela
+        assert!(!st.pode_aprofundar(99), "fora da lista");
+        st.pedir_aprofundamento(6);
+        let previa = st.aprofundamento_pendente().expect("aviso aberto");
+        assert_eq!((previa.player_id, previa.percentual), (6, 40));
+        assert!(previa.dias < previa.dias_normal, "{previa:?}");
+        assert_eq!(previa.custo, quality::custo_aprofundamento(previa.precisao, previa.faltam));
+        assert_eq!(previa.orcamento, Some(63_999_988));
+
+        // cancelar não cobra
+        st.cancelar_aprofundamento();
+        assert!(st.aprofundamento_pendente().is_none() && escritas_de(&escritas).is_empty());
+
+        // confirmar debita e grava o pedido
+        st.pedir_aprofundamento(6);
+        assert!(st.confirmar_aprofundamento());
+        assert_eq!(escritas_de(&escritas), [(63_999_988, 63_999_988 - previa.custo)]);
+        assert!(st.aprofundamento_pendente().is_none(), "o aviso fecha");
+        ticks_ate_acompanhar(&mut st);
+        let lista = st.escolhidos();
+        assert_eq!(lista[0].escolhido.jogador.player_id, 6, "passa à frente da fila");
+        assert!(lista[0].acompanhado && lista[0].escolhido.aprofundando_ativo());
+        let a = lista[0].escolhido.acompanhamento.expect("acompanhamento começou");
+        assert_eq!(a.dias_para_exato, previa.dias, "o prazo curto vale no acompanhamento");
+        assert_eq!(lista.iter().filter(|e| e.acompanhado).count(), 5, "ocupa uma das 5 vagas");
+        assert!(!st.pode_aprofundar(6), "já está sendo aprofundado");
+        let sem_vaga = lista.iter().find(|e| !e.acompanhado).expect("alguém perdeu a vaga");
+        assert_ne!(sem_vaga.escolhido.jogador.player_id, 6);
+
+        // no fim do prazo curto ele está exato; o normal ainda levaria mais dias
+        let fim = Date(20260712).mais_dias(previa.dias);
+        st.data_progresso = Some(fim);
+        st.atualizar_escolhidos(fim);
+        ticks_ate_acompanhar(&mut st);
+        let exato = st.escolhidos().into_iter().find(|e| e.escolhido.jogador.player_id == 6).expect("6");
+        assert_eq!(exato.precisao, 0);
+        assert_eq!(exato.jogador.atributos.len(), 28);
+        assert!(!exato.escolhido.aprofundando_ativo(), "terminou: sem selo e sem prioridade na fila");
+        assert!(!st.pode_aprofundar(6), "já é exato");
+    }
+
+    #[test]
+    fn a_deep_dive_without_enough_money_charges_nothing_and_keeps_the_notice_open() {
+        let pasta = PastaTemporaria::nova();
+        let g = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, escritas) =
+            estado_para_aprofundar(&pasta, 20260712, 20_000, vec![g.clone()], vec![escolhido_de_teste(1, 20260601)]);
+        st.ao_abrir_painel();
+        assert!(st.designar_acompanhamento(g.id, true));
+        st.pedir_aprofundamento(1);
+        assert!(st.aprofundamento_pendente().is_some());
+        assert!(!st.confirmar_aprofundamento());
+        assert!(escritas_de(&escritas).is_empty(), "nada debitado");
+        let previa = st.aprofundamento_pendente().expect("o aviso continua aberto");
+        assert!(matches!(previa.erro, Some(ErroCompra::OrcamentoInsuficiente { faltam }) if faltam > 0), "{previa:?}");
+        assert!(st.escolhidos()[0].escolhido.aprofundando.is_none());
+    }
+
+    #[test]
+    fn dismissing_the_generalist_ends_the_deep_dive_and_loading_an_older_save_undoes_it() {
+        let pasta = PastaTemporaria::nova();
+        let g = olheiro(Especializacao::Generalista, Tier::Elite);
+        let mut e = escolhido_de_teste(2, 20260601);
+        e.aprofundando = Some(Aprofundamento { desde: Date(20260720), percentual: 20 });
+        e.acompanhamento = Some(Acompanhamento { inicio: Date(20260720), precisao_inicial: 10, atributos_iniciais: 6, dias_para_exato: 4, dias: 2 });
+        let (mut st, _) = estado_para_aprofundar(&pasta, 20260712, 63_999_988, vec![g.clone()], vec![e]);
+        st.ao_abrir_painel();
+
+        // o save carregado é de 03/07 e o pedido é de 20/07: abrir o painel já o desfaz
+        let depois = st.estado_ativo().map(|s| s.ler(|d| d.escolhidos[0].clone())).expect("estado");
+        assert!(depois.aprofundando.is_none() && depois.acompanhamento.is_none());
+
+        // sem Generalista designado (ninguém acompanhando), um pedido solto é limpo
+        let estado = st.estado_ativo().cloned().expect("estado");
+        estado.mutar(|d| d.escolhidos[0].aprofundando = Some(Aprofundamento { desde: Date(20260701), percentual: 20 })).expect("gravou");
+        st.atualizar_escolhidos(Date(20260712));
+        let solto = st.estado_ativo().map(|s| s.ler(|d| d.escolhidos[0].clone())).expect("estado");
+        assert!(solto.aprofundando.is_none(), "sem vaga não há aprofundamento");
+    }
+
+    #[test]
+    fn the_first_step_of_a_deep_dive_uses_the_short_deadline_and_a_normal_one_does_not() {
+        let hoje = Date(20260712);
+        let normal = escolhido_de_teste(3, 20260712);
+        let curto = Escolhido { aprofundando: Some(Aprofundamento { desde: hoje, percentual: 40 }), ..normal.clone() };
+        let a_normal = avancar_escolhido(&normal, &pool_de_teste(), hoje).acompanhamento.expect("começou");
+        let a_curto = avancar_escolhido(&curto, &pool_de_teste(), hoje).acompanhamento.expect("começou");
+        assert_eq!(a_curto.dias_para_exato, quality::dias_para_aprofundar(a_normal.dias_para_exato, 40));
+        assert!(a_curto.dias_para_exato < a_normal.dias_para_exato);
+        assert!(!normal.aprofundando_ativo() && curto.aprofundando_ativo());
+        assert!(curto.aprofundando_ativo(), "com precisão ±10 e 6 atributos ainda falta revelar");
     }
 
     #[test]
