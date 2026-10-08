@@ -18,7 +18,7 @@
 //! Cada card é UM item navegável (Story 1.6). Os dados vêm de
 //! `scout::state` (AD-1); custos e estrelas, de `scout::quality`.
 
-use imgui::{DrawListMut, SelectableFlags, StyleColor, TableColumnFlags, TableColumnSetup, TableFlags, TableRowFlags, Ui};
+use imgui::{DrawListMut, SelectableFlags, StyleColor, TableColumnFlags, TableColumnSetup, TableFlags, TableRowFlags, Ui, WindowFlags};
 use uuid::Uuid;
 
 use super::componentes::{self, badge_tier, desenhar_badge, rotulo_com_estrelas, EstiloBotao};
@@ -260,7 +260,7 @@ pub fn tem_mercado_em(olheiro: &Olheiro, continente: Confederacao) -> bool {
 pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     let densidade = state.densidade_olheiros();
     let atual = usize::from(densidade == Densidade::Tabular);
-    match componentes::alternador(ui, fonts, &["Cards", "Tabular"], atual, LARGURA_ALTERNADOR) {
+    match componentes::alternador_por_clique(ui, fonts, &["Cards", "Tabular"], atual, LARGURA_ALTERNADOR) {
         Some(0) => state.definir_densidade_olheiros(Densidade::Cards),
         Some(_) => state.definir_densidade_olheiros(Densidade::Tabular),
         None => {}
@@ -269,7 +269,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     com_fonte(ui, fonts.map(|f| f.meta), || {
         let y = ui.cursor_pos()[1];
         ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
-        ui.text_colored(theme::TEXT_SECONDARY, "Y (ou botão direito) abre as opções do Olheiro: pesquisa, perfil, demissão.");
+        ui.text_colored(theme::TEXT_SECONDARY, "Y (ou botão direito) abre as opções do Olheiro: pesquisa, perfil, demissão. ←/→ passam de um Olheiro para o outro.");
     });
     ui.dummy([0.0, theme::ESPACO_2]);
     let contratados = state.olheiros_contratados();
@@ -315,8 +315,10 @@ pub fn texto_situacao(c: &OlheiroContratado, regiao: &str) -> Vec<String> {
     vec!["Livre: A encomenda uma Missão".to_string(), texto_relatorios(c.relatorios)]
 }
 
-/// Os Olheiros em grade, mais "Contratar Olheiro" no fim. Y no card em
-/// foco (ou o botão direito) pede as Opções dele.
+/// O carrossel de Olheiros (2026-10-08): uma fila de cards que ocupa a tela,
+/// do tamanho da área, com "Contratar Olheiro" como o primeiro e os
+/// contratados depois. ←/→ (ou a barra de rolagem) passam de um para o
+/// outro; Y no card em foco (ou o botão direito) pede as Opções dele.
 fn cards(
     ui: &Ui,
     fonts: Option<&Fonts>,
@@ -326,42 +328,58 @@ fn cards(
     pediu_opcoes: bool,
 ) -> Acao {
     let mut acao = Acao::Nenhuma;
-    let por_linha = olheiro_card::por_linha(ui.content_region_avail()[0]);
-    let total = contratados.len() + 1;
-    for indice in 0..total {
-        if indice % por_linha != 0 {
-            ui.same_line_with_spacing(0.0, theme::ESPACO_3);
-        }
-        let resultado = match contratados.get(indice) {
-            Some(c) => {
-                let regiao = regioes.get(&c.olheiro.id).map_or("", String::as_str);
-                let rodape = Rodape::Situacao { status: texto_status(c), cor: cor_status(c), linhas: texto_situacao(c, regiao) };
-                let r = olheiro_card::desenhar(ui, fonts, &c.olheiro.id.to_string(), &c.olheiro, nacoes, &rodape);
-                if r.ativou {
-                    acao = Acao::Ativar(c.olheiro.id);
-                }
-                if r.opcoes || (r.focado && pediu_opcoes) {
-                    acao = Acao::Opcoes(c.olheiro.id);
-                }
-                r
+    let [largura_area, altura_area] = ui.content_region_avail();
+    let dim = dimensao_do_carrossel(largura_area, altura_area);
+    ui.child_window("##carrossel_olheiros")
+        .size([0.0, altura_area])
+        .border(false)
+        .flags(super::flags_conteudo() | WindowFlags::HORIZONTAL_SCROLLBAR)
+        .build(|| {
+            // a roda do mouse anda para os lados
+            let roda = ui.io().mouse_wheel;
+            if roda != 0.0 && ui.is_window_hovered() {
+                ui.set_scroll_x(ui.scroll_x() - roda * (dim.largura * 0.5));
             }
-            None => {
-                let r = olheiro_card::desenhar_novo(ui, fonts, "contratar", ROTULO_CONTRATAR, DETALHE_CONTRATAR);
-                if r.ativou {
-                    acao = Acao::AbrirContratacao;
+            let total = contratados.len() + 1;
+            for indice in 0..total {
+                if indice > 0 {
+                    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
                 }
-                r
+                let resultado = if indice == 0 {
+                    let r = olheiro_card::desenhar_novo(ui, fonts, "contratar", dim, ROTULO_CONTRATAR, DETALHE_CONTRATAR);
+                    if r.ativou {
+                        acao = Acao::AbrirContratacao;
+                    }
+                    r
+                } else {
+                    let c = &contratados[indice - 1];
+                    let regiao = regioes.get(&c.olheiro.id).map_or("", String::as_str);
+                    let rodape = Rodape::Situacao { status: texto_status(c), cor: cor_status(c), linhas: texto_situacao(c, regiao) };
+                    let r = olheiro_card::desenhar(ui, fonts, &c.olheiro.id.to_string(), dim, &c.olheiro, nacoes, &rodape);
+                    if r.ativou {
+                        acao = Acao::Ativar(c.olheiro.id);
+                    }
+                    if r.opcoes || (r.focado && pediu_opcoes) {
+                        acao = Acao::Opcoes(c.olheiro.id);
+                    }
+                    r
+                };
+                // o primeiro em foco: volta ao começo da fila
+                if resultado.focado && indice == 0 && ui.scroll_x() > 0.0 {
+                    ui.set_scroll_x(0.0);
+                }
             }
-        };
-        // o primeiro card em foco: rola até o topo (o alternador não é card)
-        if resultado.focado && indice == 0 && ui.scroll_y() > 0.0 {
-            ui.set_scroll_y(0.0);
-        }
-        if indice % por_linha == por_linha - 1 {
-            ui.dummy([0.0, theme::ESPACO_1]);
-        }
-    }
+        });
     acao
+}
+
+/// O tamanho dos cards do carrossel: cerca de três por tela (nunca menos que
+/// o card do mercado) e a altura da área, descontada a barra de rolagem.
+pub fn dimensao_do_carrossel(largura_area: f32, altura_area: f32) -> olheiro_card::Dimensao {
+    const POR_TELA: f32 = 3.0;
+    let largura = ((largura_area + theme::ESPACO_3) / POR_TELA - theme::ESPACO_3).max(olheiro_card::LARGURA);
+    let altura = (altura_area - 24.0).max(olheiro_card::ALTURA);
+    olheiro_card::Dimensao { largura, altura }
 }
 
 /// Verde livre, dourado em Missão, roxo acompanhando.
@@ -526,7 +544,7 @@ pub fn render_contratacao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState
             if indice % por_linha != 0 {
                 ui.same_line_with_spacing(0.0, theme::ESPACO_3);
             }
-            let r = olheiro_card::desenhar(ui, fonts, &oferta.id.to_string(), &oferta.olheiro, nacoes, &Rodape::Oferta(oferta));
+            let r = olheiro_card::desenhar(ui, fonts, &oferta.id.to_string(), olheiro_card::Dimensao::PADRAO, &oferta.olheiro, nacoes, &Rodape::Oferta(oferta));
             if r.ativou {
                 acao = AcaoContratacao::Contratar((*oferta).clone());
             }

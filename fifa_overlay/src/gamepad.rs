@@ -382,9 +382,10 @@ const LIMIAR_ANALOGICO_NAV: f32 = 0.5;
 /// - ←/→ (D-pad ou analógico) navegam SEMPRE dentro da tela: trocar de
 ///   aba é só LB/RB (`scout`);
 /// - o Y não vai para o ImGui (ali ele abre o modo de janelas): é o botão
-///   "Opções" do Scout, lido à parte (`scout::comandos_controle`).
+///   "Opções" do Scout, lido à parte (`scout::comandos_controle`);
+/// - o Select (Back) também não: ele abre as Configurações do Scout.
 pub fn para_navegacao(estado: EstadoControle) -> EstadoControle {
-    let mut botoes = estado.botoes & !botao::Y;
+    let mut botoes = estado.botoes & !(botao::Y | botao::BACK);
     let x = normalizar_eixo(estado.lx, ZONA_MORTA_ANALOGICO);
     let y = normalizar_eixo(estado.ly, ZONA_MORTA_ANALOGICO);
     if y >= LIMIAR_ANALOGICO_NAV {
@@ -435,6 +436,12 @@ mod tests {
         assert_eq!(evento(&eventos, Key::GamepadLStickUp), (true, 1.0), "Y positivo = cima");
         assert_eq!(evento(&eventos, Key::GamepadR2), (true, 1.0));
         assert_eq!(evento(&eventos, Key::GamepadL2), (false, 0.0));
+    }
+
+    #[test]
+    fn select_never_reaches_imgui_as_a_cancel() {
+        let estado = EstadoControle { botoes: botao::BACK | botao::Y | botao::A, ..Default::default() };
+        assert_eq!(para_navegacao(estado).botoes, botao::A, "Select e Y são do Scout; A segue para o ImGui");
     }
 
     #[test]

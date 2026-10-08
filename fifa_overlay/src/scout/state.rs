@@ -1049,15 +1049,6 @@ pub struct Ocorrencia {
 }
 
 impl Ocorrencia {
-    /// "Rodrigo Pires · Missão Jovens · França": com o onde.
-    pub fn origem_completa(&self) -> String {
-        if self.regiao.is_empty() {
-            self.origem()
-        } else {
-            format!("{} · {}", self.origem(), self.regiao)
-        }
-    }
-
     /// Identidade na tela: o mesmo jogador em dois Relatórios são dois itens.
     pub fn chave(&self) -> u64 {
         (u64::from(self.jogador.player_id) << 32) | (self.relatorio_id.as_u128() as u32 as u64)
@@ -1114,14 +1105,12 @@ pub fn nome_do_tipo(tipo: quality::TipoMissao) -> &'static str {
     }
 }
 
-/// O que a Base e os Relatórios por jogador guardam entre frames: só refaz
-/// quando os dados gravados ou a data da carreira mudam.
+/// O que a Base guarda entre frames: só refaz quando os dados gravados ou a
+/// data da carreira mudam.
 #[derive(Debug, Clone, Default)]
 struct CacheDeJogadores {
     /// (geração dos dados gravados, data da carreira, ligas lidas).
     chave: Option<(u64, Option<Date>, usize)>,
-    ativas: Arc<Vec<Ocorrencia>>,
-    arquivadas: Arc<Vec<Ocorrencia>>,
     base: Arc<Vec<JogadorDaBase>>,
 }
 
@@ -2053,6 +2042,8 @@ pub struct ScoutState {
     painel_de_filtros: Option<ListaId>,
     /// A janela de Opções (Y) de um Olheiro, e em que passo está.
     opcoes_do_olheiro: Option<(Uuid, PassoOpcoes)>,
+    /// A janela de Configurações (Select) aberta.
+    configuracoes: bool,
     /// A Base do Scout e os Relatórios por jogador, já montados.
     cache_jogadores: std::sync::Mutex<CacheDeJogadores>,
     /// Filtro de continente da tela "Contratar Olheiro" (`None` = todos).
@@ -2156,6 +2147,7 @@ impl ScoutState {
             prefs_listas: HashMap::new(),
             painel_de_filtros: None,
             opcoes_do_olheiro: None,
+            configuracoes: false,
             cache_jogadores: std::sync::Mutex::new(CacheDeJogadores::default()),
             filtro_continente: None,
             rolagem: 0.0,
@@ -2237,6 +2229,7 @@ impl ScoutState {
         self.demissao_pendente = None;
         self.painel_de_filtros = None;
         self.opcoes_do_olheiro = None;
+        self.configuracoes = false;
     }
 
     // -----------------------------------------------------------------
@@ -3817,7 +3810,6 @@ impl ScoutState {
         let padrao = UiPrefs::default();
         let escolher = |p: &UiPrefs| match id {
             ListaId::Escolhidos => p.modo_escolhidos,
-            ListaId::Relatorios => p.modo_relatorios,
             ListaId::Base => p.modo_base,
             ListaId::RelatorioAberto => p.modo_relatorio_aberto,
         };
@@ -3833,7 +3825,6 @@ impl ScoutState {
         }
         if let Err(err) = estado.mutar(|d| match id {
             ListaId::Escolhidos => d.ui_prefs.modo_escolhidos = modo,
-            ListaId::Relatorios => d.ui_prefs.modo_relatorios = modo,
             ListaId::Base => d.ui_prefs.modo_base = modo,
             ListaId::RelatorioAberto => d.ui_prefs.modo_relatorio_aberto = modo,
         }) {
@@ -3841,9 +3832,9 @@ impl ScoutState {
         }
     }
 
-    /// A visão da aba Relatórios: por jogador (padrão) ou por Relatório.
+    /// A visão da aba Relatórios: por Relatório (padrão) ou por Olheiro.
     pub fn visao_dos_relatorios(&self) -> VisaoRelatorios {
-        self.estado_ativo().map_or(VisaoRelatorios::PorJogador, |e| e.ler(|d| d.ui_prefs.visao_relatorios))
+        self.estado_ativo().map_or(VisaoRelatorios::PorRelatorio, |e| e.ler(|d| d.ui_prefs.visao_relatorios))
     }
 
     pub fn definir_visao_dos_relatorios(&mut self, visao: VisaoRelatorios) {
@@ -3899,6 +3890,22 @@ impl ScoutState {
     // Opções do Olheiro (Y): cancelar a pesquisa, ajustar o perfil, mudar de
     // região, demitir (2026-10-08)
     // -----------------------------------------------------------------
+
+    // -----------------------------------------------------------------
+    // Configurações (Select): sincronizar com o FIFA e a visão de cada aba
+    // -----------------------------------------------------------------
+
+    pub fn abrir_configuracoes(&mut self) {
+        self.configuracoes = true;
+    }
+
+    pub fn fechar_configuracoes(&mut self) {
+        self.configuracoes = false;
+    }
+
+    pub fn configuracoes_abertas(&self) -> bool {
+        self.configuracoes
+    }
 
     pub fn abrir_opcoes_do_olheiro(&mut self, id: Uuid) {
         if self.olheiros_contratados().iter().any(|c| c.olheiro.id == id) {
@@ -4786,9 +4793,8 @@ impl ScoutState {
             .collect()
     }
 
-    /// Os jogadores da lista de Relatórios (um por jogador de cada
-    /// Relatório) e a Base do Scout, refeitos só quando os dados gravados,
-    /// a data ou as ligas mudam.
+    /// A Base do Scout, refeita só quando os dados gravados, a data ou as
+    /// ligas mudam.
     fn jogadores_dos_relatorios(&self, ligas: Arc<Vec<Liga>>) -> CacheDeJogadores {
         let Some(estado) = self.estado_ativo() else {
             return CacheDeJogadores::default();
@@ -4828,19 +4834,8 @@ impl ScoutState {
             (ativas, arquivadas)
         });
         let base = montar_base(ativas.iter().chain(arquivadas.iter()));
-        *guarda = CacheDeJogadores { chave: Some(chave), ativas: Arc::new(ativas), arquivadas: Arc::new(arquivadas), base: Arc::new(base) };
+        *guarda = CacheDeJogadores { chave: Some(chave), base: Arc::new(base) };
         guarda.clone()
-    }
-
-    /// Um registro por jogador de cada Relatório (os já revelados), dos mais
-    /// novos aos mais antigos; `arquivados` escolhe a lista.
-    pub fn ocorrencias(&self, arquivados: bool) -> Arc<Vec<Ocorrencia>> {
-        let cache = self.jogadores_dos_relatorios(self.ligas_carregadas());
-        if arquivados {
-            cache.arquivadas
-        } else {
-            cache.ativas
-        }
     }
 
     /// A Base do Scout: todo jogador que algum Olheiro já encontrou (nos
@@ -6184,10 +6179,7 @@ mod tests {
         assert_eq!(craque.origem(), "Rodrigo · Missão Tática +1");
         let outro = base.iter().find(|b| b.melhor.jogador.player_id == 8).expect("outro");
         assert_eq!((outro.vistos.len(), outro.origem()), (1, "Rodrigo · Missão Jovens".to_string()));
-        // a lista de Relatórios: um registro por jogador de cada Relatório
-        assert_eq!(st.ocorrencias(false).len(), 2, "os ativos: os dois do 1º Relatório");
-        assert_eq!(st.ocorrencias(true).len(), 1, "o arquivado: um");
-        assert_eq!(st.ocorrencias(false)[0].regiao, "o mundo todo");
+        assert_eq!(outro.melhor.regiao, "o mundo todo");
     }
 
     #[test]
@@ -6238,11 +6230,11 @@ mod tests {
         });
         st.definir_ordenacao_da_lista(ListaId::Escolhidos, Ordenacao { coluna: Coluna::Valor, decrescente: true });
         // cada lista com a sua
-        assert_eq!(st.modo_da_lista(ListaId::Relatorios), Densidade::Cards);
-        assert_eq!(st.filtros_da_lista(ListaId::Relatorios).grupo, GrupoPosicao::Todos);
+        assert_eq!(st.modo_da_lista(ListaId::RelatorioAberto), Densidade::Cards);
+        assert_eq!(st.filtros_da_lista(ListaId::Base).grupo, GrupoPosicao::Todos);
         assert_eq!(st.filtros_da_lista(ListaId::Escolhidos).grupo, GrupoPosicao::Meias);
         assert_eq!(st.filtros_da_lista(ListaId::Escolhidos).ativos(), 1);
-        assert_eq!(st.ordenacao_da_lista(ListaId::Relatorios), Ordenacao::default());
+        assert_eq!(st.ordenacao_da_lista(ListaId::Base), Ordenacao::default());
         // a visão vai para o arquivo da carreira; os filtros, não
         let (mut de_novo, _b, _) = estado_com_datas(&pasta, &[20260801], vec![], &o);
         de_novo.ao_abrir_painel();

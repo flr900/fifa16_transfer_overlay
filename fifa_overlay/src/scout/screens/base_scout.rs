@@ -10,14 +10,17 @@
 //! outras listas (`lista_jogadores`); ativar um jogador abre a Ficha dele no
 //! Relatório do melhor registro.
 
+use std::collections::HashMap;
+
 use imgui::Ui;
 use uuid::Uuid;
 
-use super::relatorios;
+use super::lista_jogadores;
+use super::relatorio::{self, PerfilPedido};
 use super::theme::{self, Fonts};
 use super::com_fonte;
-use crate::scout::lista::ListaId;
-use crate::scout::state::{Ocorrencia, ScoutState};
+use crate::scout::lista::{ItemLista, ListaId};
+use crate::scout::state::{Densidade, Ocorrencia, ScoutState};
 
 pub const MSG_VAZIA: &str =
     "A Base do Scout está vazia. Cada jogador que um Olheiro encontrar numa Missão entra aqui, mesmo depois de arquivar o Relatório.";
@@ -47,7 +50,43 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Option<
     });
     ui.dummy([0.0, theme::ESPACO_2]);
     let registros: Vec<(&Ocorrencia, String)> = base.iter().map(|b| (&b.melhor, b.origem())).collect();
-    relatorios::ocorrencias_na_tela(ui, fonts, state, ListaId::Base, &registros)
+    ocorrencias_na_tela(ui, fonts, state, ListaId::Base, &registros)
+}
+
+/// Uma lista de jogadores com a origem de cada um: barra, filtros, e os cards
+/// em grade ou a tabela. Devolve `(Relatório, jogador)` do registro ativado.
+pub(super) fn ocorrencias_na_tela(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    state: &mut ScoutState,
+    id: ListaId,
+    registros: &[(&Ocorrencia, String)],
+) -> Option<(Uuid, u32)> {
+    let por_chave: HashMap<u64, (&Ocorrencia, &str)> = registros.iter().map(|(o, origem)| (o.chave(), (*o, origem.as_str()))).collect();
+    let itens: Vec<ItemLista<'_>> =
+        registros.iter().map(|(o, origem)| ItemLista::novo(&o.jogador, origem.clone()).com_chave(o.chave())).collect();
+    lista_jogadores::barra(ui, fonts, state, id, &itens, |_, _| false);
+    let visiveis = lista_jogadores::preparar(state, id, itens);
+    if visiveis.is_empty() {
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, lista_jogadores::MSG_NENHUM_NO_FILTRO));
+        return None;
+    }
+    let ativado = if state.modo_da_lista(id) == Densidade::Tabular {
+        lista_jogadores::tabela(ui, fonts, state, id, &visiveis)
+    } else {
+        let hoje = state.data_da_carreira();
+        let estado: &ScoutState = state;
+        lista_jogadores::grade(ui, relatorio::LARGURA_CARD, &visiveis, |item| {
+            let Some((o, origem)) = por_chave.get(&item.chave) else {
+                return false;
+            };
+            let perfil = PerfilPedido { alvo: o.fit_alvo, referencia: o.referencia.clone(), aproximado: relatorio::aproximado(o.qualidade) };
+            relatorio::card_jogador(ui, fonts, estado, &format!("{id:?}_{}", item.chave), &o.jogador, &perfil, hoje, Some(origem))
+        })
+    };
+    let item = ativado.and_then(|i| visiveis.get(i))?;
+    let (o, _) = por_chave.get(&item.chave)?;
+    Some((o.relatorio_id, o.jogador.player_id))
 }
 
 #[cfg(test)]

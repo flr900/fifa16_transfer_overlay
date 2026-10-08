@@ -1,15 +1,18 @@
 //! O que as telas de jogadores têm em comum (2026-10-08, pedido do Felipe):
 //! Escolhidos, Relatórios (por jogador), Base do Scout e o Relatório aberto.
 //!
-//! - **Barra** acima da lista: visão Cards / Tabular, "Filtros · Y", a
-//!   ordem (coluna e sentido) e a linha de posição — Todos, Detalhados, Gol,
-//!   Zag, Mei, Ata — com quantos jogadores há em cada (escolha única: foco =
-//!   escolha, como nos outros grupos).
+//! - **Barra** acima da lista: na primeira linha, o que a tela quiser (por
+//!   exemplo "Por Relatório / Por Olheiro"), a visão Cards / Tabular e
+//!   "Filtros · Y"; na segunda, a linha de posição — Todos, Detalhados, Gol,
+//!   Zag, Mei, Ata — com quantos jogadores há em cada. Aqui o foco NÃO
+//!   escolhe: Cards/Tabular, posição e filtros só mudam com o clique (ou o A
+//!   em cima do botão). A ordem sai do cabeçalho da Tabular e, nos Cards, do
+//!   painel de filtros (Y).
 //! - **Visão Tabular**: uma linha por jogador com o que decide uma
 //!   contratação — time, país, valor, salário, contrato —, além de nome,
 //!   idade, altura, posição, Overall e Potencial. O cabeçalho de cada coluna
-//!   é um item de foco: com o controle, A ordena por ela (e A de novo
-//!   inverte); com o mouse, clicar faz o mesmo.
+//!   é um item de foco: com o controle, A em cima dele ordena por ela (e A de
+//!   novo inverte); com o mouse, clicar faz o mesmo. Só o A/clique ordena.
 //! - **Painel de filtros (Y)**: Overall, Potencial, idade, pé, ritmos e
 //!   posições, numa janela por cima da tela; B fecha.
 //!
@@ -43,7 +46,6 @@ pub const MSG_NENHUM_NO_FILTRO: &str = "Nenhum jogador passa nos filtros. Aperte
 pub fn nome_da_lista(id: ListaId) -> &'static str {
     match id {
         ListaId::Escolhidos => "Escolhidos",
-        ListaId::Relatorios => "Relatórios",
         ListaId::Base => "Base do Scout",
         ListaId::RelatorioAberto => "Relatório",
     }
@@ -91,21 +93,33 @@ pub fn valor_do_jogador(state: &ScoutState, j: &JogadorEncontrado) -> i64 {
 
 /// Desenha a barra acima da lista. `itens` são TODOS os jogadores da lista
 /// (os números dos botões de posição saem deles, com os filtros do painel
-/// valendo). O Y abre o painel de filtros desta lista.
-pub fn barra(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaId, itens: &[ItemLista<'_>]) {
+/// valendo). O Y abre o painel de filtros desta lista. `antes` desenha, no
+/// começo da primeira linha, o que a tela tiver (devolve `true` se desenhou
+/// algo).
+pub fn barra(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    state: &mut ScoutState,
+    id: ListaId,
+    itens: &[ItemLista<'_>],
+    antes: impl FnOnce(&Ui, &mut ScoutState) -> bool,
+) {
     if state.opcoes_pedidas() {
         state.abrir_painel_de_filtros(id);
     }
     let _id = ui.push_id(format!("lista_{id:?}"));
+    if antes(ui, state) {
+        ui.same_line_with_spacing(0.0, theme::ESPACO_5);
+    }
     let modo = state.modo_da_lista(id);
-    match componentes::alternador(ui, fonts, &["Cards", "Tabular"], usize::from(modo == Densidade::Tabular), LARGURA_MODO) {
+    match componentes::alternador_por_clique(ui, fonts, &["Cards", "Tabular"], usize::from(modo == Densidade::Tabular), LARGURA_MODO) {
         Some(0) => state.definir_modo_da_lista(id, Densidade::Cards),
         Some(_) => state.definir_modo_da_lista(id, Densidade::Tabular),
         None => {}
     }
 
     let filtros = state.filtros_da_lista(id);
-    ui.same_line_with_spacing(0.0, theme::ESPACO_4);
+    ui.same_line_with_spacing(0.0, theme::ESPACO_5);
     let ativos = filtros.ativos();
     let rotulo = if ativos > 0 { format!("Filtros ({ativos})  ·  Y##filtros") } else { "Filtros  ·  Y##filtros".to_string() };
     let estilo = if ativos > 0 { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
@@ -113,23 +127,7 @@ pub fn barra(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaId
         state.abrir_painel_de_filtros(id);
     }
 
-    // a ordem: a coluna (A passa para a próxima) e o sentido
-    let ordenacao = state.ordenacao_da_lista(id);
-    ui.same_line_with_spacing(0.0, theme::ESPACO_4);
-    let rotulo = format!("Ordem: {}##ordem", titulo_da_coluna(id, ordenacao.coluna));
-    if componentes::botao(ui, fonts, &rotulo, EstiloBotao::Secundario, true) {
-        state.definir_ordenacao_da_lista(id, Ordenacao { coluna: proxima_coluna(id, ordenacao.coluna), ..ordenacao });
-    }
-    ui.same_line_with_spacing(0.0, theme::ESPACO_2);
-    let sentido = if ordenacao.decrescente { "Maior primeiro" } else { "Menor primeiro" };
-    if componentes::botao(ui, fonts, &format!("{sentido}##sentido"), EstiloBotao::Secundario, true) {
-        state.definir_ordenacao_da_lista(id, Ordenacao { decrescente: !ordenacao.decrescente, ..ordenacao });
-    }
-    if ui.is_item_hovered() {
-        ui.tooltip_text("Inverte a ordem. Na visão Tabular, A no cabeçalho de uma coluna ordena por ela.");
-    }
-
-    // a posição: escolha única, foco = escolha
+    // a posição: escolha única, mas só o clique (ou o A) escolhe
     ui.dummy([0.0, theme::ESPACO_1]);
     let contagens = lista::contagem_por_grupo(itens, &filtros);
     for (indice, (grupo, quantos)) in contagens.into_iter().enumerate() {
@@ -141,7 +139,7 @@ pub fn barra(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaId
         // o id é só a sigla: a contagem muda sem o foco se perder
         let rotulo = format!("{} · {quantos}##grupo_{}", grupo.sigla(), grupo.sigla());
         let clicou = componentes::botao_com_largura(ui, fonts, &rotulo, estilo, true, Some(LARGURA_GRUPO));
-        if (clicou || componentes::focado_pelo_controle(ui)) && !atual {
+        if clicou && !atual {
             state.mutar_filtros_da_lista(id, |f| f.grupo = grupo);
         }
         if ui.is_item_hovered() {
@@ -406,6 +404,7 @@ pub fn painel_de_filtros(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState,
             });
             ui.dummy([0.0, theme::ESPACO_2]);
 
+            linha_ordem(ui, fonts, state, id);
             linha_de_faixa(ui, fonts, "Overall", &mut novos.overall, lista::OVERALL);
             linha_de_faixa(ui, fonts, "Potencial", &mut novos.potencial, lista::POTENCIAL);
             linha_de_faixa(ui, fonts, "Idade", &mut novos.idade, lista::IDADE);
@@ -440,6 +439,28 @@ pub fn painel_de_filtros(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState,
         state.mutar_filtros_da_lista(id, |f| *f = novos);
     }
     acao
+}
+
+/// A ordem da lista: a coluna (cada A passa para a próxima) e o sentido. Na
+/// visão Tabular a ordem também sai do cabeçalho das colunas.
+fn linha_ordem(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaId) {
+    let _id = ui.push_id("ordem");
+    let ordenacao = state.ordenacao_da_lista(id);
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Ordem");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let coluna = format!("{}##coluna", titulo_da_coluna(id, ordenacao.coluna));
+    if componentes::botao_com_largura(ui, fonts, &coluna, EstiloBotao::Secundario, true, Some(LARGURA_PERFIL)) {
+        state.definir_ordenacao_da_lista(id, Ordenacao { coluna: proxima_coluna(id, ordenacao.coluna), ..ordenacao });
+    }
+    if ui.is_item_hovered() {
+        ui.tooltip_text("A passa para a próxima coluna. Na visão Tabular, A no cabeçalho ordena direto.");
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+    let sentido = if ordenacao.decrescente { "Maior primeiro" } else { "Menor primeiro" };
+    if componentes::botao_com_largura(ui, fonts, &format!("{sentido}##sentido"), EstiloBotao::Secundario, true, Some(LARGURA_PERFIL)) {
+        state.definir_ordenacao_da_lista(id, Ordenacao { decrescente: !ordenacao.decrescente, ..ordenacao });
+    }
 }
 
 fn rotulo(ui: &Ui, fonts: Option<&Fonts>, texto: &str) {
@@ -494,7 +515,7 @@ fn stepper(ui: &Ui, fonts: Option<&Fonts>, id: &str, valor: u8, (menor, maior): 
     delta
 }
 
-/// Pé: Qualquer / Direito / Esquerdo (escolha única: foco = escolha).
+/// Pé: Qualquer / Direito / Esquerdo (escolha única; só o clique escolhe).
 fn linha_pe(ui: &Ui, fonts: Option<&Fonts>, filtros: &mut FiltrosLista) {
     let _id = ui.push_id("pe");
     let inicio = ui.cursor_pos();
@@ -507,8 +528,7 @@ fn linha_pe(ui: &Ui, fonts: Option<&Fonts>, filtros: &mut FiltrosLista) {
         }
         let atual = filtros.pe == opcao;
         let estilo = if atual { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
-        let clicou = componentes::botao_com_largura(ui, fonts, nome, estilo, true, Some(LARGURA_OPCAO));
-        if (clicou || componentes::focado_pelo_controle(ui)) && !atual {
+        if componentes::botao_com_largura(ui, fonts, nome, estilo, true, Some(LARGURA_OPCAO)) && !atual {
             filtros.pe = opcao;
         }
     }

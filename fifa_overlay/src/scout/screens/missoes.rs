@@ -203,32 +203,82 @@ pub fn texto_dica_do_contrato(m: &Missao, custo: i32) -> String {
     format!("{renovacao} Encerrar antes do fim não devolve o que foi pago.{carencia}")
 }
 
-/// O perfil que a Missão pede, numa frase: posições, nível, idade, Overall,
-/// Potencial, atributos, fit, referência, tetos de valor e salário.
-pub fn texto_perfil(m: &Missao) -> String {
+/// Uma linha do perfil que a Missão pede: o rótulo e o valor. `largo` = o
+/// valor é longo e ocupa a linha inteira do card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemPerfil {
+    pub rotulo: &'static str,
+    pub valor: String,
+    pub largo: bool,
+}
+
+/// O perfil que a Missão pede, item a item (2026-10-08): posições, nível,
+/// idade, Overall, Potencial, contrato, ritmos, dribles, pé, atributos, fit,
+/// referência e os tetos de valor e salário. Só entra o que a Missão de fato
+/// restringe.
+pub fn itens_do_perfil(m: &Missao) -> Vec<ItemPerfil> {
+    use crate::scout::quality::{CONTRATO_MAIOR, ESTRELAS_MAIOR, ESTRELAS_MENOR, IDADE_MAIOR, IDADE_MENOR};
+    use crate::scout::state::FaixaAtributo;
     let f = &m.filtros;
-    let mut partes: Vec<String> = Vec::new();
-    if !f.posicoes.is_empty() {
-        partes.push(f.posicoes.iter().map(|p| p.sigla()).collect::<Vec<_>>().join("/"));
-    }
+    let mut itens: Vec<ItemPerfil> = Vec::new();
+    let faixa = |x: FaixaAtributo, neutra: (u8, u8)| (x.min > neutra.0 || x.max < neutra.1).then(|| format!("{}–{}", x.min, x.max));
+    let ritmos = |lista: &[crate::save_repo::RitmoTrabalho]| {
+        (!lista.is_empty()).then(|| lista.iter().map(|r| r.nome().to_lowercase()).collect::<Vec<_>>().join("/"))
+    };
+    let mut curto = |rotulo: &'static str, valor: String| itens.push(ItemPerfil { rotulo, valor, largo: false });
     if let Some(nivel) = f.nivel_elenco {
-        partes.push(nivel.nome().to_lowercase());
+        curto("Nível", nivel.nome().to_lowercase());
     }
-    let detalhes = super::nova_missao::resumo_detalhes(f);
-    if detalhes != "Nenhum filtro extra." {
-        partes.push(detalhes);
+    if let Some(v) = faixa(f.idade, (IDADE_MENOR, IDADE_MAIOR)) {
+        curto("Idade", v);
+    }
+    if let Some(v) = faixa(f.overall, (50, FaixaAtributo::MAIOR)) {
+        curto("Overall", v);
+    }
+    if let Some(v) = faixa(f.potencial, (50, FaixaAtributo::MAIOR)) {
+        curto("Potencial", v);
+    }
+    if f.contrato.min > 0 || f.contrato.max < CONTRATO_MAIOR {
+        let fim = if f.contrato.max >= CONTRATO_MAIOR { format!("{}+", f.contrato.min) } else { format!("{}–{}", f.contrato.min, f.contrato.max) };
+        curto("Contrato", format!("{fim} anos"));
+    }
+    if let Some(v) = ritmos(&f.ritmo_ataque) {
+        curto("Ataque", v);
+    }
+    if let Some(v) = ritmos(&f.ritmo_defesa) {
+        curto("Defesa", v);
+    }
+    if let Some(v) = faixa(f.estrelas_drible, (ESTRELAS_MENOR, ESTRELAS_MAIOR)) {
+        curto("Dribles", format!("{v}★"));
+    }
+    if let Some(pe) = f.pe {
+        curto("Pé", pe.nome().to_lowercase());
     }
     if let Some(teto) = f.teto_valor {
-        partes.push(format!("até {}", super::relatorio::formatar_dinheiro(teto)));
+        curto("Valor", format!("até {}", super::relatorio::formatar_dinheiro(teto)));
     }
     if let Some(teto) = f.teto_salario {
-        partes.push(format!("salário até {}/sem", super::relatorio::formatar_dinheiro(teto)));
+        curto("Salário", format!("até {}/sem", super::relatorio::formatar_dinheiro(teto)));
     }
-    if partes.is_empty() {
-        "Sem filtros: qualquer jogador".to_string()
-    } else {
-        partes.join(" · ")
+    // a posição abre a lista; os longos vão para o fim, uma linha para cada
+    let mut todos: Vec<ItemPerfil> = Vec::new();
+    if !f.posicoes.is_empty() {
+        let siglas = f.posicoes.iter().map(|p| p.sigla()).collect::<Vec<_>>().join("/");
+        todos.push(ItemPerfil { rotulo: "Posição", valor: siglas, largo: true });
     }
+    todos.extend(itens);
+    if !f.atributos_dominantes.is_empty() {
+        todos.push(ItemPerfil { rotulo: "Atributos", valor: super::nova_missao::texto_atributos(&f.atributos_dominantes), largo: true });
+    }
+    if let Some(alvo) = f.fit_posicional {
+        todos.push(ItemPerfil { rotulo: "Fit", valor: alvo.nome().to_string(), largo: true });
+    } else if f.fit_nas_posicoes && !f.posicoes.is_empty() {
+        todos.push(ItemPerfil { rotulo: "Fit", valor: "também outras posições com fit".to_string(), largo: true });
+    }
+    if let Some(r) = &f.referencia {
+        todos.push(ItemPerfil { rotulo: "Como", valor: r.nome.clone(), largo: true });
+    }
+    todos
 }
 
 /// Quebra `texto` em até `max_linhas` linhas de `largura` px (por palavras),
@@ -331,10 +381,15 @@ fn card_missao(
     y += altura_nome + theme::ESPACO_2;
     y = divisor(&dl, x, direita, y);
 
-    // ---- onde procura e o perfil pedido
+    // ---- onde procura e o perfil pedido, item a item. O bloco de baixo
+    // (barra, texto e rodapé) fica encostado no fundo; o perfil usa o que
+    // sobra no meio.
+    let altura_meta = com_fonte(ui, meta, || ui.text_line_height());
+    let reserva_de_baixo = theme::ESPACO_3 * 2.0 + altura_meta * 4.0 + ALTURA_BARRA + theme::ESPACO_2 * 2.0;
+    let y_bloco = max[1] - reserva_de_baixo;
     y = rotulo_e_texto(ui, meta, &dl, [x, y], largura, "Onde", regiao, 2, &medir_meta);
-    y = rotulo_e_texto(ui, meta, &dl, [x, y], largura, "Perfil", &texto_perfil(missao), 3, &medir_meta);
-    y = divisor(&dl, x, direita, y + theme::ESPACO_1);
+    desenhar_perfil(ui, meta, &dl, [x, y], largura, y_bloco - y, &itens_do_perfil(missao), &medir_meta);
+    y = divisor(&dl, x, direita, y_bloco);
 
     // ---- andamento: barra e o texto (nunca a barra sozinha: UX-DR7)
     if let Some(fracao) = fracao_da_barra(linha) {
@@ -357,13 +412,77 @@ fn card_missao(
     }
 
     // ---- rodapé: jogadores e a dica das Opções
-    let altura_meta = com_fonte(ui, meta, || ui.text_line_height());
     let y_rodape = max[1] - theme::ESPACO_3 - altura_meta;
     let jogadores = format!("{} de {} jogadores", linha.revelados, linha.previstos);
     texto_em(ui, meta, &dl, [x, y_rodape], theme::TEXT_PRIMARY, &jogadores);
     let dica = "Y  Opções";
     texto_em(ui, meta, &dl, [direita - medir_meta(dica), y_rodape], theme::TEXT_SECONDARY, dica);
     ResultadoCard { ativou, focado, opcoes }
+}
+
+/// Largura do rótulo de cada item do perfil.
+const LARGURA_ROTULO_PERFIL: f32 = 64.0;
+
+/// Desenha os itens do perfil: os curtos em duas colunas, os longos numa
+/// linha só (até duas linhas de texto). O que não couber em `altura` vira
+/// "+ N filtros" na última linha.
+#[allow(clippy::too_many_arguments)]
+fn desenhar_perfil(
+    ui: &Ui,
+    meta: Option<imgui::FontId>,
+    dl: &imgui::DrawListMut<'_>,
+    pos: [f32; 2],
+    largura: f32,
+    altura: f32,
+    itens: &[ItemPerfil],
+    medir: &dyn Fn(&str) -> f32,
+) {
+    if itens.is_empty() {
+        texto_em(ui, meta, dl, pos, theme::TEXT_SECONDARY, "Sem filtros: qualquer jogador");
+        return;
+    }
+    let linha = com_fonte(ui, meta, || ui.text_line_height()) + theme::ESPACO_1;
+    let coluna = (largura - theme::ESPACO_3) / 2.0;
+    let limite = pos[1] + altura;
+    let mut y = pos[1];
+    let mut lado = 0usize;
+    let mut desenhados = 0usize;
+    for item in itens {
+        let partes = if item.largo { quebrar(&item.valor, largura - LARGURA_ROTULO_PERFIL, 2, medir) } else { Vec::new() };
+        let linhas_do_item = partes.len().max(1);
+        // um item largo depois de um curto sozinho começa uma linha nova
+        let extra = if item.largo && lado == 1 { linha } else { 0.0 };
+        if y + extra + linha * linhas_do_item as f32 > limite + 0.5 {
+            break;
+        }
+        if item.largo {
+            if lado == 1 {
+                y += linha;
+                lado = 0;
+            }
+            texto_em(ui, meta, dl, [pos[0], y], theme::TEXT_SECONDARY, item.rotulo);
+            for parte in partes {
+                texto_em(ui, meta, dl, [pos[0] + LARGURA_ROTULO_PERFIL, y], theme::TEXT_PRIMARY, &parte);
+                y += linha;
+            }
+        } else {
+            let x = pos[0] + (coluna + theme::ESPACO_3) * lado as f32;
+            texto_em(ui, meta, dl, [x, y], theme::TEXT_SECONDARY, item.rotulo);
+            let (valor, _) = super::relatorio::truncar(&item.valor, coluna - LARGURA_ROTULO_PERFIL, medir);
+            texto_em(ui, meta, dl, [x + LARGURA_ROTULO_PERFIL, y], theme::TEXT_PRIMARY, &valor);
+            if lado == 1 {
+                y += linha;
+            }
+            lado = 1 - lado;
+        }
+        desenhados += 1;
+    }
+    if desenhados < itens.len() {
+        let falta = itens.len() - desenhados;
+        let y = (limite - linha).max(pos[1]);
+        let aviso = format!("+ {falta} {}", if falta == 1 { "filtro" } else { "filtros" });
+        texto_em(ui, meta, dl, [pos[0] + largura - medir(&aviso), y], theme::TEXT_DISABLED, &aviso);
+    }
 }
 
 /// Linha fina entre os blocos do card; devolve o `y` de depois dela.
@@ -472,17 +591,24 @@ mod tests {
     }
 
     #[test]
-    fn the_profile_sentence_lists_what_the_missao_asks_for() {
+    fn the_profile_lists_what_the_missao_asks_for_item_by_item() {
         use crate::scout::quality::{NivelEquipe, Perfil};
         let mut m = Missao::de_teste(Uuid::new_v4(), StatusMissao::Pendente);
-        assert_eq!(texto_perfil(&m), "Sem filtros: qualquer jogador");
+        assert!(itens_do_perfil(&m).is_empty(), "sem filtros, sem itens");
         m.filtros.posicoes = vec![Perfil::MeioCampista, Perfil::Centroavante];
         m.filtros.nivel_elenco = Some(NivelEquipe::MudaPatamar);
         m.filtros.idade = crate::scout::state::FaixaAtributo { min: 18, max: 23 };
+        m.filtros.potencial = crate::scout::state::FaixaAtributo { min: 80, max: 99 };
         m.filtros.teto_valor = Some(15_000_000);
-        let texto = texto_perfil(&m);
-        assert!(texto.starts_with(&format!("{}/{}", Perfil::MeioCampista.sigla(), Perfil::Centroavante.sigla())), "{texto}");
-        assert!(texto.contains("muda patamar") && texto.contains("Idade 18–23") && texto.ends_with("até 15,0 M"), "{texto}");
+        let itens = itens_do_perfil(&m);
+        let par = |i: &ItemPerfil| (i.rotulo, i.valor.clone());
+        let posicoes = format!("{}/{}", Perfil::MeioCampista.sigla(), Perfil::Centroavante.sigla());
+        assert_eq!(par(&itens[0]), ("Posição", posicoes), "a posição abre a lista");
+        let rotulos: Vec<&str> = itens.iter().map(|i| i.rotulo).collect();
+        assert_eq!(rotulos, ["Posição", "Nível", "Idade", "Potencial", "Valor"]);
+        assert_eq!(par(&itens[2]), ("Idade", "18–23".to_string()));
+        assert_eq!(par(&itens[4]), ("Valor", "até 15,0 M".to_string()));
+        assert!(itens[0].largo && !itens[1].largo);
     }
 
     #[test]

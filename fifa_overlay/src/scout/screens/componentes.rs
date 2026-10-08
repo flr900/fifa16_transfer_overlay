@@ -264,20 +264,21 @@ pub fn focado_pelo_controle(ui: &Ui) -> bool {
 }
 
 /// Seletor de dois ou mais botões (ex.: Tabular / Cards): o escolhido em
-/// roxo. Devolve o índice clicado — ou focado pelo controle — neste frame.
-pub fn alternador(ui: &Ui, fonts: Option<&Fonts>, opcoes: &[&str], escolhida: usize, largura: f32) -> Option<usize> {
-    let mut clicada = None;
+/// roxo. Só muda com o clique (ou o A em cima do botão): passar o foco por
+/// cima não escolhe nada (2026-10-08, pedido do Felipe para as telas de
+/// lista). Devolve o índice ativado neste frame.
+pub fn alternador_por_clique(ui: &Ui, fonts: Option<&Fonts>, opcoes: &[&str], escolhida: usize, largura: f32) -> Option<usize> {
+    let mut ativada = None;
     for (indice, rotulo) in opcoes.iter().enumerate() {
         if indice > 0 {
             ui.same_line_with_spacing(0.0, theme::ESPACO_1);
         }
         let estilo = if indice == escolhida { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
-        let clicou = botao_com_largura(ui, fonts, rotulo, estilo, true, Some(largura));
-        if (clicou || focado_pelo_controle(ui)) && indice != escolhida {
-            clicada = Some(indice);
+        if botao_com_largura(ui, fonts, rotulo, estilo, true, Some(largura)) && indice != escolhida {
+            ativada = Some(indice);
         }
     }
-    clicada
+    ativada
 }
 
 // ---------------------------------------------------------------------

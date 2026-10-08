@@ -25,8 +25,6 @@ pub const ATRIBUTOS_DETALHADO: usize = 28;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ListaId {
     Escolhidos,
-    /// A aba Relatórios, na visão por jogador.
-    Relatorios,
     Base,
     /// Os jogadores de um Relatório aberto.
     RelatorioAberto,
@@ -34,7 +32,7 @@ pub enum ListaId {
 
 impl ListaId {
     #[allow(dead_code)] // usado nos testes
-    pub const TODAS: [ListaId; 4] = [ListaId::Escolhidos, ListaId::Relatorios, ListaId::Base, ListaId::RelatorioAberto];
+    pub const TODAS: [ListaId; 3] = [ListaId::Escolhidos, ListaId::Base, ListaId::RelatorioAberto];
 }
 
 /// Um jogador numa lista: o que o Olheiro revelou e o que a tela sabe dele

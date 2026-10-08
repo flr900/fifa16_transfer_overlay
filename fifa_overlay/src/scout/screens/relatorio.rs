@@ -324,7 +324,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     let hoje = state.data_da_carreira();
     // barra (visão, filtros, ordem, posição) e a lista, filtrada e ordenada
     let itens: Vec<ItemLista<'_>> = r.jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
-    lista_jogadores::barra(ui, fonts, state, ListaId::RelatorioAberto, &itens);
+    lista_jogadores::barra(ui, fonts, state, ListaId::RelatorioAberto, &itens, |_, _| false);
     let visiveis = lista_jogadores::preparar(state, ListaId::RelatorioAberto, itens);
     if visiveis.is_empty() {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, lista_jogadores::MSG_NENHUM_NO_FILTRO));

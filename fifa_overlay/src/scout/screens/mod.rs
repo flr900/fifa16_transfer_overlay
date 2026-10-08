@@ -15,6 +15,7 @@ mod escolher_olheiro;
 mod missoes;
 mod campo_atributo;
 mod escolhidos;
+mod configuracoes;
 mod lista_jogadores;
 mod olheiro_card;
 mod opcoes_olheiro;
@@ -94,7 +95,8 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     if !com_opcoes {
         state.fechar_opcoes_do_olheiro();
     }
-    let modal = confirmando || trocando.is_some() || demitindo || filtrando || com_opcoes;
+    let configurando = state.configuracoes_abertas();
+    let modal = confirmando || trocando.is_some() || demitindo || filtrando || com_opcoes || configurando;
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -243,6 +245,10 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             }
             None => {}
         }
+    }
+    if state.configuracoes_abertas() && configuracoes::render(ui, fonts, state) == configuracoes::Acao::Fechar {
+        state.fechar_configuracoes();
+        nav.pedir_foco();
     }
     if state.opcoes_do_olheiro().is_some() {
         match opcoes_olheiro::render(ui, fonts, state) {
@@ -461,6 +467,20 @@ fn botoes_das_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: 
             }
         }
     });
+    // Configurações à direita (o controle abre com o Select)
+    let rotulo = "Configurações · Select";
+    let largura = com_fonte(ui, fonts.map(|f| f.meta), || ui.calc_text_size(rotulo)[0]) + theme::ESPACO_4 * 2.0;
+    let direita = ui.cursor_start_pos()[0] + ui.content_region_avail()[0];
+    ui.same_line_with_pos(direita - largura);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let _c1 = ui.push_style_color(StyleColor::Button, theme::TRANSPARENTE);
+        let _c2 = ui.push_style_color(StyleColor::ButtonHovered, theme::ACCENT_PRIMARY_DIM);
+        let _c3 = ui.push_style_color(StyleColor::Text, theme::TEXT_SECONDARY);
+        let _raio = ui.push_style_var(StyleVar::FrameRounding(theme::RAIO_MD));
+        if ui.button_with_size(format!("{rotulo}##configuracoes"), [largura, theme::ALVO_MINIMO + theme::ESPACO_1]) {
+            state.abrir_configuracoes();
+        }
+    });
 }
 
 /// Área de conteúdo: um child window por aba, para cada aba guardar o
@@ -628,9 +648,6 @@ fn conteudo_da_tela(
             },
             Aba::Relatorios => match relatorios::render(ui, fonts, state) {
                 relatorios::Acao::AbrirRelatorio(id) => *pedido = Some(Pedido::AbrirRelatorio(id)),
-                relatorios::Acao::AbrirJogador { relatorio, player_id } => {
-                    *pedido = Some(Pedido::AbrirJogadorDoRelatorio(relatorio, player_id));
-                }
                 relatorios::Acao::Nenhuma => {}
             },
             Aba::Escolhidos => match escolhidos::render(ui, fonts, state) {

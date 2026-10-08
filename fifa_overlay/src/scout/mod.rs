@@ -55,6 +55,8 @@ pub struct ComandosControle {
     /// Y: o menu de Opções da tela (filtros, ou o que fazer com o Olheiro
     /// em foco). Cada tela decide o que ele abre (`ScoutState::opcoes_pedidas`).
     pub opcoes: bool,
+    /// Select: abre (ou fecha) as Configurações do Scout.
+    pub configuracoes: bool,
 }
 
 pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> ComandosControle {
@@ -65,6 +67,7 @@ pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> Com
         proxima_aba: borda(botao::RB),
         voltar: borda(botao::B),
         opcoes: borda(botao::Y),
+        configuracoes: borda(botao::BACK),
     }
 }
 
@@ -342,6 +345,12 @@ impl Scout {
                     self.state.definir_troca_de_aba_pendente(None);
                     self.nav.pedir_foco();
                 }
+            } else if self.state.configuracoes_abertas() {
+                // Configurações abertas: B ou Select fecham; A é dos botões
+                if comandos.voltar || comandos.configuracoes {
+                    self.state.fechar_configuracoes();
+                    self.nav.pedir_foco();
+                }
             } else if let Some((_, passo)) = self.state.opcoes_do_olheiro().map(|(c, p)| (c, p)) {
                 // janela de Opções do Olheiro aberta: B volta ao menu (na
                 // confirmação) ou fecha; A é dos botões
@@ -366,6 +375,9 @@ impl Scout {
                     self.nav.pedir_foco();
                 }
             } else {
+                if comandos.configuracoes {
+                    self.state.abrir_configuracoes();
+                }
                 if comandos.opcoes {
                     self.state.definir_opcoes(true);
                 }
@@ -475,6 +487,7 @@ pub fn trocar_aba_agora(nav: &mut Navigation, state: &mut ScoutState, aba: Aba) 
     state.definir_troca_de_aba_pendente(None);
     state.fechar_painel_de_filtros();
     state.fechar_opcoes_do_olheiro();
+    state.fechar_configuracoes();
     state.cancelar_contratacao();
     state.cancelar_nova_missao();
     state.fechar_relatorio();
@@ -859,6 +872,33 @@ mod tests {
         scout.state.definir_troca_de_aba_pendente(Some(Aba::Missoes));
         scout.aplicar_controle(controle(botao::Y), false);
         assert!(!scout.state.opcoes_pedidas());
+    }
+
+    #[test]
+    fn select_opens_the_settings_and_select_or_b_close_them() {
+        let mut scout = Scout { state: ScoutState::com_fonte(Box::new(CarreiraFixa), None), ..Scout::new() };
+        scout.aplicar_controle(controle(COMBO_PAINEL), false);
+        scout.aplicar_controle(controle(0), false);
+        assert!(!scout.state.configuracoes_abertas());
+        scout.aplicar_controle(controle(botao::BACK), false);
+        assert!(scout.state.configuracoes_abertas(), "borda do Select");
+        // com as Configurações abertas, o Y e o LB/RB não chegam às telas de baixo
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::Y), false);
+        assert!(!scout.state.opcoes_pedidas());
+        scout.aplicar_controle(controle(0), false);
+        let aba = scout.nav.aba_ativa();
+        scout.aplicar_controle(controle(botao::RB), false);
+        assert_eq!(scout.nav.aba_ativa(), aba);
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::BACK), false);
+        assert!(!scout.state.configuracoes_abertas(), "Select fecha");
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::BACK), false);
+        scout.aplicar_controle(controle(0), false);
+        scout.aplicar_controle(controle(botao::B), false);
+        assert!(!scout.state.configuracoes_abertas(), "B fecha");
+        assert!(scout.painel_aberto, "e o painel continua aberto");
     }
 
     #[test]

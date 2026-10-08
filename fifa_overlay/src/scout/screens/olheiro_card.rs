@@ -21,7 +21,18 @@ use crate::scout::state::{Especializacao, OfertaOlheiro, Olheiro};
 
 pub const LARGURA: f32 = 340.0;
 pub const ALTURA: f32 = 356.0;
-const ALTURA_NOVO: f32 = 120.0;
+
+/// O tamanho de um card: o do mercado (grade) é o padrão; o carrossel da aba
+/// Olheiros estica os cards até ocupar a tela.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dimensao {
+    pub largura: f32,
+    pub altura: f32,
+}
+
+impl Dimensao {
+    pub const PADRAO: Dimensao = Dimensao { largura: LARGURA, altura: ALTURA };
+}
 const LADO_AVATAR: f32 = 40.0;
 const ALTURA_RODAPE: f32 = 58.0;
 const LARGURA_BOTAO: f32 = 124.0;
@@ -70,14 +81,15 @@ pub fn desenhar(
     ui: &Ui,
     fonts: Option<&Fonts>,
     chave: &str,
+    dim: Dimensao,
     olheiro: &Olheiro,
     nacoes: &Nacoes<'_>,
     rodape: &Rodape<'_>,
 ) -> Resultado {
     let _id = ui.push_id(chave);
     let min = ui.cursor_screen_pos();
-    let max = [min[0] + LARGURA, min[1] + ALTURA];
-    let ativou = ui.invisible_button("##card", [LARGURA, ALTURA]);
+    let max = [min[0] + dim.largura, min[1] + dim.altura];
+    let ativou = ui.invisible_button("##card", [dim.largura, dim.altura]);
     let hover = ui.is_item_hovered();
     let focado = ui.is_item_focused() && ui.io().nav_visible;
     let opcoes = ui.is_item_clicked_with_button(MouseButton::Right);
@@ -136,12 +148,13 @@ pub fn desenhar(
 
     // ---- as habilidades
     let habilidades = olheiro.habilidades_efetivas();
+    let y_rodape = max[1] - theme::ESPACO_3 - ALTURA_RODAPE;
     if habilidades.is_empty() {
         texto_em(ui, meta, &dl, [x, y], theme::TEXT_DISABLED, "Sem habilidades");
     } else {
         let (mut xb, mut yb) = (x, y);
-        for habilidade in habilidades {
-            let badge = badge_habilidade(habilidade);
+        for habilidade in &habilidades {
+            let badge = badge_habilidade(*habilidade);
             let largura = com_fonte(ui, fonts.map(|f| f.badge), || ui.calc_text_size(badge.texto)[0]) + theme::ESPACO_2 * 3.0;
             if xb > x && xb + largura > direita {
                 xb = x;
@@ -150,10 +163,22 @@ pub fn desenhar(
             let tamanho = desenhar_badge(ui, fonts, &dl, &badge, [xb, yb], altura_linha);
             xb += tamanho[0] + theme::ESPACO_2;
         }
+        // com o card esticado sobra espaço: o que cada habilidade faz
+        y = yb + altura_linha + theme::ESPACO_2;
+        for habilidade in &habilidades {
+            let linhas = super::missoes::quebrar(&format!("{}: {}", habilidade.nome(), habilidade.descricao()), largura_util, 3, &medir_meta);
+            if y + altura_linha * linhas.len() as f32 > y_rodape - theme::ESPACO_2 {
+                break;
+            }
+            for (i, linha) in linhas.iter().enumerate() {
+                let cor = if i == 0 { theme::TEXT_SECONDARY } else { theme::TEXT_DISABLED };
+                y += texto_em(ui, meta, &dl, [x, y], cor, linha)[1];
+            }
+            y += theme::ESPACO_1;
+        }
     }
 
     // ---- o rodapé, encostado embaixo
-    let y_rodape = max[1] - theme::ESPACO_3 - ALTURA_RODAPE;
     divisor(&dl, x, direita, y_rodape - theme::ESPACO_1);
     match rodape {
         Rodape::Situacao { status, cor, linhas } => situacao(ui, fonts, &dl, [x, y_rodape], direita, status, *cor, linhas),
@@ -169,21 +194,32 @@ pub fn desenhar(
     Resultado { ativou, focado, opcoes }
 }
 
-/// O card "+ Contratar Olheiro" (a entrada para o mercado).
-pub fn desenhar_novo(ui: &Ui, fonts: Option<&Fonts>, chave: &str, titulo: &str, detalhe: &str) -> Resultado {
+/// O card "+ Contratar Olheiro" (a entrada para o mercado): do tamanho dos
+/// outros, com um "+" grande no meio.
+pub fn desenhar_novo(ui: &Ui, fonts: Option<&Fonts>, chave: &str, dim: Dimensao, titulo: &str, detalhe: &str) -> Resultado {
     let _id = ui.push_id(chave);
     let min = ui.cursor_screen_pos();
-    let max = [min[0] + LARGURA, min[1] + ALTURA_NOVO];
-    let ativou = ui.invisible_button("##card", [LARGURA, ALTURA_NOVO]);
+    let max = [min[0] + dim.largura, min[1] + dim.altura];
+    let ativou = ui.invisible_button("##card", [dim.largura, dim.altura]);
     let focado = ui.is_item_focused() && ui.io().nav_visible;
+    let destaque = ui.is_item_hovered() || focado;
     let dl = ui.get_window_draw_list();
-    fundo(&dl, min, max, ui.is_item_hovered() || focado, false);
+    fundo(&dl, min, max, destaque, false);
     let medir = |t: &str| com_fonte(ui, fonts.map(|f| f.meta), || ui.calc_text_size(t)[0]);
-    let x = min[0] + theme::ESPACO_3;
-    let largura = LARGURA - theme::ESPACO_3 * 2.0;
-    let h = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, min[1] + theme::ESPACO_3], theme::FIELD_GREEN, &format!("+ {titulo}"))[1];
-    let (detalhe, _) = truncar(detalhe, largura, medir);
-    texto_em(ui, fonts.map(|f| f.meta), &dl, [x, min[1] + theme::ESPACO_3 + h + theme::ESPACO_1], theme::TEXT_SECONDARY, &detalhe);
+    let centro_x = (min[0] + max[0]) * 0.5;
+    let centro_y = min[1] + dim.altura * 0.36;
+    let raio = 34.0;
+    let cor = if destaque { theme::ACCENT_PRIMARY } else { theme::FIELD_GREEN };
+    dl.add_circle([centro_x, centro_y], raio, cor).thickness(2.0).build();
+    dl.add_line([centro_x - raio * 0.45, centro_y], [centro_x + raio * 0.45, centro_y], cor).thickness(3.0).build();
+    dl.add_line([centro_x, centro_y - raio * 0.45], [centro_x, centro_y + raio * 0.45], cor).thickness(3.0).build();
+    let mut y = centro_y + raio + theme::ESPACO_4;
+    let largura_titulo = com_fonte(ui, fonts.map(|f| f.heading), || ui.calc_text_size(titulo)[0]);
+    y += texto_em(ui, fonts.map(|f| f.heading), &dl, [centro_x - largura_titulo * 0.5, y], theme::TEXT_PRIMARY, titulo)[1] + theme::ESPACO_2;
+    for linha in super::missoes::quebrar(detalhe, dim.largura - theme::ESPACO_4 * 2.0, 4, &medir) {
+        let w = medir(&linha);
+        y += texto_em(ui, fonts.map(|f| f.meta), &dl, [centro_x - w * 0.5, y], theme::TEXT_SECONDARY, &linha)[1];
+    }
     Resultado { ativou, focado, opcoes: false }
 }
 

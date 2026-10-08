@@ -120,9 +120,6 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     });
     com_fonte(ui, fonts.map(|f| f.meta), || ui.text_wrapped(MSG_REGRAS));
     ui.dummy([0.0, theme::ESPACO_2]);
-    // depois do 1º botão: o foco inicial do controle não liga/desliga a sincronização
-    sincronizacao(ui, fonts, state);
-    ui.dummy([0.0, theme::ESPACO_2]);
 
     let escolhidos = state.escolhidos();
     if escolhidos.is_empty() {
@@ -139,7 +136,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             item
         })
         .collect();
-    lista_jogadores::barra(ui, fonts, state, ListaId::Escolhidos, &itens);
+    lista_jogadores::barra(ui, fonts, state, ListaId::Escolhidos, &itens, |_, _| false);
     let visiveis = lista_jogadores::preparar(state, ListaId::Escolhidos, itens);
     if visiveis.is_empty() {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, lista_jogadores::MSG_NENHUM_NO_FILTRO));
@@ -178,25 +175,6 @@ pub fn situacao_curta(e: &EscolhidoNaLista) -> String {
     }
 }
 
-/// Interruptor "Sincronizar com o FIFA", "Tentar de novo" e a situação.
-fn sincronizacao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
-    let status = state.status_nativo();
-    let (rotulo, estilo) = if status.ligada {
-        ("Sincronizar com o FIFA: ligado", EstiloBotao::Selecionado)
-    } else {
-        ("Sincronizar com o FIFA: desligado", EstiloBotao::Secundario)
-    };
-    if componentes::botao(ui, fonts, rotulo, estilo, true) {
-        state.alternar_sincronizacao_nativa();
-    }
-    if status.ligada && !status.localizando && !(status.escolhidos && status.conhecimento) {
-        ui.same_line_with_spacing(0.0, theme::ESPACO_3);
-        if componentes::botao(ui, fonts, "Tentar de novo", EstiloBotao::Secundario, true) {
-            state.localizar_nativo_de_novo();
-        }
-    }
-    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_wrapped(texto_sincronizacao(&status)));
-}
 
 fn badge_prioridade() -> EstiloBadge {
     EstiloBadge { texto: "PRIORIDADE", contorno: theme::TIER_ELITE, fundo: theme::TRANSPARENTE, cor_texto: theme::TIER_ELITE }

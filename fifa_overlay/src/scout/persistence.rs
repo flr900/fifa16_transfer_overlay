@@ -116,11 +116,10 @@ pub struct UiPrefs {
     /// Visão de cada lista de jogadores (2026-10-08): Cards, ou Tabular para
     /// ordenar. Só a Base do Scout, que cresce sem parar, abre em Tabular.
     pub modo_escolhidos: Densidade,
-    pub modo_relatorios: Densidade,
     pub modo_base: Densidade,
     pub modo_relatorio_aberto: Densidade,
-    /// A aba Relatórios: um registro por jogador (padrão) ou um card por
-    /// Relatório (2026-10-08).
+    /// A aba Relatórios: um card por Relatório (padrão) ou agrupados por
+    /// Olheiro (2026-10-08).
     pub visao_relatorios: VisaoRelatorios,
     /// Épico 7: "Sincronizar com o FIFA". Ligado por padrão (decisão de
     /// 2026-10-06); só vai para o arquivo quando desligado.
@@ -139,10 +138,9 @@ impl Default for UiPrefs {
             densidade: Densidade::Tabular,
             densidade_olheiros: Densidade::Cards,
             modo_escolhidos: Densidade::Cards,
-            modo_relatorios: Densidade::Cards,
             modo_base: Densidade::Tabular,
             modo_relatorio_aberto: Densidade::Cards,
-            visao_relatorios: VisaoRelatorios::PorJogador,
+            visao_relatorios: VisaoRelatorios::PorRelatorio,
             sincronizar_com_o_jogo: true,
         }
     }
@@ -157,15 +155,16 @@ pub enum Densidade {
     Cards,
 }
 
-/// A aba Relatórios: os jogadores encontrados (com quem os viu e em que
-/// Missão) ou a lista dos Relatórios. No JSON: `"por_jogador"` /
-/// `"por_relatorio"`.
+/// A aba Relatórios: a lista dos Relatórios ou os Relatórios de cada
+/// Olheiro. No JSON: `"por_relatorio"` / `"por_olheiro"` (o `"por_jogador"`
+/// de antes, que virou a aba Base do Scout, volta ao padrão).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VisaoRelatorios {
     #[default]
-    PorJogador,
+    #[serde(alias = "por_jogador")]
     PorRelatorio,
+    PorOlheiro,
 }
 
 /// Desserializa `T`; se o valor não servir, usa `T::default()` e avisa.
@@ -460,13 +459,20 @@ pub(crate) mod tests {
                     "densidade": "tabular",
                     "densidade_olheiros": "cards",
                     "modo_escolhidos": "cards",
-                    "modo_relatorios": "cards",
                     "modo_base": "tabular",
                     "modo_relatorio_aberto": "cards",
-                    "visao_relatorios": "por_jogador"
+                    "visao_relatorios": "por_relatorio"
                 }
             })
         );
+    }
+
+    #[test]
+    fn the_old_per_player_view_of_the_reports_tab_falls_back_to_the_report_list() {
+        let antigo: UiPrefs = serde_json::from_str(r#"{"visao_relatorios":"por_jogador","modo_relatorios":"cards"}"#).expect("lê");
+        assert_eq!(antigo.visao_relatorios, VisaoRelatorios::PorRelatorio);
+        let novo: UiPrefs = serde_json::from_str(r#"{"visao_relatorios":"por_olheiro"}"#).expect("lê");
+        assert_eq!(novo.visao_relatorios, VisaoRelatorios::PorOlheiro);
     }
 
     #[test]

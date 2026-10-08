@@ -1,7 +1,9 @@
 //! Nova Missão, passo 1 (2026-10-03, pedido do Felipe): primeiro o Olheiro,
-//! depois os filtros. Uma lista dos contratados; os "Em Missão" aparecem,
-//! apagados e inertes. Ativar um livre (clique ou A) abre o formulário com
-//! os filtros ideais da Especialização dele; B / "Voltar" volta à aba.
+//! depois os filtros. Uma lista dos contratados, os livres primeiro (do mais
+//! experiente ao menos, 2026-10-08), depois os que estão num contrato de
+//! Missão contínua (dá para escolher, com a multa) e, por último, os "Em
+//! Missão", cinzas e inertes. Ativar um livre (clique ou A) abre o formulário
+//! com os filtros ideais da Especialização dele; B / "Voltar" volta à aba.
 //!
 //! Aqui foco não é escolha: escolher leva para outra tela, então mover o
 //! foco com o D-pad só destaca o card.
@@ -52,14 +54,64 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) -> Acao {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, texto));
         ui.dummy([0.0, theme::ESPACO_2]);
     }
+    let mut ordenados: Vec<&OlheiroContratado> = contratados.iter().collect();
+    ordenados.sort_by(|a, b| ordem_de_escolha(a, b));
     olheiros::com_nacoes(state, |nacoes| {
-        for c in &contratados {
-            if linha(ui, fonts, c, nacoes) && c.aceita_missao_nova() {
+        let mut secao_atual = None;
+        for c in ordenados {
+            let secao = secao_do_olheiro(c);
+            if secao_atual != Some(secao) {
+                secao_atual = Some(secao);
+                com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, secao.titulo()));
+                ui.dummy([0.0, theme::ESPACO_1]);
+            }
+            if linha(ui, fonts, c, nacoes, secao == Secao::Ocupados) && c.aceita_missao_nova() {
                 acao = Acao::Escolheu(c.olheiro.id);
             }
         }
     });
     acao
+}
+
+/// Em que bloco da lista o Olheiro aparece.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Secao {
+    /// Livre: pode receber a Missão já.
+    Livres,
+    /// Num contrato de Missão contínua que dá para rescindir.
+    EmContrato,
+    /// Em Missão ou acompanhando os Escolhidos: não dá para escolher.
+    Ocupados,
+}
+
+impl Secao {
+    fn titulo(self) -> &'static str {
+        match self {
+            Secao::Livres => "Disponíveis",
+            Secao::EmContrato => "Em contrato de Missão contínua",
+            Secao::Ocupados => "Ocupados",
+        }
+    }
+}
+
+fn secao_do_olheiro(c: &OlheiroContratado) -> Secao {
+    if !c.aceita_missao_nova() {
+        Secao::Ocupados
+    } else if c.em_missao {
+        Secao::EmContrato
+    } else {
+        Secao::Livres
+    }
+}
+
+/// Livres antes, depois os de contrato, depois os ocupados; em cada bloco, do
+/// mais experiente (Tier e estrelas do foco) ao menos, e pelo nome.
+pub fn ordem_de_escolha(a: &OlheiroContratado, b: &OlheiroContratado) -> std::cmp::Ordering {
+    let experiencia = |c: &OlheiroContratado| (c.olheiro.tier, c.olheiro.perfil().principal());
+    secao_do_olheiro(a)
+        .cmp(&secao_do_olheiro(b))
+        .then_with(|| experiencia(b).cmp(&experiencia(a)))
+        .then_with(|| a.olheiro.nome_exibicao().cmp(&b.olheiro.nome_exibicao()))
 }
 
 /// O que custa escolher um Olheiro que está num contrato de Missão contínua:
@@ -82,8 +134,9 @@ pub fn texto_rescisao(c: &OlheiroContratado) -> Option<String> {
     })
 }
 
-fn linha(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado, nacoes: &olheiros::Nacoes<'_>) -> bool {
-    let c_card = card(ui, &c.olheiro.id.to_string(), ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
+fn linha(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado, nacoes: &olheiros::Nacoes<'_>, apagado: bool) -> bool {
+    let borda = if apagado { theme::BORDER_HAIRLINE_SUBTLE } else { theme::BORDER_HAIRLINE };
+    let c_card = card(ui, &c.olheiro.id.to_string(), ALTURA_CARD, borda);
     let dl = ui.get_window_draw_list();
     // quem está num contrato de Missão contínua que dá para rescindir pode ser
     // escolhido: o texto diz o que custa
@@ -132,6 +185,10 @@ fn linha(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado, nacoes: &olheiro
     let largura = com_fonte(ui, fonts.map(|f| f.body), || ui.calc_text_size(status)[0]);
     let y_status = (c_card.min[1] + c_card.max[1]) * 0.5 - h * 0.5;
     texto_em(ui, fonts.map(|f| f.body), &dl, [c_card.max[0] - theme::ESPACO_4 - largura, y_status], cor_status, status);
+    if apagado {
+        // cinza por cima: o ocupado não compete com os disponíveis
+        dl.add_rect(c_card.min, c_card.max, [0.04, 0.05, 0.05, 0.55]).filled(true).rounding(theme::RAIO_MD).build();
+    }
     c_card.ativou
 }
 
@@ -171,6 +228,30 @@ mod tests {
             ..base
         };
         assert!(texto_rescisao(&vencido).unwrap_or_default().contains("encerrado"));
+    }
+
+    #[test]
+    fn free_olheiros_come_first_by_experience_and_the_busy_ones_go_last() {
+        use crate::scout::state::{Especializacao, Olheiro, Tier};
+        let novo = |nome: &str, tier: Tier, em_missao: bool, acompanhando: bool| OlheiroContratado {
+            olheiro: Olheiro { nome: nome.to_string(), especializacao: Especializacao::Tatico, tier, ..Olheiro::default() },
+            em_missao,
+            acompanhando,
+            missao: None,
+            relatorio_atual: None,
+            relatorios: 0,
+            rescisao: None,
+        };
+        let mut lista = vec![
+            novo("Ocupado Elite", Tier::Elite, true, false),
+            novo("Livre Junior", Tier::Junior, false, false),
+            novo("Acompanha", Tier::Experiente, false, true),
+            novo("Livre Elite", Tier::Elite, false, false),
+            novo("Livre Exp", Tier::Experiente, false, false),
+        ];
+        lista.sort_by(ordem_de_escolha);
+        let nomes: Vec<&str> = lista.iter().map(|c| c.olheiro.nome.as_str()).collect();
+        assert_eq!(nomes, ["Livre Elite", "Livre Exp", "Livre Junior", "Ocupado Elite", "Acompanha"]);
     }
 
     #[test]
