@@ -160,6 +160,31 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                     if pode.nova_missao && opcao(ui, "Nova Missão", "Encomenda uma pesquisa com ele, já com os filtros ideais do foco dele.", true, EstiloBotao::Primario) {
                         acao = Acao::NovaMissao(id);
                     }
+                    // o contrato da Missão contínua: a renovação e o aviso
+                    if let Some(m) = c.missao.as_ref().filter(|m| m.continua) {
+                        let custo = ScoutState::custo_do_contrato(m);
+                        let vencido = state.contrato_vencido(m);
+                        let falta = state.orcamento().map(|s| custo.saturating_sub(s)).filter(|f| *f > 0);
+                        if let Some(aviso) = super::missoes::aviso_do_contrato(state, m) {
+                            com_fonte(ui, fonts.map(|f| f.meta), || {
+                                let _quebra = ui.push_text_wrap_pos_with_pos(ui.cursor_pos()[0] + LARGURA);
+                                ui.text_colored(theme::DANGER, aviso);
+                            });
+                            ui.dummy([0.0, theme::ESPACO_2]);
+                        }
+                        let rotulo = format!("Renovar o contrato por {}", formatar_milhar(custo));
+                        let dica = super::missoes::texto_dica_do_contrato(m, custo);
+                        if opcao(ui, &rotulo, &dica, vencido && falta.is_none() && pode.cancelar, EstiloBotao::Secundario) {
+                            state.renovar_missao(m.id);
+                        }
+                        if m.tem_contrato() {
+                            let estilo = if m.renovar_sozinho { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+                            let texto = if m.renovar_sozinho { "Renova sozinho: ligado" } else { "Renova sozinho: desligado" };
+                            if opcao(ui, texto, "Liga ou desliga a renovação sozinha do contrato, no fim dos 12 meses, havendo verba.", true, estilo) {
+                                state.definir_renovar_sozinho(m.id, !m.renovar_sozinho);
+                            }
+                        }
+                    }
                     if c.em_missao {
                         if opcao(
                             ui,

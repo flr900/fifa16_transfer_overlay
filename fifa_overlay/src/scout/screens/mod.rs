@@ -629,6 +629,7 @@ fn conteudo_da_tela(
             Aba::Missoes => match missoes::render(ui, fonts, state, true) {
                 missoes::Acao::NovaMissao => *pedido = Some(Pedido::EscolherOlheiro),
                 missoes::Acao::AbrirRelatorio(id) => *pedido = Some(Pedido::AbrirRelatorio(id)),
+                missoes::Acao::Opcoes(olheiro) => *pedido = Some(Pedido::OpcoesDoOlheiro(olheiro)),
                 missoes::Acao::Nenhuma => {}
             },
             Aba::Relatorios => match relatorios::render(ui, fonts, state) {

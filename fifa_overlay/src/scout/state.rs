@@ -5030,6 +5030,7 @@ impl ScoutState {
     /// "Encerrar" uma Missão contínua: o Olheiro fica livre e os jogadores
     /// JÁ REVELADOS viram o Relatório final (os que ainda não tinham
     /// aparecido são descartados). Não mexe no orçamento.
+    #[allow(dead_code)] // as Opções do Olheiro usam `cancelar_pesquisa`
     pub fn encerrar_missao(&mut self, id: Uuid) -> bool {
         let Some(estado) = self.estado_ativo().cloned() else {
             return false;
