@@ -435,34 +435,37 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], ped
             componentes::focar_proximo_item();
         }
         let (ativou, focada) = linha_selecionavel(ui);
+        let centro = componentes::centro_da_linha(ui);
         if ativou {
             acao = Acao::Ativar(c.olheiro.id);
         }
         if focada && pediu_opcoes {
             acao = Acao::Opcoes(c.olheiro.id);
         }
-        texto_na_celula(ui, fonts.map(|f| f.body), &c.olheiro.nome_exibicao(), theme::TEXT_PRIMARY);
+        componentes::texto_na_celula(ui, fonts.map(|f| f.body), &c.olheiro.nome_exibicao(), theme::TEXT_PRIMARY, centro);
         ui.table_set_column_index(1);
         let perfil = c.olheiro.perfil();
         let foco = format!("{} ({} estrelas)", perfil.foco().nome(), perfil.principal().texto());
-        texto_na_celula(ui, fonts.map(|f| f.meta), &foco, theme::TEXT_SECONDARY);
+        componentes::texto_na_celula(ui, fonts.map(|f| f.meta), &foco, theme::TEXT_SECONDARY, centro);
         ui.table_set_column_index(2);
         let pos = ui.cursor_screen_pos();
-        desenhar_badge(ui, fonts, &ui.get_window_draw_list(), &badge_tier(c.olheiro.tier), [pos[0], pos[1] + 4.0], ALTURA_LINHA - 8.0);
+        let altura_badge = ALTURA_LINHA - 8.0;
+        desenhar_badge(ui, fonts, &ui.get_window_draw_list(), &badge_tier(c.olheiro.tier), [pos[0], centro - altura_badge * 0.5], altura_badge);
         ui.table_set_column_index(3);
-        texto_na_celula(ui, fonts.map(|f| f.body), texto_status(c), cor_status(c));
+        componentes::texto_na_celula(ui, fonts.map(|f| f.body), texto_status(c), cor_status(c), centro);
         ui.table_set_column_index(4);
-        texto_na_celula(ui, fonts.map(|f| f.meta), &texto_missao(c), theme::TEXT_SECONDARY);
+        componentes::texto_na_celula(ui, fonts.map(|f| f.meta), &texto_missao(c), theme::TEXT_SECONDARY, centro);
         ui.table_set_column_index(5);
-        texto_na_celula(ui, fonts.map(|f| f.meta), &texto_relatorios(c.relatorios), theme::TEXT_SECONDARY);
+        componentes::texto_na_celula(ui, fonts.map(|f| f.meta), &texto_relatorios(c.relatorios), theme::TEXT_SECONDARY, centro);
     }
     ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
     if linha_selecionavel(ui).0 {
         acao = Acao::AbrirContratacao;
     }
-    texto_na_celula(ui, fonts.map(|f| f.heading), &format!("+ {ROTULO_CONTRATAR}"), theme::FIELD_GREEN);
+    let centro = componentes::centro_da_linha(ui);
+    componentes::texto_na_celula(ui, fonts.map(|f| f.heading), &format!("+ {ROTULO_CONTRATAR}"), theme::FIELD_GREEN, centro);
     ui.table_set_column_index(4);
-    texto_na_celula(ui, fonts.map(|f| f.meta), DETALHE_CONTRATAR, theme::TEXT_SECONDARY);
+    componentes::texto_na_celula(ui, fonts.map(|f| f.meta), DETALHE_CONTRATAR, theme::TEXT_SECONDARY, centro);
     acao
 }
 
@@ -481,14 +484,6 @@ fn linha_selecionavel(ui: &Ui) -> (bool, bool) {
     let focada = ui.is_item_focused() && ui.io().nav_visible;
     ui.set_cursor_pos(inicio);
     (ativou, focada)
-}
-
-fn texto_na_celula(ui: &Ui, fonte: Option<imgui::FontId>, texto: &str, cor: [f32; 4]) {
-    com_fonte(ui, fonte, || {
-        let [x, y] = ui.cursor_pos();
-        ui.set_cursor_pos([x, y + ((ALTURA_LINHA - 4.0 - ui.text_line_height()) * 0.5).max(0.0)]);
-        ui.text_colored(cor, texto);
-    });
 }
 
 /// "Atratividade do clube: Alta (prestígio 20/20 nacional, 20/20

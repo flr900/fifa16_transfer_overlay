@@ -2215,6 +2215,10 @@ pub struct ScoutState {
     /// O foco do controle esteve numa linha da tabela no frame anterior (só
     /// então ← / → e X valem para a tabela).
     linha_da_tabela_focada: bool,
+    /// A linha da tabela que o foco acompanha depois de uma reordenação
+    /// (a identidade dela) e se a lista ainda tem de rolar até lá.
+    chave_seguida: Option<u64>,
+    rolar_para_seguida: bool,
     /// Filtros e ordenação de cada lista de jogadores (só enquanto o Scout
     /// está carregado; a visão vai para o arquivo da carreira).
     prefs_listas: HashMap<ListaId, PrefsLista>,
@@ -2347,6 +2351,8 @@ impl ScoutState {
             passo_de_coluna: 0,
             ordenar_pedido: false,
             linha_da_tabela_focada: false,
+            chave_seguida: None,
+            rolar_para_seguida: false,
             prefs_listas: HashMap::new(),
             painel_de_filtros: None,
             opcoes_do_olheiro: None,
@@ -4299,6 +4305,26 @@ impl ScoutState {
     pub fn definir_coluna_do_cursor(&mut self, id: ListaId, coluna: Coluna) {
         let modo = self.modo_da_lista(id);
         self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo)).cursor = Some(coluna);
+    }
+
+    /// Depois de ordenar, o foco vai para a linha `chave`, onde ela estiver.
+    pub fn seguir_chave_na_tabela(&mut self, chave: u64) {
+        self.chave_seguida = Some(chave);
+        self.rolar_para_seguida = true;
+    }
+
+    pub fn chave_seguida_na_tabela(&self) -> Option<u64> {
+        self.chave_seguida
+    }
+
+    pub fn parar_de_seguir_chave(&mut self) {
+        self.chave_seguida = None;
+        self.rolar_para_seguida = false;
+    }
+
+    /// Consome o pedido de rolar até a linha seguida (uma vez só).
+    pub fn tomar_rolagem_para_seguida(&mut self) -> bool {
+        std::mem::take(&mut self.rolar_para_seguida)
     }
 
     pub fn definir_linha_da_tabela_focada(&mut self, focada: bool) {
