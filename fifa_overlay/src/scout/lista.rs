@@ -402,12 +402,25 @@ pub struct PrefsLista {
     pub modo: Densidade,
     pub filtros: FiltrosLista,
     pub ordenacao: Ordenacao,
+    /// A coluna que o D-pad ← / → escolheu na visão Tabular (`None` = a que
+    /// ordena a lista agora).
+    pub cursor: Option<Coluna>,
 }
 
 impl PrefsLista {
     pub fn nova(modo: Densidade) -> Self {
-        PrefsLista { modo, filtros: FiltrosLista::default(), ordenacao: Ordenacao::default() }
+        PrefsLista { modo, filtros: FiltrosLista::default(), ordenacao: Ordenacao::default(), cursor: None }
     }
+}
+
+/// A coluna do cursor depois de andar `passo` (-1/+1) entre as `colunas`, a
+/// partir de `atual`; para nas pontas.
+pub fn coluna_com_passo(colunas: &[Coluna], atual: Coluna, passo: i8) -> Coluna {
+    let Some(i) = colunas.iter().position(|c| *c == atual) else {
+        return colunas.first().copied().unwrap_or(atual);
+    };
+    let j = if passo >= 0 { (i + 1).min(colunas.len() - 1) } else { i.saturating_sub(1) };
+    colunas[j]
 }
 
 /// "178 cm" ou "—".
@@ -418,6 +431,15 @@ pub fn texto_altura(altura: Option<u8>) -> String {
 #[cfg(test)]
 mod tests_de_grupo {
     use super::*;
+
+    #[test]
+    fn the_column_cursor_walks_and_stops_at_the_ends() {
+        let colunas = [Coluna::Nome, Coluna::Idade, Coluna::Overall];
+        assert_eq!(coluna_com_passo(&colunas, Coluna::Nome, 1), Coluna::Idade);
+        assert_eq!(coluna_com_passo(&colunas, Coluna::Overall, 1), Coluna::Overall, "para na ponta");
+        assert_eq!(coluna_com_passo(&colunas, Coluna::Nome, -1), Coluna::Nome, "e na outra");
+        assert_eq!(coluna_com_passo(&colunas, Coluna::Potencial, 1), Coluna::Nome, "coluna que não existe: recomeça");
+    }
 
     fn contagens(quantos: [usize; 6]) -> Vec<(GrupoPosicao, usize)> {
         GrupoPosicao::TODOS.into_iter().zip(quantos).collect()

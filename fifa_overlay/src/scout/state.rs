@@ -45,7 +45,7 @@ use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, RitmoTrabalho};
 pub use super::quality::{Atalho, NivelEquipe, Perfil, PosicaoAlvo};
 
-use super::lista::{FiltrosLista, ListaId, Ordenacao, PrefsLista};
+use super::lista::{Coluna, FiltrosLista, ListaId, Ordenacao, PrefsLista};
 use super::mapeamento;
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::{Densidade, VisaoRelatorios};
@@ -2208,6 +2208,13 @@ pub struct ScoutState {
     opcoes_neste_frame: bool,
     /// L2 (-1) / R2 (+1) neste frame: troca o grupo de posição da lista.
     passo_de_grupo: i8,
+    /// D-pad ← (-1) / → (+1) neste frame: o cursor de coluna da lista Tabular.
+    passo_de_coluna: i8,
+    /// O X (quadrado) neste frame: ordena a Tabular pela coluna do cursor.
+    ordenar_pedido: bool,
+    /// O foco do controle esteve numa linha da tabela no frame anterior (só
+    /// então ← / → e X valem para a tabela).
+    linha_da_tabela_focada: bool,
     /// Filtros e ordenação de cada lista de jogadores (só enquanto o Scout
     /// está carregado; a visão vai para o arquivo da carreira).
     prefs_listas: HashMap<ListaId, PrefsLista>,
@@ -2337,6 +2344,9 @@ impl ScoutState {
             demissao_pendente: None,
             opcoes_neste_frame: false,
             passo_de_grupo: 0,
+            passo_de_coluna: 0,
+            ordenar_pedido: false,
+            linha_da_tabela_focada: false,
             prefs_listas: HashMap::new(),
             painel_de_filtros: None,
             opcoes_do_olheiro: None,
@@ -4236,7 +4246,9 @@ impl ScoutState {
 
     pub fn definir_ordenacao_da_lista(&mut self, id: ListaId, ordenacao: Ordenacao) {
         let modo = self.modo_da_lista(id);
-        self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo)).ordenacao = ordenacao;
+        let prefs = self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo));
+        prefs.ordenacao = ordenacao;
+        prefs.cursor = None;
     }
 
     /// O painel de filtros (Y) aberto, e de qual lista.
@@ -4260,6 +4272,41 @@ impl ScoutState {
 
     pub fn definir_passo_de_grupo(&mut self, passo: i8) {
         self.passo_de_grupo = passo;
+    }
+
+    pub fn passo_de_coluna(&self) -> i8 {
+        self.passo_de_coluna
+    }
+
+    pub fn definir_passo_de_coluna(&mut self, passo: i8) {
+        self.passo_de_coluna = passo;
+    }
+
+    pub fn ordenar_pedido(&self) -> bool {
+        self.ordenar_pedido
+    }
+
+    pub fn definir_ordenar_pedido(&mut self, pedido: bool) {
+        self.ordenar_pedido = pedido;
+    }
+
+    /// A coluna que o cursor da tabela marca: a escolhida com ← / →, ou a
+    /// que ordena a lista.
+    pub fn coluna_do_cursor(&self, id: ListaId) -> Coluna {
+        self.prefs_listas.get(&id).and_then(|p| p.cursor).unwrap_or_else(|| self.ordenacao_da_lista(id).coluna)
+    }
+
+    pub fn definir_coluna_do_cursor(&mut self, id: ListaId, coluna: Coluna) {
+        let modo = self.modo_da_lista(id);
+        self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo)).cursor = Some(coluna);
+    }
+
+    pub fn definir_linha_da_tabela_focada(&mut self, focada: bool) {
+        self.linha_da_tabela_focada = focada;
+    }
+
+    pub fn linha_da_tabela_focada(&self) -> bool {
+        self.linha_da_tabela_focada
     }
 
     pub fn definir_opcoes(&mut self, pedidas: bool) {

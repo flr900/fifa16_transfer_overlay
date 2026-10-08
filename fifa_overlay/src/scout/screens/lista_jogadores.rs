@@ -159,7 +159,9 @@ pub fn barra(
         ui.same_line_with_spacing(0.0, theme::ESPACO_4);
         let y = ui.cursor_pos()[1];
         ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
-        ui.text_colored(theme::TEXT_SECONDARY, "L2 / R2 trocam a posição");
+        let tabular = state.modo_da_lista(id) == Densidade::Tabular;
+        let dica = if tabular { "L2 / R2 trocam a posição  ·  ← → escolhem a coluna  ·  X ordena" } else { "L2 / R2 trocam a posição" };
+        ui.text_colored(theme::TEXT_SECONDARY, dica);
     });
     ui.dummy([0.0, theme::ESPACO_2]);
 }
@@ -196,6 +198,9 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     let ordenacao = state.ordenacao_da_lista(id);
     let hoje = state.data_da_carreira();
     let todas = colunas(id);
+    let cursor = state.coluna_do_cursor(id);
+    // com o foco numa linha, ← / → andam pelas colunas e o X ordena: sem subir ao cabeçalho
+    let cursor_visivel = state.linha_da_tabela_focada();
 
     let flags = TableFlags::BORDERS_INNER_H | TableFlags::SIZING_FIXED_FIT | TableFlags::NO_SAVED_SETTINGS;
     let _c1 = ui.push_style_color(StyleColor::TableBorderLight, theme::BORDER_HAIRLINE_SUBTLE);
@@ -217,7 +222,8 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
             let escolhida = ordenacao.coluna == *coluna;
             let cor = if escolhida { theme::ACCENT_PRIMARY } else { theme::TEXT_SECONDARY };
             let _cor = ui.push_style_color(StyleColor::Text, cor);
-            let clicou = cabecalho(ui, titulo_da_coluna(id, *coluna), cor, escolhida.then_some(ordenacao.decrescente));
+            let marcada = cursor_visivel && cursor == *coluna;
+            let clicou = cabecalho(ui, titulo_da_coluna(id, *coluna), cor, escolhida.then_some(ordenacao.decrescente), marcada);
             if clicou {
                 nova_ordem = Some(ordenacao.alternar(*coluna));
             }
@@ -226,6 +232,7 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
 
     // linhas: só as visíveis (a Base pode ter milhares)
     let mut foco = state.tomar_foco_no_principal();
+    let mut linha_focada = false;
     let clipper = imgui::ListClipper::new(i32::try_from(itens.len()).unwrap_or(i32::MAX)).items_height(ALTURA_LINHA).begin(ui);
     for indice in clipper.iter() {
         let Some(item) = usize::try_from(indice).ok().and_then(|i| itens.get(i)) else {
@@ -240,6 +247,9 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
         if linha_selecionavel(ui) {
             ativado = Some(indice_do_item(itens, item));
         }
+        if componentes::focado_pelo_controle(ui) {
+            linha_focada = true;
+        }
         for (i, coluna) in todas.iter().enumerate() {
             ui.table_set_column_index(i);
             let (texto, cor) = celula(state, item, *coluna, hoje);
@@ -250,6 +260,20 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     if let Some(ordem) = nova_ordem {
         state.definir_ordenacao_da_lista(id, ordem);
     }
+    // ← / → e X do controle, com o foco numa linha (o cursor aparece no cabeçalho)
+    if linha_focada && state.linha_da_tabela_focada() {
+        let mut coluna = cursor;
+        let passo = state.passo_de_coluna();
+        if passo != 0 {
+            coluna = lista::coluna_com_passo(&todas, cursor, passo);
+            state.definir_coluna_do_cursor(id, coluna);
+        }
+        if state.ordenar_pedido() {
+            state.definir_ordenacao_da_lista(id, state.ordenacao_da_lista(id).alternar(coluna));
+            state.definir_coluna_do_cursor(id, coluna);
+        }
+    }
+    state.definir_linha_da_tabela_focada(linha_focada);
     ativado
 }
 
@@ -366,8 +390,8 @@ fn texto_na_celula(ui: &Ui, fonte: Option<imgui::FontId>, texto: &str, cor: [f32
 /// invade as vizinhas e o D-pad → não passava de um cabeçalho para o
 /// seguinte (teste `the_controller_can_walk_the_table_headers_and_sort_with_a`).
 /// `true` = ativado (clique ou A). `ordem`: `Some(decrescente)` na coluna que
-/// ordena a lista.
-fn cabecalho(ui: &Ui, titulo: &str, cor: [f32; 4], ordem: Option<bool>) -> bool {
+/// ordena a lista; `marcada`: a coluna do cursor do D-pad.
+fn cabecalho(ui: &Ui, titulo: &str, cor: [f32; 4], ordem: Option<bool>, marcada: bool) -> bool {
     let largura = ui.content_region_avail()[0];
     let clicou = ui.invisible_button("##cabecalho", [largura, ALTURA_LINHA - 8.0]);
     let [x0, y0] = ui.item_rect_min();
@@ -378,6 +402,9 @@ fn cabecalho(ui: &Ui, titulo: &str, cor: [f32; 4], ordem: Option<bool>) -> bool 
         if destaque {
             dl.add_rect([x0, y0], [x1, y1], theme::ACCENT_PRIMARY_DIM).filled(true).rounding(theme::RAIO_SM).build();
             dl.add_rect([x0, y0], [x1, y1], theme::ACCENT_PRIMARY).rounding(theme::RAIO_SM).build();
+        } else if marcada {
+            // o cursor de coluna do D-pad: a coluna que o X vai ordenar
+            dl.add_rect([x0, y0], [x1, y1], theme::ACCENT_PRIMARY_DIM).filled(true).rounding(theme::RAIO_SM).build();
         }
         dl.add_text([x0 + theme::ESPACO_1, y0 + (y1 - y0 - ui.text_line_height()) * 0.5], cor, titulo);
     }
@@ -702,6 +729,65 @@ mod tests {
         }
         assert_eq!(ativado, Some(0), "A abre a primeira linha");
         assert_eq!(estado.ordenacao_da_lista(ListaId::Base), Ordenacao::default(), "e nenhuma coluna foi reordenada");
+    }
+
+    #[test]
+    fn dpad_left_right_pick_the_column_and_x_sorts_it_with_the_focus_on_a_row() {
+        let jogadores: Vec<JogadorEncontrado> =
+            (1..=5).map(|i| JogadorEncontrado::de_teste(i, &format!("Jogador {i}"), 18, (60 + i as u8, 62 + i as u8))).collect();
+        let itens: Vec<ItemLista<'_>> = jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
+        let mut estado = ScoutState::new();
+        let mut mesa = Mesa::nova();
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        // o foco entra na primeira linha (sem subir ao cabeçalho)
+        estado.pedir_foco_no_principal();
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Overall, "o cursor começa na coluna que ordena");
+        let passo = |estado: &mut ScoutState, mesa: &mut Mesa, passo: i8| {
+            estado.definir_passo_de_coluna(passo);
+            mesa.quadro(estado, &itens, None);
+            estado.definir_passo_de_coluna(0);
+            mesa.quadro(estado, &itens, None);
+        };
+        passo(&mut estado, &mut mesa, 1);
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Potencial, "→ anda uma coluna");
+        passo(&mut estado, &mut mesa, 1);
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Valor);
+        passo(&mut estado, &mut mesa, -1);
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Potencial, "← volta");
+        // X ordena pela coluna do cursor; de novo, inverte
+        let x = |estado: &mut ScoutState, mesa: &mut Mesa| {
+            estado.definir_ordenar_pedido(true);
+            mesa.quadro(estado, &itens, None);
+            estado.definir_ordenar_pedido(false);
+            mesa.quadro(estado, &itens, None);
+        };
+        x(&mut estado, &mut mesa);
+        let ordem = estado.ordenacao_da_lista(ListaId::Base);
+        assert_eq!(ordem.coluna, Coluna::Potencial);
+        x(&mut estado, &mut mesa);
+        assert_eq!(estado.ordenacao_da_lista(ListaId::Base), Ordenacao { decrescente: !ordem.decrescente, ..ordem });
+        // nas pontas o cursor para
+        for _ in 0..20 {
+            passo(&mut estado, &mut mesa, 1);
+        }
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), *colunas(ListaId::Base).last().expect("colunas"));
+        for _ in 0..20 {
+            passo(&mut estado, &mut mesa, -1);
+        }
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Nome);
+        // o ← / → que o ImGui também recebe não tira o foco da linha: A ainda abre a primeira
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadRight);
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadLeft);
+        let mut ativado = None;
+        for _ in 0..3 {
+            ativado = ativado.or(mesa.quadro(&mut estado, &itens, Some(imgui::Key::GamepadFaceDown)));
+        }
+        assert_eq!(ativado, Some(0), "o foco continua na primeira linha");
     }
 
     #[test]

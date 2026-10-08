@@ -383,9 +383,10 @@ const LIMIAR_ANALOGICO_NAV: f32 = 0.5;
 ///   aba é só LB/RB (`scout`);
 /// - o Y não vai para o ImGui (ali ele abre o modo de janelas): é o botão
 ///   "Opções" do Scout, lido à parte (`scout::comandos_controle`);
-/// - o Select (Back) também não: ele abre as Configurações do Scout.
+/// - o Select (Back) também não: ele abre as Configurações do Scout;
+/// - o X (quadrado) também não: ordena a lista Tabular pela coluna escolhida.
 pub fn para_navegacao(estado: EstadoControle) -> EstadoControle {
-    let mut botoes = estado.botoes & !(botao::Y | botao::BACK);
+    let mut botoes = estado.botoes & !(botao::Y | botao::BACK | botao::X);
     let x = normalizar_eixo(estado.lx, ZONA_MORTA_ANALOGICO);
     let y = normalizar_eixo(estado.ly, ZONA_MORTA_ANALOGICO);
     if y >= LIMIAR_ANALOGICO_NAV {
@@ -440,8 +441,8 @@ mod tests {
 
     #[test]
     fn select_never_reaches_imgui_as_a_cancel() {
-        let estado = EstadoControle { botoes: botao::BACK | botao::Y | botao::A, ..Default::default() };
-        assert_eq!(para_navegacao(estado).botoes, botao::A, "Select e Y são do Scout; A segue para o ImGui");
+        let estado = EstadoControle { botoes: botao::BACK | botao::Y | botao::X | botao::A, ..Default::default() };
+        assert_eq!(para_navegacao(estado).botoes, botao::A, "Select, Y e X são do Scout; A segue para o ImGui");
     }
 
     #[test]

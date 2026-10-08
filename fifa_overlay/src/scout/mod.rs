@@ -62,6 +62,11 @@ pub struct ComandosControle {
     /// listas de jogadores (Todos, Detalhados, Gol, Zag, Mei, Ata).
     pub grupo_anterior: bool,
     pub grupo_proximo: bool,
+    /// D-pad ← / →: o cursor de coluna da lista Tabular (com o foco numa linha).
+    pub coluna_anterior: bool,
+    pub coluna_proxima: bool,
+    /// X (quadrado): ordena a lista Tabular pela coluna do cursor (de novo, inverte).
+    pub ordenar: bool,
 }
 
 pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> ComandosControle {
@@ -75,6 +80,9 @@ pub fn comandos_controle(anterior: EstadoControle, atual: EstadoControle) -> Com
         configuracoes: borda(botao::BACK),
         grupo_anterior: atual.lt >= LIMIAR_GATILHO && anterior.lt < LIMIAR_GATILHO,
         grupo_proximo: atual.rt >= LIMIAR_GATILHO && anterior.rt < LIMIAR_GATILHO,
+        coluna_anterior: borda(botao::DPAD_ESQUERDA),
+        coluna_proxima: borda(botao::DPAD_DIREITA),
+        ordenar: borda(botao::X),
     }
 }
 
@@ -340,6 +348,8 @@ impl Scout {
         // `opcoes_pedidas` no render deste mesmo frame)
         self.state.definir_opcoes(false);
         self.state.definir_passo_de_grupo(0);
+        self.state.definir_passo_de_coluna(0);
+        self.state.definir_ordenar_pedido(false);
         // `ja_alternou` com o painel fechado agora = o F10 acabou de fechá-lo
         let estava_aberto = self.painel_aberto || ja_alternou;
 
@@ -385,6 +395,12 @@ impl Scout {
             } else {
                 if comandos.configuracoes {
                     self.state.abrir_configuracoes();
+                }
+                if comandos.coluna_proxima != comandos.coluna_anterior {
+                    self.state.definir_passo_de_coluna(if comandos.coluna_proxima { 1 } else { -1 });
+                }
+                if comandos.ordenar {
+                    self.state.definir_ordenar_pedido(true);
                 }
                 if comandos.grupo_proximo != comandos.grupo_anterior {
                     self.state.definir_passo_de_grupo(if comandos.grupo_proximo { 1 } else { -1 });
