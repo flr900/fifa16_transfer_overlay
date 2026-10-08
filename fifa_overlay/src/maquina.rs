@@ -58,7 +58,10 @@ const TAMANHO_DO_CABECALHO: usize = 0x40;
 /// Campo que alterna `0x1300 <-> 0x1301` a cada `B` (estado de carregamento da tela).
 const DESLOC_ESTADO_DA_TELA: usize = 0x13A0;
 /// Quanto da mensagem apontada por `+0x18` se despeja.
-const TAMANHO_DA_MENSAGEM: usize = 0x80;
+const TAMANHO_DA_MENSAGEM: usize = 0x300;
+/// Quantos ponteiros de heap da mensagem se seguem (um nível), e quanto de cada um.
+const MAX_PONTEIROS_SEGUIDOS: usize = 4;
+const TAMANHO_DO_APONTADO: usize = 0x80;
 const MAX_LINHAS_DO_AMOSTRADOR: u32 = 400;
 
 /// Posições (múltiplas de 8) de `valor` num bloco de bytes.
@@ -172,29 +175,50 @@ fn procurar(base_exe: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Despeja `TAMANHO_DA_MENSAGEM` bytes de uma mensagem apontada por um campo, palavra
-/// por palavra, com o que cada valor é (ação, imagem, texto).
-fn despejar_mensagem(endereco: usize, instancia: usize, base_exe: usize, tamanho_imagem: usize) -> Vec<String> {
-    let Some(bytes) = read_region_bytes(&Region { base: endereco, size: TAMANHO_DA_MENSAGEM }) else {
-        return vec![format!("  (mensagem em 0x{endereco:X} ilegível)")];
-    };
+/// Hexdump de 16 em 16 bytes, com a parte legível em ASCII, sem as linhas todas nulas.
+fn hexdump(bytes: &[u8], rotulo: &str) -> Vec<String> {
     bytes
-        .chunks_exact(8)
+        .chunks(16)
         .enumerate()
-        .filter_map(|(i, c)| {
-            let v = u64::from_le_bytes(<[u8; 8]>::try_from(c).ok()?);
-            if v == 0 {
-                return None;
-            }
-            let ponteiro_para_texto = usize::try_from(v).ok().and_then(ler_texto).map(|t| format!("  ; texto \"{t}\"")).unwrap_or_default();
-            Some(format!(
-                "  msg+0x{:X}: 0x{v:X}{}{}",
-                i * 8,
-                descrever(v, instancia, base_exe, tamanho_imagem, nome_da_acao),
-                ponteiro_para_texto
-            ))
+        .filter(|(_, c)| c.iter().any(|b| *b != 0))
+        .map(|(i, c)| {
+            let hex: Vec<String> = c.iter().map(|b| format!("{b:02X}")).collect();
+            let ascii: String = c.iter().map(|b| if (0x20..0x7F).contains(b) { *b as char } else { '.' }).collect();
+            format!("  {rotulo}+0x{:03X}: {:<47}  {ascii}", i * 16, hex.join(" "))
         })
         .collect()
+}
+
+/// Parece um ponteiro de heap de 64 bits (e não um número, um RVA ou texto)?
+fn parece_ponteiro_de_heap(v: u64, instancia: usize, base_exe: usize, tamanho_imagem: usize) -> Option<usize> {
+    let v = usize::try_from(v).ok()?;
+    let dentro_da_imagem = v >= base_exe && v < base_exe + tamanho_imagem;
+    let dentro_do_objeto = v >= instancia && v < instancia + TAMANHO_DO_DESPEJO;
+    ((0x1_0000..0x7FFF_FFFF_FFFF).contains(&v) && v % 8 == 0 && !dentro_da_imagem && !dentro_do_objeto).then_some(v)
+}
+
+/// Despeja a mensagem (hexdump) e o que os ponteiros de heap dela apontam, um nível.
+fn despejar_mensagem(endereco: usize, instancia: usize, base_exe: usize, tamanho_imagem: usize) -> Vec<String> {
+    let Some(bytes) = read_region_bytes(&Region { base: endereco, size: TAMANHO_DA_MENSAGEM }).or_else(|| read_region_bytes(&Region { base: endereco, size: 0x80 })) else {
+        return vec![format!("  (mensagem em 0x{endereco:X} ilegível)")];
+    };
+    let mut linhas = hexdump(&bytes, "msg");
+    let mut vistos = Vec::new();
+    for (i, c) in bytes.chunks_exact(8).enumerate() {
+        let Ok(arr) = <[u8; 8]>::try_from(c) else { continue };
+        let v = u64::from_le_bytes(arr);
+        let Some(p) = parece_ponteiro_de_heap(v, instancia, base_exe, tamanho_imagem) else { continue };
+        if p == endereco || vistos.contains(&p) || vistos.len() >= MAX_PONTEIROS_SEGUIDOS {
+            continue;
+        }
+        vistos.push(p);
+        linhas.push(format!("  msg+0x{:X} -> 0x{p:X}:", i * 8));
+        match read_region_bytes(&Region { base: p, size: TAMANHO_DO_APONTADO }) {
+            Some(apontado) => linhas.extend(hexdump(&apontado, "  ->")),
+            None => linhas.push("    (ilegível)".to_string()),
+        }
+    }
+    linhas
 }
 
 /// O amostrador: lê o cabeçalho e o campo de estado da tela a cada milissegundo e
@@ -389,6 +413,26 @@ mod tests {
         bloco[41..49].copy_from_slice(&0x1_4306_8590u64.to_le_bytes()); // desalinhado: não conta
         assert_eq!(achar_valor_alinhado(&bloco, 0x1_4306_8590), [16]);
         assert!(achar_valor_alinhado(&bloco, 7).is_empty() || achar_valor_alinhado(&bloco, 7).iter().all(|p| p % 8 == 0));
+    }
+
+    #[test]
+    fn the_hexdump_skips_empty_lines_and_shows_readable_text() {
+        let mut b = vec![0u8; 48];
+        b[16..21].copy_from_slice(b"radio");
+        let linhas = hexdump(&b, "msg");
+        assert_eq!(linhas.len(), 1, "só a linha com conteúdo");
+        assert!(linhas[0].contains("msg+0x010") && linhas[0].contains("72 61 64 69 6F") && linhas[0].ends_with("radio..........."), "{}", linhas[0]);
+    }
+
+    #[test]
+    fn only_aligned_heap_pointers_outside_the_image_and_the_object_are_followed() {
+        let (inst, base, tam) = (0x5000_0000usize, 0x1_4000_0000usize, 0x0952_4000usize);
+        assert_eq!(parece_ponteiro_de_heap(0x8CBD_6700, inst, base, tam), Some(0x8CBD_6700));
+        assert_eq!(parece_ponteiro_de_heap(0x8CBD_6701, inst, base, tam), None, "desalinhado");
+        assert_eq!(parece_ponteiro_de_heap((base + 0x308_D2E8) as u64, inst, base, tam), None, "imagem");
+        assert_eq!(parece_ponteiro_de_heap((inst + 0x40) as u64, inst, base, tam), None, "objeto");
+        assert_eq!(parece_ponteiro_de_heap(0x1_0000_0001, inst, base, tam), None, "um contador desalinhado não é ponteiro");
+        assert_eq!(parece_ponteiro_de_heap(0x7, inst, base, tam), None);
     }
 
     #[test]
