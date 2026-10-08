@@ -17,6 +17,8 @@ mod campo_atributo;
 mod campo_fit;
 mod escolhidos;
 mod lista_jogadores;
+mod olheiro_card;
+mod opcoes_olheiro;
 mod ficha_jogador;
 mod nova_missao;
 mod olheiros;
@@ -89,7 +91,11 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
         state.cancelar_demissao();
     }
     let filtrando = state.painel_de_filtros().is_some();
-    let modal = confirmando || trocando.is_some() || demitindo || filtrando;
+    let com_opcoes = state.opcoes_do_olheiro().is_some();
+    if !com_opcoes {
+        state.fechar_opcoes_do_olheiro();
+    }
+    let modal = confirmando || trocando.is_some() || demitindo || filtrando || com_opcoes;
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -186,7 +192,7 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             nav.push(satelite);
         }
         Some(Pedido::FecharCampo) => nav.pop(),
-        Some(Pedido::Demitir(id)) => state.pedir_demissao(id),
+        Some(Pedido::OpcoesDoOlheiro(id)) => state.abrir_opcoes_do_olheiro(id),
         Some(Pedido::AbrirJogadorDoRelatorio(relatorio, player_id)) => {
             state.abrir_relatorio(relatorio);
             if state.relatorio_aberto().is_some() {
@@ -237,6 +243,33 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
                 nav.pedir_foco();
             }
             None => {}
+        }
+    }
+    if state.opcoes_do_olheiro().is_some() {
+        match opcoes_olheiro::render(ui, fonts, state) {
+            opcoes_olheiro::Acao::Nenhuma => {}
+            opcoes_olheiro::Acao::Fechar => {
+                state.fechar_opcoes_do_olheiro();
+                nav.pedir_foco();
+            }
+            opcoes_olheiro::Acao::NovaMissao(id) | opcoes_olheiro::Acao::MudarRegiao(id) => {
+                state.fechar_opcoes_do_olheiro();
+                state.abrir_nova_missao(id);
+                if state.tem_nova_missao() {
+                    nav.push(Satelite::NovaMissao);
+                }
+            }
+            opcoes_olheiro::Acao::AjustarPerfil(id) => {
+                state.fechar_opcoes_do_olheiro();
+                state.abrir_ajuste_de_perfil(id);
+                if state.tem_nova_missao() {
+                    nav.push(Satelite::NovaMissao);
+                }
+            }
+            opcoes_olheiro::Acao::Demitir(id) => {
+                state.fechar_opcoes_do_olheiro();
+                state.pedir_demissao(id);
+            }
         }
     }
     if let Some(lista) = state.painel_de_filtros() {
@@ -463,8 +496,8 @@ enum Pedido {
     /// Escolheu (ou voltou) no painel de campo ou no seletor: volta à tela
     /// de baixo.
     FecharCampo,
-    /// "Demitir" num Olheiro: abre o aviso de confirmação.
-    Demitir(uuid::Uuid),
+    /// As Opções (Y) de um Olheiro contratado.
+    OpcoesDoOlheiro(uuid::Uuid),
     /// Abre o Relatório de origem de um jogador e, por cima, a Ficha dele
     /// (aba Relatórios por jogador, Base do Scout).
     AbrirJogadorDoRelatorio(uuid::Uuid, u32),
@@ -589,7 +622,7 @@ fn conteudo_da_tela(
                 *pedido = match olheiros::render(ui, fonts, state) {
                     olheiros::Acao::AbrirContratacao => Some(Pedido::AbrirContratacao),
                     olheiros::Acao::Ativar(id) => Some(Pedido::AtivarOlheiro(id)),
-                    olheiros::Acao::Demitir(id) => Some(Pedido::Demitir(id)),
+                    olheiros::Acao::Opcoes(id) => Some(Pedido::OpcoesDoOlheiro(id)),
                     olheiros::Acao::Nenhuma => None,
                 };
             }

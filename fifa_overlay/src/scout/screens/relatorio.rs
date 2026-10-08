@@ -202,7 +202,8 @@ pub fn formatar_faixa(faixa: FaixaAtributo) -> String {
 }
 
 /// Jogadores do melhor para o pior pelo meio da faixa de Overall (empate:
-/// Potencial, depois nome).
+/// Potencial, depois nome). A lista na tela usa `scout::lista::ordenar`.
+#[cfg(test)]
 pub fn ordenar(jogadores: &[JogadorEncontrado]) -> Vec<&JogadorEncontrado> {
     let meio = |f: FaixaAtributo| u16::from(f.min) + u16::from(f.max);
     let mut lista: Vec<&JogadorEncontrado> = jogadores.iter().collect();

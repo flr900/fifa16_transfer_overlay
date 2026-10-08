@@ -22,21 +22,16 @@ use imgui::{DrawListMut, SelectableFlags, StyleColor, TableColumnFlags, TableCol
 use uuid::Uuid;
 
 use super::componentes::{self, badge_tier, desenhar_badge, rotulo_com_estrelas, EstiloBotao};
+use super::olheiro_card::{self, Rodape};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar};
 use crate::save_repo::Confederacao;
 use crate::scout::minifaces::Rosto;
 use crate::scout::quality::{self, Mercado};
-use crate::scout::state::{Carga, Densidade, Especializacao, OfertaOlheiro, Olheiro, OlheiroContratado, ScoutState, Tier};
+use crate::scout::state::{Carga, Densidade, Especializacao, OfertaOlheiro, Olheiro, OlheiroContratado, ScoutState, StatusMissao, Tier};
 
-const ALTURA_CARD: f32 = 112.0;
-/// Largura do botão "Demitir" ao lado do card (e da coluna na visão Tabular).
-const LARGURA_DEMITIR: f32 = 110.0;
 /// Largura de cada botão do filtro de continente.
 const LARGURA_FILTRO: f32 = 150.0;
-const LADO_AVATAR: f32 = 44.0;
-const LARGURA_BOTAO: f32 = 132.0;
-const RAIO_DOT: f32 = 4.0;
 const ALTURA_LINHA: f32 = 34.0;
 const LARGURA_ALTERNADOR: f32 = 110.0;
 
@@ -55,8 +50,9 @@ pub enum Acao {
     AbrirContratacao,
     /// Ativou um Olheiro contratado (ver `ScoutState::destino_do_olheiro`).
     Ativar(Uuid),
-    /// "Demitir" num Olheiro contratado: abre o aviso de confirmação.
-    Demitir(Uuid),
+    /// Y (ou o botão direito) num Olheiro contratado: as Opções dele
+    /// (cancelar a pesquisa, ajustar o perfil, mudar de região, demitir).
+    Opcoes(Uuid),
 }
 
 /// O que o jogador fez no mercado neste frame.
@@ -269,57 +265,103 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         Some(_) => state.definir_densidade_olheiros(Densidade::Tabular),
         None => {}
     }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_4);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let y = ui.cursor_pos()[1];
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
+        ui.text_colored(theme::TEXT_SECONDARY, "Y (ou botão direito) abre as opções do Olheiro: pesquisa, perfil, demissão.");
+    });
     ui.dummy([0.0, theme::ESPACO_2]);
     let contratados = state.olheiros_contratados();
     if contratados.is_empty() {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_NENHUM_CONTRATADO));
         ui.dummy([0.0, theme::ESPACO_1]);
     }
+    let regioes: std::collections::HashMap<Uuid, String> = contratados
+        .iter()
+        .filter_map(|c| c.missao.as_ref().map(|m| (c.olheiro.id, state.regiao_da_missao(&m.filtros))))
+        .collect();
+    let pediu_opcoes = state.opcoes_pedidas();
     com_nacoes(state, |nacoes| match densidade {
-        Densidade::Cards => cards(ui, fonts, &contratados, nacoes),
-        Densidade::Tabular => tabela(ui, fonts, &contratados),
+        Densidade::Cards => cards(ui, fonts, &contratados, nacoes, &regioes, pediu_opcoes),
+        Densidade::Tabular => tabela(ui, fonts, &contratados, pediu_opcoes),
     })
 }
 
-fn cards(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], nacoes: &Nacoes<'_>) -> Acao {
-    let mut acao = Acao::Nenhuma;
-    for (indice, c) in contratados.iter().enumerate() {
-        let lado = Lado::Status { status: texto_status(c), cor: cor_status(c), relatorios: c.relatorios };
-        let revelar = if indice == 0 { Revelar::Topo } else { Revelar::Nada };
-        let detalhe = c.ocupado().then(|| texto_missao(c));
-        let largura = ui.content_region_avail()[0] - LARGURA_DEMITIR - theme::ESPACO_2;
-        let inicio = ui.cursor_pos();
-        if card(ui, fonts, &c.olheiro.id.to_string(), Some(&c.olheiro), detalhe.as_deref(), nacoes, &lado, revelar, largura) {
-            acao = Acao::Ativar(c.olheiro.id);
-        }
-        // "Demitir" ao lado do card, na altura do meio dele
-        ui.same_line_with_spacing(0.0, theme::ESPACO_2);
-        let [x, y] = ui.cursor_pos();
-        ui.set_cursor_pos([x, y + (ALTURA_CARD - theme::ALVO_MINIMO) * 0.5]);
-        if botao_demitir(ui, fonts, c) {
-            acao = Acao::Demitir(c.olheiro.id);
-        }
-        // o próximo card começa logo abaixo deste (posição absoluta: o botão
-        // deslocado não pode empurrar a lista)
-        ui.set_cursor_pos([inicio[0], inicio[1] + ALTURA_CARD + theme::ESPACO_1]);
-        ui.dummy([0.0, 0.0]);
+/// O que cada Olheiro faz, em até duas linhas para o rodapé do card:
+/// a Missão (tipo, onde, contrato ou prazo), o acompanhamento dos Escolhidos
+/// ou o convite para encomendar uma Missão.
+pub fn texto_situacao(c: &OlheiroContratado, regiao: &str) -> Vec<String> {
+    if let Some(m) = &c.missao {
+        let natureza = if m.continua { "Missão contínua" } else { "Missão" };
+        let onde = if regiao.is_empty() { String::new() } else { format!(" · {regiao}") };
+        let prazo = if m.status == StatusMissao::EmExecucao {
+            "Gerando o Relatório…".to_string()
+        } else if m.tem_contrato() {
+            format!("Contrato até {}", formatar_data(m.fim_do_contrato()))
+        } else if m.continua {
+            format!("Bloco até {}", formatar_data(m.prazo_estimado))
+        } else {
+            format!("Pronta em {}", formatar_data(m.prazo_estimado))
+        };
+        return vec![format!("{natureza} {}{onde}", super::nova_missao::nome_tipo(m.tipo)), prazo];
     }
-    let revelar = if contratados.is_empty() { Revelar::Topo } else { Revelar::Nada };
-    let largura = ui.content_region_avail()[0];
-    if card(ui, fonts, "contratar", None, Some(DETALHE_CONTRATAR), nacoes, &Lado::Novo, revelar, largura) {
-        acao = Acao::AbrirContratacao;
+    if c.acompanhando {
+        return vec![
+            "Acompanha os Escolhidos".to_string(),
+            format!("Mantém até {} jogadores atualizados", c.olheiro.capacidade_acompanhamento()),
+        ];
     }
-    acao
+    vec!["Livre: A encomenda uma Missão".to_string(), texto_relatorios(c.relatorios)]
 }
 
-/// "Demitir": inerte com o Olheiro em Missão (a Missão já foi paga).
-fn botao_demitir(ui: &Ui, fonts: Option<&Fonts>, c: &OlheiroContratado) -> bool {
-    let _id = ui.push_id(format!("demitir_{}", c.olheiro.id));
-    let clicou = componentes::botao_com_largura(ui, fonts, "Demitir", EstiloBotao::Secundario, !c.em_missao, Some(LARGURA_DEMITIR));
-    if c.em_missao && ui.is_item_hovered() {
-        ui.tooltip_text("Em Missão: espere terminar para demitir.");
+/// Os Olheiros em grade, mais "Contratar Olheiro" no fim. Y no card em
+/// foco (ou o botão direito) pede as Opções dele.
+fn cards(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    contratados: &[OlheiroContratado],
+    nacoes: &Nacoes<'_>,
+    regioes: &std::collections::HashMap<Uuid, String>,
+    pediu_opcoes: bool,
+) -> Acao {
+    let mut acao = Acao::Nenhuma;
+    let por_linha = olheiro_card::por_linha(ui.content_region_avail()[0]);
+    let total = contratados.len() + 1;
+    for indice in 0..total {
+        if indice % por_linha != 0 {
+            ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+        }
+        let resultado = match contratados.get(indice) {
+            Some(c) => {
+                let regiao = regioes.get(&c.olheiro.id).map_or("", String::as_str);
+                let rodape = Rodape::Situacao { status: texto_status(c), cor: cor_status(c), linhas: texto_situacao(c, regiao) };
+                let r = olheiro_card::desenhar(ui, fonts, &c.olheiro.id.to_string(), &c.olheiro, nacoes, &[], &rodape);
+                if r.ativou {
+                    acao = Acao::Ativar(c.olheiro.id);
+                }
+                if r.opcoes || (r.focado && pediu_opcoes) {
+                    acao = Acao::Opcoes(c.olheiro.id);
+                }
+                r
+            }
+            None => {
+                let r = olheiro_card::desenhar_novo(ui, fonts, "contratar", ROTULO_CONTRATAR, DETALHE_CONTRATAR);
+                if r.ativou {
+                    acao = Acao::AbrirContratacao;
+                }
+                r
+            }
+        };
+        // o primeiro card em foco: rola até o topo (o alternador não é card)
+        if resultado.focado && indice == 0 && ui.scroll_y() > 0.0 {
+            ui.set_scroll_y(0.0);
+        }
+        if indice % por_linha == por_linha - 1 {
+            ui.dummy([0.0, theme::ESPACO_1]);
+        }
     }
-    clicou
+    acao
 }
 
 /// Verde livre, dourado em Missão, roxo acompanhando.
@@ -334,14 +376,14 @@ fn cor_status(c: &OlheiroContratado) -> [f32; 4] {
 }
 
 /// Visão Tabular: uma linha por Olheiro e, por último, "Contratar Olheiro".
-fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> Acao {
+fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], pediu_opcoes: bool) -> Acao {
     let mut acao = Acao::Nenhuma;
     let flags = TableFlags::ROW_BG | TableFlags::BORDERS_INNER_H | TableFlags::SIZING_FIXED_FIT | TableFlags::NO_SAVED_SETTINGS;
     let _c1 = ui.push_style_color(StyleColor::TableRowBg, theme::TRANSPARENTE);
     let _c2 = ui.push_style_color(StyleColor::TableRowBgAlt, theme::LINHA_ALTERNADA);
     let _c3 = ui.push_style_color(StyleColor::TableBorderLight, theme::BORDER_HAIRLINE_SUBTLE);
     let _c4 = ui.push_style_color(StyleColor::TableHeaderBg, theme::BG_PANEL_RAISED);
-    let Some(_tabela) = ui.begin_table_with_flags("##tabela_olheiros", 7, flags) else {
+    let Some(_tabela) = ui.begin_table_with_flags("##tabela_olheiros", 6, flags) else {
         return acao;
     };
     let coluna = |nome: &str, largura: f32| {
@@ -350,8 +392,8 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> 
         setup.init_width_or_weight = if largura > 0.0 { largura } else { 1.0 };
         setup
     };
-    let nomes = ["Olheiro", "Foco", "Tier", "Status", "Missão", "Relatórios", ""];
-    for (nome, largura) in nomes.into_iter().zip([200.0, 210.0, 70.0, 120.0, 0.0, 110.0, LARGURA_DEMITIR + theme::ESPACO_2]) {
+    let nomes = ["Olheiro", "Foco", "Tier", "Status", "Missão", "Relatórios"];
+    for (nome, largura) in nomes.into_iter().zip([200.0, 210.0, 70.0, 120.0, 0.0, 110.0]) {
         ui.table_setup_column_with(coluna(nome, largura));
     }
     com_fonte(ui, fonts.map(|f| f.meta), || {
@@ -365,8 +407,12 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> 
     for c in contratados {
         let _id = ui.push_id(c.olheiro.id.to_string());
         ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
-        if linha_selecionavel(ui) {
+        let (ativou, focada) = linha_selecionavel(ui);
+        if ativou {
             acao = Acao::Ativar(c.olheiro.id);
+        }
+        if focada && pediu_opcoes {
+            acao = Acao::Opcoes(c.olheiro.id);
         }
         texto_na_celula(ui, fonts.map(|f| f.body), &c.olheiro.nome_exibicao(), theme::TEXT_PRIMARY);
         ui.table_set_column_index(1);
@@ -382,13 +428,9 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> 
         texto_na_celula(ui, fonts.map(|f| f.meta), &texto_missao(c), theme::TEXT_SECONDARY);
         ui.table_set_column_index(5);
         texto_na_celula(ui, fonts.map(|f| f.meta), &texto_relatorios(c.relatorios), theme::TEXT_SECONDARY);
-        ui.table_set_column_index(6);
-        if botao_demitir(ui, fonts, c) {
-            acao = Acao::Demitir(c.olheiro.id);
-        }
     }
     ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
-    if linha_selecionavel(ui) {
+    if linha_selecionavel(ui).0 {
         acao = Acao::AbrirContratacao;
     }
     texto_na_celula(ui, fonts.map(|f| f.heading), &format!("+ {ROTULO_CONTRATAR}"), theme::FIELD_GREEN);
@@ -399,7 +441,7 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> 
 
 /// Linha inteira selecionável (mouse e controle), a partir da coluna 0;
 /// deixa o cursor na coluna 0 para o texto.
-fn linha_selecionavel(ui: &Ui) -> bool {
+fn linha_selecionavel(ui: &Ui) -> (bool, bool) {
     ui.table_set_column_index(0);
     let inicio = ui.cursor_pos();
     let _c = ui.push_style_color(StyleColor::Header, theme::ACCENT_PRIMARY_DIM);
@@ -409,8 +451,9 @@ fn linha_selecionavel(ui: &Ui) -> bool {
         .flags(SelectableFlags::SPAN_ALL_COLUMNS | SelectableFlags::ALLOW_ITEM_OVERLAP)
         .size([0.0, ALTURA_LINHA - 4.0])
         .build();
+    let focada = ui.is_item_focused() && ui.io().nav_visible;
     ui.set_cursor_pos(inicio);
-    ativou
+    (ativou, focada)
 }
 
 fn texto_na_celula(ui: &Ui, fonte: Option<imgui::FontId>, texto: &str, cor: [f32; 4]) {
@@ -478,11 +521,17 @@ pub fn render_contratacao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_FILTRO_VAZIO));
     }
     com_nacoes(state, |nacoes| {
+        let por_linha = olheiro_card::por_linha(ui.content_region_avail()[0]);
         for (indice, oferta) in visiveis.iter().enumerate() {
-            let revelar = if indice == 0 { Revelar::Topo } else { Revelar::Nada };
-            let largura = ui.content_region_avail()[0];
-            if card(ui, fonts, &oferta.id.to_string(), Some(&oferta.olheiro), None, nacoes, &Lado::Contratar((*oferta).clone()), revelar, largura) {
+            if indice % por_linha != 0 {
+                ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+            }
+            let r = olheiro_card::desenhar(ui, fonts, &oferta.id.to_string(), &oferta.olheiro, nacoes, &[], &Rodape::Oferta(oferta));
+            if r.ativou {
                 acao = AcaoContratacao::Contratar((*oferta).clone());
+            }
+            if indice % por_linha == por_linha - 1 {
+                ui.dummy([0.0, theme::ESPACO_1]);
             }
         }
     });
@@ -563,220 +612,6 @@ pub fn estrelas_do_perfil(ui: &Ui, fonts: Option<&Fonts>, dl: &DrawListMut<'_>, 
 pub fn texto_estrelas(perfil: &quality::PerfilOlheiro) -> String {
     let partes: Vec<String> = Especializacao::TODAS.iter().map(|&e| format!("{} {}", e.nome(), perfil.atributo(e).texto())).collect();
     format!("{} · Rede de contatos {} (estrelas de 0 a 5)", partes.join(" · "), perfil.rede.texto())
-}
-
-/// O que vai no lado direito do card.
-enum Lado {
-    Contratar(OfertaOlheiro),
-    Status { status: &'static str, cor: [f32; 4], relatorios: usize },
-    /// A entrada "Contratar Olheiro" no fim da lista.
-    Novo,
-}
-
-/// O que mostrar ACIMA do card quando ele recebe o foco do controle.
-#[derive(Clone, Copy, PartialEq)]
-enum Revelar {
-    /// Só o card (o ImGui já rola para ele).
-    Nada,
-    /// Primeiro card da tela: rola até o topo (título e estado vazio).
-    Topo,
-}
-
-/// Desenha um card como UM item navegável (o card inteiro): mouse e
-/// controle focam o card, e o ImGui rola para mostrá-lo por completo.
-/// `olheiro`: `None` na entrada "Contratar Olheiro". Devolve `true` se o
-/// card foi ativado (clique ou A) — numa oferta, só com orçamento
-/// suficiente. Tudo dentro do card é desenhado pelo draw list (nenhum
-/// outro item), para não haver dois alvos de foco sobrepostos.
-#[allow(clippy::too_many_arguments)]
-fn card(
-    ui: &Ui,
-    fonts: Option<&Fonts>,
-    chave: &str,
-    olheiro: Option<&Olheiro>,
-    detalhe: Option<&str>,
-    nacoes: &Nacoes<'_>,
-    lado: &Lado,
-    revelar: Revelar,
-    largura: f32,
-) -> bool {
-    let _id = ui.push_id(chave);
-    let min = ui.cursor_screen_pos();
-    let altura = if olheiro.is_some() { ALTURA_CARD } else { 72.0 };
-    let max = [min[0] + largura, min[1] + altura];
-
-    let ativou = ui.invisible_button("##card", [largura, altura]);
-    let hover = ui.is_item_hovered();
-    let focado = ui.is_item_focused() && ui.io().nav_visible;
-    if focado {
-        revelar_acima(ui, revelar);
-    }
-
-    let dl = ui.get_window_draw_list();
-    // Fundo e borda: hover e foco têm a MESMA borda roxa de 2 px (UX-DR19).
-    let (borda, espessura) = if hover || focado {
-        (theme::ACCENT_PRIMARY, super::ESPESSURA_FOCO)
-    } else if matches!(lado, Lado::Status { .. }) {
-        (theme::BORDER_HAIRLINE, 1.0)
-    } else {
-        (theme::BORDER_HAIRLINE_SUBTLE, 1.0)
-    };
-    dl.add_rect(min, max, theme::BG_PANEL_RAISED).filled(true).rounding(theme::RAIO_MD).build();
-    dl.add_rect(min, max, borda).rounding(theme::RAIO_MD).thickness(espessura).build();
-
-    // Avatar com a sigla do foco (ou "+").
-    let a_min = [min[0] + theme::ESPACO_4, min[1] + (altura - LADO_AVATAR) * 0.5];
-    let a_max = [a_min[0] + LADO_AVATAR, a_min[1] + LADO_AVATAR];
-    dl.add_rect(a_min, a_max, [1.0, 1.0, 1.0, 0.05]).filled(true).rounding(theme::RAIO_MD).build();
-    dl.add_rect(a_min, a_max, theme::BORDER_HAIRLINE).rounding(theme::RAIO_MD).build();
-    let (avatar, cor_avatar) = match olheiro {
-        Some(o) => (sigla(o.perfil().foco()), theme::ACCENT_PRIMARY),
-        None => ("+", theme::FIELD_GREEN),
-    };
-    texto_centralizado(ui, fonts.map(|f| f.heading), &dl, avatar, a_min, a_max, cor_avatar);
-
-    // Bandeira + nome + badge; origem (nação e mercados); estrelas.
-    let x_texto = a_max[0] + theme::ESPACO_3;
-    let y_nome = min[1] + theme::ESPACO_3;
-    let nome = olheiro.map_or_else(|| ROTULO_CONTRATAR.to_string(), Olheiro::nome_exibicao);
-    let altura_nome = com_fonte(ui, fonts.map(|f| f.heading), || ui.calc_text_size(&nome)[1]);
-    // a bandeira da nação vem antes do nome (sempre visível, até com o
-    // Olheiro em Missão e o detalhe ocupado pelo texto da Missão)
-    let x_nome = match olheiro.and_then(|o| o.nacao.as_ref()) {
-        Some(n) => {
-            let altura_bandeira = (altura_nome * 0.72).round();
-            let w = componentes::bandeira(&dl, (nacoes.bandeira)(n.id), [x_texto, y_nome + (altura_nome - altura_bandeira) * 0.5], altura_bandeira);
-            x_texto + w + theme::ESPACO_2
-        }
-        None => x_texto,
-    };
-    let largura_nome = com_fonte(ui, fonts.map(|f| f.heading), || {
-        dl.add_text([x_nome, y_nome], theme::TEXT_PRIMARY, &nome);
-        ui.calc_text_size(&nome)[0]
-    });
-    if let Some(o) = olheiro {
-        let badge = desenhar_badge(ui, fonts, &dl, &badge_tier(o.tier), [x_nome + largura_nome + theme::ESPACO_2, y_nome], altura_nome);
-        // foco por extenso ao lado do badge
-        let x_foco = x_nome + largura_nome + theme::ESPACO_2 + badge[0] + theme::ESPACO_2;
-        com_fonte(ui, fonts.map(|f| f.meta), || {
-            let h = ui.text_line_height();
-            dl.add_text([x_foco, y_nome + (altura_nome - h) * 0.5], theme::TEXT_SECONDARY, o.perfil().foco().nome());
-        });
-    }
-    let y_detalhe = y_nome + altura_nome + theme::ESPACO_1;
-    // espaço do lado direito (custo e botão, ou status), que o texto não pisa
-    let reservado = match lado {
-        Lado::Contratar(_) => LARGURA_BOTAO + 150.0,
-        Lado::Status { .. } => 190.0,
-        Lado::Novo => theme::ESPACO_4,
-    };
-    let largura_detalhe = (max[0] - reservado - x_texto).max(120.0);
-    let altura_detalhe = match (olheiro, detalhe) {
-        (Some(o), None) => desenhar_chips(ui, fonts, &dl, [x_texto, y_detalhe], largura_detalhe, 2, &chips_do_olheiro(o, nacoes, true))[1],
-        (_, texto) => com_fonte(ui, fonts.map(|f| f.meta), || {
-            dl.add_text([x_texto, y_detalhe], theme::TEXT_SECONDARY, texto.unwrap_or_default());
-            ui.text_line_height()
-        }),
-    };
-    if let Some(o) = olheiro {
-        let perfil = o.perfil();
-        estrelas_do_perfil(ui, fonts, &dl, [x_texto, y_detalhe + altura_detalhe + theme::ESPACO_2], &perfil);
-        if hover || focado {
-            ui.tooltip_text(texto_estrelas(&perfil));
-        }
-    }
-
-    // Lado direito.
-    let direita = max[0] - theme::ESPACO_4;
-    match lado {
-        Lado::Contratar(oferta) => {
-            let b_min = [direita - LARGURA_BOTAO, min[1] + (altura - theme::ALVO_MINIMO) * 0.5];
-            let b_max = [direita, b_min[1] + theme::ALVO_MINIMO];
-            custo(ui, fonts, &dl, oferta, b_min[0] - theme::ESPACO_3, min[1]);
-            let habilitado = oferta.faltam.is_none();
-            let (fundo, texto) = if habilitado {
-                (theme::FIELD_GREEN, theme::BG_BASE)
-            } else {
-                (theme::BOTAO_DESABILITADO, theme::TEXT_DISABLED)
-            };
-            dl.add_rect(b_min, b_max, fundo).filled(true).rounding(theme::RAIO_PADRAO).build();
-            texto_centralizado(ui, fonts.map(|f| f.heading), &dl, "Contratar", b_min, b_max, texto);
-            if let (Some(faltam), true) = (oferta.faltam, hover) {
-                ui.tooltip_text(texto_faltam(faltam));
-            }
-            ativou && habilitado
-        }
-        Lado::Status { status: texto, cor, relatorios } => {
-            status(ui, fonts, &dl, texto, *cor, *relatorios, direita, min[1]);
-            ativou
-        }
-        Lado::Novo => ativou,
-    }
-}
-
-/// Com o foco do controle no primeiro card, rola até o topo (o alternador
-/// e o estado vazio, que ficam acima, não são o card). O ImGui sozinho só
-/// garante o próprio card visível.
-fn revelar_acima(ui: &Ui, revelar: Revelar) {
-    if revelar == Revelar::Topo && ui.scroll_y() > 0.0 {
-        ui.set_scroll_y(0.0);
-    }
-}
-
-/// Texto centralizado num retângulo (fonte opcional do tema).
-fn texto_centralizado(
-    ui: &Ui,
-    fonte: Option<imgui::FontId>,
-    dl: &DrawListMut<'_>,
-    texto: &str,
-    r_min: [f32; 2],
-    r_max: [f32; 2],
-    cor: [f32; 4],
-) {
-    com_fonte(ui, fonte, || {
-        let [w, h] = ui.calc_text_size(texto);
-        let pos = [r_min[0] + (r_max[0] - r_min[0] - w) * 0.5, r_min[1] + (r_max[1] - r_min[1] - h) * 0.5];
-        dl.add_text(pos, cor, texto);
-    });
-}
-
-/// "custo" + valor em fonte mono, alinhados à direita de `x_direita`; sem
-/// orçamento, a primeira linha diz quanto falta (vermelho + texto).
-fn custo(ui: &Ui, fonts: Option<&Fonts>, dl: &DrawListMut<'_>, oferta: &OfertaOlheiro, x_direita: f32, y_card: f32) {
-    let valor = formatar_milhar(oferta.custo);
-    let (rotulo, cor_rotulo) = match oferta.faltam {
-        Some(faltam) => (format!("faltam {}", formatar_milhar(faltam)), theme::DANGER),
-        None => ("custo".to_string(), theme::TEXT_SECONDARY),
-    };
-    let y_rotulo = y_card + theme::ESPACO_3;
-    let altura_rotulo = com_fonte(ui, fonts.map(|f| f.meta), || {
-        let [w, h] = ui.calc_text_size(&rotulo);
-        dl.add_text([x_direita - w, y_rotulo], cor_rotulo, &rotulo);
-        h
-    });
-    com_fonte(ui, fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body)), || {
-        let w = ui.calc_text_size(&valor)[0];
-        dl.add_text([x_direita - w, y_rotulo + altura_rotulo + theme::ESPACO_1], theme::TEXT_PRIMARY, &valor);
-    });
-}
-
-/// Ponto + status (cor e texto); e quantos Relatórios ele já entregou,
-/// embaixo.
-#[allow(clippy::too_many_arguments)]
-fn status(ui: &Ui, fonts: Option<&Fonts>, dl: &DrawListMut<'_>, texto: &str, cor: [f32; 4], relatorios: usize, x_direita: f32, y_card: f32) {
-    let y = y_card + theme::ESPACO_3;
-    let h = com_fonte(ui, fonts.map(|f| f.body), || {
-        let [w, h] = ui.calc_text_size(texto);
-        dl.add_text([x_direita - w, y], cor, texto);
-        let centro = [x_direita - w - theme::ESPACO_2 - RAIO_DOT, y + h * 0.5];
-        dl.add_circle(centro, RAIO_DOT, cor).filled(true).build();
-        h
-    });
-    com_fonte(ui, fonts.map(|f| f.meta), || {
-        let texto = texto_relatorios(relatorios);
-        let w = ui.calc_text_size(&texto)[0];
-        dl.add_text([x_direita - w, y + h + theme::ESPACO_1], theme::TEXT_SECONDARY, &texto);
-    });
 }
 
 #[cfg(test)]

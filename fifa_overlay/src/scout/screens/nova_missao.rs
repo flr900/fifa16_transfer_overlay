@@ -145,11 +145,12 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         return Acao::Cancelou;
     };
 
-    com_fonte(ui, fonts.map(|f| f.heading), || ui.text("Nova Missão"));
+    com_fonte(ui, fonts.map(|f| f.heading), || ui.text(if previa.ajustando.is_some() { "Ajustar o perfil da pesquisa" } else { "Nova Missão" }));
     ui.dummy([0.0, theme::ESPACO_2]);
 
     let mut campo = None;
     let altura_campos = (ui.content_region_avail()[1] - ALTURA_RODAPE).max(120.0);
+    let ajustando = previa.ajustando.is_some();
     // Olheiro e stats à esquerda, filtros à direita (2026-10-05, pedido do
     // Felipe: no formulário antigo não dava para ver o que o Olheiro oferece).
     let largura_olheiro = (ui.content_region_avail()[0] * FRACAO_PAINEL_OLHEIRO).clamp(LARGURA_PAINEL_MIN, LARGURA_PAINEL_MAX);
@@ -181,7 +182,14 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 _ if f.tem_geografia() => "Lendo as ligas…".to_string(),
                 _ => "O mundo todo".to_string(),
             };
-            if campo_painel(ui, fonts, "Filtro geográfico", &geografia) {
+            if ajustando {
+                // ajustar o perfil não muda a região: mudar é rescindir o contrato
+                rotulo(ui, fonts, "Região");
+                com_fonte(ui, fonts.map(|f| f.body), || {
+                    ui.same_line_with_spacing(LARGURA_ROTULO, 0.0);
+                    ui.text(format!("{geografia}  (fixa no contrato)"));
+                });
+            } else if campo_painel(ui, fonts, "Filtro geográfico", &geografia) {
                 campo = Some(Satelite::SelecaoGeografica);
             }
 
@@ -971,6 +979,7 @@ mod tests {
                 continua: false,
                 investimento: Investimento::Padrao,
                 erro: None,
+                ajustando: None,
             },
             olheiros: Vec::new(),
             tipo,
@@ -991,6 +1000,7 @@ mod tests {
             custo: 0,
             rescindindo: None,
             multa: None,
+            ajustando: None,
         }
     }
 

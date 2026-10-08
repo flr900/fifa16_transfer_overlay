@@ -322,6 +322,14 @@ impl Olheiro {
     }
 }
 
+/// Os passos da janela de Opções do Olheiro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassoOpcoes {
+    Menu,
+    /// "Cancelar a pesquisa?": pede a confirmação.
+    ConfirmarCancelamento,
+}
+
 /// Um Olheiro à venda no mercado do mês (Épico 5, item 3). `olheiro` já
 /// vem montado (sem id de verdade: o id é dado na contratação).
 #[derive(Debug, Clone, PartialEq)]
@@ -727,6 +735,10 @@ pub struct RascunhoMissao {
     /// Verba da viagem (Épico 5, item 6).
     pub investimento: quality::Investimento,
     pub erro: Option<ErroCompra>,
+    /// O formulário ajusta o perfil de uma Missão contínua que já corre (a
+    /// Missão dela): mesma região, sem custo, vale a partir do próximo bloco
+    /// (2026-10-08).
+    pub ajustando: Option<Uuid>,
 }
 
 /// Por que o botão confirmar está desabilitado (o texto vai ao lado dele).
@@ -777,6 +789,8 @@ pub struct PreviaMissao {
     pub rescindindo: Option<Uuid>,
     /// A multa que ele cobra por sair do contrato para outra localidade.
     pub multa: Option<MultaDeContrato>,
+    /// O formulário só ajusta o perfil da Missão contínua dele (sem custo).
+    pub ajustando: Option<Uuid>,
 }
 
 /// Multa de rescisão a pagar junto com uma Missão nova (2026-10-07).
@@ -1956,6 +1970,8 @@ pub struct ScoutState {
     prefs_listas: HashMap<ListaId, PrefsLista>,
     /// O painel de filtros (Y) aberto, e de qual lista.
     painel_de_filtros: Option<ListaId>,
+    /// A janela de Opções (Y) de um Olheiro, e em que passo está.
+    opcoes_do_olheiro: Option<(Uuid, PassoOpcoes)>,
     /// A Base do Scout e os Relatórios por jogador, já montados.
     cache_jogadores: std::sync::Mutex<CacheDeJogadores>,
     /// Filtro de continente da tela "Contratar Olheiro" (`None` = todos).
@@ -2058,6 +2074,7 @@ impl ScoutState {
             opcoes_neste_frame: false,
             prefs_listas: HashMap::new(),
             painel_de_filtros: None,
+            opcoes_do_olheiro: None,
             cache_jogadores: std::sync::Mutex::new(CacheDeJogadores::default()),
             filtro_continente: None,
             rolagem: 0.0,
@@ -2138,6 +2155,7 @@ impl ScoutState {
         self.troca_de_aba_pendente = None;
         self.demissao_pendente = None;
         self.painel_de_filtros = None;
+        self.opcoes_do_olheiro = None;
     }
 
     // -----------------------------------------------------------------
@@ -3323,7 +3341,79 @@ impl ScoutState {
             continua: false,
             investimento: quality::Investimento::Padrao,
             erro: None,
+            ajustando: None,
         });
+    }
+
+    /// "Ajustar o perfil do jogador" nas Opções de um Olheiro em Missão
+    /// contínua: o formulário abre com os filtros da Missão que corre, na mesma
+    /// região (a região fica travada: mudá-la é rescindir o contrato, com a
+    /// multa e a Missão paga de novo). Sem Missão contínua parada, nada abre.
+    pub fn abrir_ajuste_de_perfil(&mut self, olheiro_id: Uuid) {
+        let Some(contratado) = self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == olheiro_id && c.aceita_missao_nova()) else {
+            return;
+        };
+        let Some(missao) = contratado.missao.filter(|m| m.continua && m.status == StatusMissao::Pendente) else {
+            return;
+        };
+        self.detalhes_da_missao = false;
+        self.rascunho_missao = Some(RascunhoMissao {
+            olheiro_id: Some(olheiro_id),
+            filtros: missao.filtros.clone(),
+            modo: missao.modo_busca,
+            continua: true,
+            investimento: missao.investimento,
+            erro: None,
+            ajustando: Some(missao.id),
+        });
+    }
+
+    /// Confirma o ajuste de perfil: os filtros novos (na região da Missão)
+    /// valem a partir da próxima busca; nada é cobrado nem encerrado.
+    fn confirmar_ajuste_de_perfil(&mut self) -> bool {
+        let Some(previa) = self.previa_missao() else {
+            return false;
+        };
+        let (Some(id), Some(estimativa), Some(estado)) = (previa.rascunho.ajustando, previa.estimativa, self.estado_ativo().cloned()) else {
+            return false;
+        };
+        let novos = previa.rascunho.filtros.clone();
+        let resultado = estado.mutar(|dados| {
+            let Some(m) = dados.missoes.iter_mut().find(|m| m.id == id) else {
+                return false;
+            };
+            // a região fica a da Missão; o resto do perfil muda
+            let antigos = &m.filtros;
+            m.filtros = FiltrosMissao {
+                continentes: antigos.continentes.clone(),
+                paises_dos_clubes: antigos.paises_dos_clubes.clone(),
+                ligas: antigos.ligas.clone(),
+                paises: antigos.paises.clone(),
+                teto_valor: previa.teto,
+                teto_salario: previa.teto_salario,
+                ..novos
+            };
+            m.tipo = previa.tipo;
+            // o que foi pago (o custo) não muda; a Qualidade e o resto, pelo perfil novo
+            let custo = m.estimativa.custo;
+            m.estimativa = quality::EstimativaMissao { custo, ..estimativa };
+            true
+        });
+        match resultado {
+            Ok(true) => {
+                tracing::info!("[scout::state] Perfil da Missão contínua {id} ajustado.");
+                self.rascunho_missao = None;
+                true
+            }
+            Ok(false) => false,
+            Err(err) => {
+                tracing::warn!("[scout::state] Ajuste de perfil não foi salvo: {err:?}");
+                if let Some(r) = self.rascunho_missao.as_mut() {
+                    r.erro = Some(ErroCompra::NaoSalvo);
+                }
+                false
+            }
+        }
     }
 
     /// Volta os filtros do formulário aos ideais do Olheiro escolhido.
@@ -3724,6 +3814,59 @@ impl ScoutState {
         self.opcoes_neste_frame = pedidas;
     }
 
+    // -----------------------------------------------------------------
+    // Opções do Olheiro (Y): cancelar a pesquisa, ajustar o perfil, mudar de
+    // região, demitir (2026-10-08)
+    // -----------------------------------------------------------------
+
+    pub fn abrir_opcoes_do_olheiro(&mut self, id: Uuid) {
+        if self.olheiros_contratados().iter().any(|c| c.olheiro.id == id) {
+            self.opcoes_do_olheiro = Some((id, PassoOpcoes::Menu));
+        }
+    }
+
+    /// O Olheiro da janela de Opções e o passo, ou `None` se ela não está
+    /// aberta (ou ele deixou de existir).
+    pub fn opcoes_do_olheiro(&self) -> Option<(OlheiroContratado, PassoOpcoes)> {
+        let (id, passo) = self.opcoes_do_olheiro?;
+        self.olheiros_contratados().into_iter().find(|c| c.olheiro.id == id).map(|c| (c, passo))
+    }
+
+    pub fn definir_passo_das_opcoes(&mut self, passo: PassoOpcoes) {
+        if let Some((_, atual)) = self.opcoes_do_olheiro.as_mut() {
+            *atual = passo;
+        }
+    }
+
+    pub fn fechar_opcoes_do_olheiro(&mut self) {
+        self.opcoes_do_olheiro = None;
+    }
+
+    /// Cancela a pesquisa em andamento do Olheiro (Missão parada, sem busca
+    /// rodando): o que já apareceu fica no Relatório, o que não apareceu é
+    /// descartado, o que foi pago não volta, e ele fica livre.
+    pub fn cancelar_pesquisa(&mut self, olheiro_id: Uuid) -> bool {
+        let Some(estado) = self.estado_ativo().cloned() else {
+            return false;
+        };
+        let hoje = self.data_progresso;
+        let Some(id) = estado.ler(|d| d.missoes.iter().find(|m| m.olheiro_id == olheiro_id && m.status == StatusMissao::Pendente).map(|m| m.id))
+        else {
+            return false;
+        };
+        match estado.mutar(|dados| encerrar_na(dados, id, hoje)) {
+            Ok(()) => {
+                tracing::info!("[scout::state] Pesquisa {id} cancelada.");
+                self.erros_missao.remove(&id);
+                true
+            }
+            Err(err) => {
+                tracing::warn!("[scout::state] Pesquisa não foi cancelada: {err:?}");
+                false
+            }
+        }
+    }
+
     pub fn filtro_continente(&self) -> Option<Confederacao> {
         self.filtro_continente
     }
@@ -3982,11 +4125,13 @@ impl ScoutState {
             .as_ref()
             .map(|o| quality::Investimento::TODOS.iter().map(|&i| (i, preco(quality::estimar_missao(&pedido(o, i)).custo))).collect())
             .unwrap_or_default();
-        let custo = estimativa.map_or(0, |e| preco(e.custo));
+        let ajustando = rascunho.ajustando;
+        let custo = if ajustando.is_some() { 0 } else { estimativa.map_or(0, |e| preco(e.custo)) };
         // tirar o Olheiro de um contrato em curso para outra localidade tem
         // multa; a mesma localidade (só outros filtros) e o contrato vencido, não
-        let rescindindo = contratado.and_then(|c| c.rescisao).map(|r| r.missao);
+        let rescindindo = contratado.and_then(|c| c.rescisao).map(|r| r.missao).filter(|_| ajustando.is_none());
         let multa = contratado
+            .filter(|_| ajustando.is_none())
             .and_then(|c| Some((c.rescisao.filter(|r| r.multa > 0)?, c.missao.as_ref()?)))
             .filter(|(_, antiga)| !mesma_localidade(&antiga.filtros, &rascunho.filtros))
             .map(|(r, _)| MultaDeContrato { valor: r.multa, missao: r.missao, ate: r.ate });
@@ -4027,6 +4172,7 @@ impl ScoutState {
             custo,
             rescindindo,
             multa,
+            ajustando,
             rascunho,
             olheiros,
             tipo,
@@ -4045,6 +4191,9 @@ impl ScoutState {
         let Some(previa) = self.previa_missao() else {
             return false;
         };
+        if previa.rascunho.ajustando.is_some() {
+            return previa.bloqueio.is_none() && self.confirmar_ajuste_de_perfil();
+        }
         if previa.bloqueio.is_some() {
             return false;
         }
@@ -6837,6 +6986,77 @@ mod tests {
         let m = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.iter().find(|m| m.id == id).cloned())).expect("missão");
         assert_eq!((m.contratos.clone(), m.blocos, m.prazo_estimado), (vec![Date(20250601)], 12, Date(20260601)));
         assert_eq!(m.fim_do_contrato(), Date(20260601), "o contrato novo foi desfeito");
+    }
+
+    #[test]
+    fn cancelling_a_research_frees_the_olheiro_keeps_what_appeared_and_refunds_nothing() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let m = missao_com_prazo(&o, 20260701, 20260715);
+        let (mut st, _busca, escritas) = estado_com_datas(&pasta, &[20260706], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+        assert!(st.olheiros_contratados()[0].em_missao);
+        let revelados = st.missoes()[0].revelados;
+        assert!(revelados > 0);
+
+        st.abrir_opcoes_do_olheiro(o.id);
+        let (c, passo) = st.opcoes_do_olheiro().expect("janela aberta");
+        assert_eq!((c.olheiro.id, passo), (o.id, PassoOpcoes::Menu));
+        st.definir_passo_das_opcoes(PassoOpcoes::ConfirmarCancelamento);
+        assert_eq!(st.opcoes_do_olheiro().map(|(_, p)| p), Some(PassoOpcoes::ConfirmarCancelamento));
+
+        assert!(st.cancelar_pesquisa(o.id));
+        assert!(!st.olheiros_contratados()[0].em_missao, "ele ficou livre");
+        assert_eq!(status_de(&st, m.id), Some(StatusMissao::Concluida));
+        let guardados = st.estado_ativo().map(|e| e.ler(|d| d.relatorios[0].jogadores.len())).expect("estado");
+        assert_eq!(guardados, revelados, "só o que já tinha aparecido fica");
+        assert!(escritas_de(&escritas).is_empty(), "nada devolvido nem cobrado");
+        assert!(!st.cancelar_pesquisa(o.id), "sem pesquisa, nada a cancelar");
+        // fechar o painel fecha a janela
+        st.ao_fechar_painel();
+        assert!(st.opcoes_do_olheiro().is_none());
+    }
+
+    #[test]
+    fn adjusting_the_profile_changes_the_filters_in_the_same_region_for_free() {
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Elite);
+        let mut m = missao_com_contrato(&o, 20260701);
+        m.filtros.continentes = vec![Confederacao::Europa];
+        m.filtros.idade = FaixaAtributo { min: 18, max: 30 };
+        let custo_pago = m.estimativa.custo;
+        let (mut st, _busca, escritas) = estado_com_datas(&pasta, &[20260710], vec![m.clone()], &o);
+        st.ao_abrir_painel();
+        ticks_ate_buscar(&mut st);
+
+        st.abrir_ajuste_de_perfil(o.id);
+        assert!(st.tem_nova_missao());
+        let previa = st.previa_missao().expect("formulário");
+        assert_eq!(previa.ajustando, Some(m.id));
+        assert_eq!((previa.custo, previa.multa, previa.rescindindo), (0, None, None), "sem custo, sem multa, sem rescindir");
+        assert!(previa.bloqueio.is_none());
+        assert_eq!(previa.rascunho.filtros.continentes, vec![Confederacao::Europa], "abre com a Missão que corre");
+
+        // muda o perfil e tenta mudar a região: a região fica a da Missão
+        if let Some(r) = st.rascunho_missao.as_mut() {
+            r.filtros.idade = FaixaAtributo { min: 17, max: 21 };
+            r.filtros.continentes = vec![Confederacao::Asia];
+        }
+        assert!(st.confirmar_nova_missao());
+        assert!(!st.tem_nova_missao(), "o formulário fecha");
+        assert!(escritas_de(&escritas).is_empty(), "nada cobrado");
+        let depois = st.estado_ativo().and_then(|e| e.ler(|d| d.missoes.first().cloned())).expect("missão");
+        assert_eq!(depois.id, m.id, "a mesma Missão, não uma nova");
+        assert_eq!(depois.filtros.idade, FaixaAtributo { min: 17, max: 21 });
+        assert_eq!(depois.filtros.continentes, vec![Confederacao::Europa], "região travada");
+        assert_eq!(depois.estimativa.custo, custo_pago, "o que foi pago não muda");
+        assert_eq!(depois.status, StatusMissao::Pendente);
+        assert_eq!(st.estado_ativo().map(|e| e.ler(|d| d.missoes.len())), Some(1));
+        // sem Missão contínua parada, não há o que ajustar
+        st.cancelar_pesquisa(o.id);
+        st.abrir_ajuste_de_perfil(o.id);
+        assert!(!st.tem_nova_missao());
     }
 
     #[test]

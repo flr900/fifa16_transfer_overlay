@@ -344,6 +344,17 @@ impl Scout {
                     self.state.definir_troca_de_aba_pendente(None);
                     self.nav.pedir_foco();
                 }
+            } else if let Some((_, passo)) = self.state.opcoes_do_olheiro().map(|(c, p)| (c, p)) {
+                // janela de Opções do Olheiro aberta: B volta ao menu (na
+                // confirmação) ou fecha; A é dos botões
+                if comandos.voltar {
+                    if passo == state::PassoOpcoes::ConfirmarCancelamento {
+                        self.state.definir_passo_das_opcoes(state::PassoOpcoes::Menu);
+                    } else {
+                        self.state.fechar_opcoes_do_olheiro();
+                        self.nav.pedir_foco();
+                    }
+                }
             } else if self.state.painel_de_filtros().is_some() {
                 // painel de filtros (Y) aberto: B fecha; A é dos botões
                 if comandos.voltar {
@@ -465,6 +476,7 @@ pub fn pedir_troca_de_aba(nav: &mut Navigation, state: &mut ScoutState, aba: Aba
 pub fn trocar_aba_agora(nav: &mut Navigation, state: &mut ScoutState, aba: Aba) {
     state.definir_troca_de_aba_pendente(None);
     state.fechar_painel_de_filtros();
+    state.fechar_opcoes_do_olheiro();
     state.cancelar_contratacao();
     state.cancelar_nova_missao();
     state.fechar_relatorio();
