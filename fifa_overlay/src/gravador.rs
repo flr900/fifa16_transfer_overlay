@@ -31,8 +31,10 @@ use crate::pointer_scan::enumerate_modules;
 /// componentes de interface (build 16.0.2904053; achado em 2026-09).
 const OFFSET_BUFFER_DE_TELA: usize = 0x335_7378;
 /// Quantos bytes ler a partir do que o ponteiro aponta.
-const TAMANHO_DO_BUFFER: usize = 96;
-const INTERVALO_TELA: Duration = Duration::from_millis(100);
+const TAMANHO_DO_BUFFER: usize = 256;
+/// Uma leitura por frame: o jogo reescreve o buffer em poucos milissegundos
+/// e leituras a cada 100 ms perdiam nomes de evento inteiros.
+const INTERVALO_TELA: Duration = Duration::ZERO;
 
 const INTERVALO_CHECAGEM: Duration = Duration::from_secs(1);
 /// Quanto o analógico esquerdo precisa passar para contar como um aperto
@@ -124,22 +126,24 @@ fn textos_imprimiveis(bytes: &[u8]) -> Vec<String> {
     textos
 }
 
-/// O nome do componente de tela: o primeiro `.swf` (o arquivo do widget), ou
-/// o primeiro texto que houver.
-fn rotulo_da_tela(bytes: &[u8]) -> Option<String> {
-    let textos = textos_imprimiveis(bytes);
-    textos.iter().find(|t| t.contains(".swf")).or_else(|| textos.first()).cloned()
-}
-
-/// Lê o buffer de componentes de tela: `(ponteiro, rótulo)`.
-fn ler_tela(base_exe: usize) -> Option<(usize, Option<String>)> {
+/// Lê o buffer de componentes de tela: `(ponteiro, textos)`, com TODOS os
+/// textos (nomes de evento, `.swf`, frases de interface) em ordem de memória.
+fn ler_tela(base_exe: usize) -> Option<(usize, Vec<String>)> {
     let bruto = read_region_bytes(&Region { base: base_exe.checked_add(OFFSET_BUFFER_DE_TELA)?, size: 8 })?;
     let ponteiro = usize::try_from(u64::from_le_bytes(bruto.get(..8)?.try_into().ok()?)).ok()?;
     if ponteiro == 0 {
-        return Some((0, None));
+        return Some((0, Vec::new()));
     }
     let conteudo = read_region_bytes(&Region { base: ponteiro, size: TAMANHO_DO_BUFFER })?;
-    Some((ponteiro, rotulo_da_tela(&conteudo)))
+    Some((ponteiro, textos_imprimiveis(&conteudo)))
+}
+
+/// Os textos numa linha de log: separados por `|`, cada um cortado em 90.
+fn texto_para_log(textos: &[String]) -> String {
+    if textos.is_empty() {
+        return "(sem texto)".to_string();
+    }
+    textos.iter().map(|t| t.chars().take(90).collect::<String>()).collect::<Vec<_>>().join(" | ")
 }
 
 pub struct Gravador {
@@ -150,7 +154,7 @@ pub struct Gravador {
     ultimo_foco: Option<u32>,
     base_exe: Option<usize>,
     proxima_leitura_de_tela: Instant,
-    ultima_tela: Option<(usize, Option<String>)>,
+    ultima_tela: Option<(usize, Vec<String>)>,
 }
 
 impl Gravador {
@@ -207,8 +211,8 @@ impl Gravador {
             if base != 0 {
                 let tela = ler_tela(base);
                 if tela != self.ultima_tela {
-                    if let Some((ponteiro, rotulo)) = &tela {
-                        tracing::info!("[gravador] t={ms}ms tela: {} (ponteiro 0x{ponteiro:X})", rotulo.as_deref().unwrap_or("(sem texto)"));
+                    if let Some((ponteiro, textos)) = &tela {
+                        tracing::info!("[gravador] t={ms}ms tela: {} (ponteiro 0x{ponteiro:X})", texto_para_log(textos));
                     }
                     self.ultima_tela = tela;
                 }
@@ -233,13 +237,16 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_label_prefers_the_swf_file_and_falls_back_to_the_first_text() {
-        let mut bytes = b"\x00\x01ab\x00game/components/CareerComponents/CareerHubWidget.swf\x00\xff".to_vec();
-        bytes.extend_from_slice(b"xx\x00zzzz");
-        assert_eq!(rotulo_da_tela(&bytes).as_deref(), Some("game/components/CareerComponents/CareerHubWidget.swf"));
-        assert_eq!(rotulo_da_tela(b"\x00Hello\x00World\x00").as_deref(), Some("Hello"));
-        assert_eq!(rotulo_da_tela(b"\x00ab\x00\x01"), None, "menos de 4 letras não é texto");
+    fn every_printable_text_of_the_buffer_goes_to_the_log_in_memory_order() {
+        let mut bytes = b"\x00\x01ab\x00EnterTransferOfferFromActionPopup\x00\xff".to_vec();
+        bytes.extend_from_slice(b"xx\x00game/x/Widget.swf\x00");
+        let textos = textos_imprimiveis(&bytes);
+        assert_eq!(textos, ["EnterTransferOfferFromActionPopup", "game/x/Widget.swf"]);
+        assert_eq!(texto_para_log(&textos), "EnterTransferOfferFromActionPopup | game/x/Widget.swf");
+        assert_eq!(texto_para_log(&[]), "(sem texto)");
+        assert_eq!(texto_para_log(&["a".repeat(120)]).chars().count(), 90, "cada texto é cortado em 90");
         assert_eq!(textos_imprimiveis(b"abcd\x00efgh"), ["abcd", "efgh"]);
+        assert!(textos_imprimiveis(b"\x00ab\x00\x01").is_empty(), "menos de 4 letras não é texto");
     }
 
     #[test]

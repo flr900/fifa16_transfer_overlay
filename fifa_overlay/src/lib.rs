@@ -36,7 +36,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v27 — Gravador de controle e de tela (desenvolvimento)";
+const BUILD_TAG: &str = "7.6-v28 — Gravador de tela completo (desenvolvimento)";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.
