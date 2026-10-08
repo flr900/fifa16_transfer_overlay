@@ -21,7 +21,7 @@
 //! jogo NÃO é bloqueado (registrado no log).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use hudhook::mh::{MhHook, MH_DisableHook, MH_EnableHook, MH_Initialize, MH_STATUS};
@@ -120,6 +120,21 @@ pub fn bloquear_jogo(bloquear: bool) {
     BLOQUEAR_JOGO.store(bloquear, Ordering::Relaxed);
 }
 
+/// Botões que a Central "aperta" para o jogo (roteiro "Abrir no jogo"),
+/// somados ao que o jogo lê. O overlay lê o controle pelo trampolim, então
+/// nunca vê estes botões: só o jogo.
+static INJETADOS: AtomicU16 = AtomicU16::new(0);
+/// Muda a cada troca de botões injetados: o jogo olha o número do pacote do
+/// XInput para saber se o controle mudou.
+static PACOTE_INJETADO: AtomicU32 = AtomicU32::new(0);
+
+/// Define os botões apertados para o jogo (0 solta tudo).
+pub fn injetar(mascara: u16) {
+    if INJETADOS.swap(mascara, Ordering::Relaxed) != mascara {
+        PACOTE_INJETADO.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// O que o jogo recebe: o estado real, ou o controle parado se bloqueado.
 unsafe fn desviar(indice_modulo: usize, usuario: u32, estado: *mut XINPUT_STATE) -> u32 {
     let original = TRAMPOLINS.get(indice_modulo).map_or(0, |t| t.load(Ordering::Acquire));
@@ -133,6 +148,14 @@ unsafe fn desviar(indice_modulo: usize, usuario: u32, estado: *mut XINPUT_STATE)
     if resultado == ERROR_SUCCESS && BLOQUEAR_JOGO.load(Ordering::Relaxed) && !estado.is_null() {
         // SAFETY: ponteiro não nulo que o jogo passou e o original preencheu.
         unsafe { (*estado).Gamepad = XINPUT_GAMEPAD::default() };
+    }
+    let injetados = INJETADOS.load(Ordering::Relaxed);
+    if resultado == ERROR_SUCCESS && injetados != 0 && !estado.is_null() {
+        // SAFETY: o mesmo ponteiro, válido nesta chamada.
+        unsafe {
+            (*estado).Gamepad.wButtons.0 |= injetados;
+            (*estado).dwPacketNumber = (*estado).dwPacketNumber.wrapping_add(PACOTE_INJETADO.load(Ordering::Relaxed));
+        }
     }
     resultado
 }

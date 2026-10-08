@@ -28,6 +28,7 @@ pub mod minifaces;
 pub mod nomes;
 pub mod persistence;
 pub mod quality;
+pub mod roteiro;
 pub mod screens;
 pub mod search;
 pub mod state;
@@ -37,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VIRTUAL_KEY, VK_F10};
 
 use crate::gamepad::{botao, EstadoControle, LIMIAR_GATILHO};
+use crate::telas::Telas;
 use screens::theme::Fonts;
 use state::ScoutState;
 
@@ -277,7 +279,24 @@ pub struct Scout {
     /// Último valor de `bloqueia_controle` que foi para o log (diagnóstico
     /// do "controle travou": só as transições, nunca por frame).
     bloqueio_logado: bool,
+    /// Em que tela o jogo está (eventos de tela lidos da memória do jogo).
+    telas: Telas,
+    /// Roteiro "Abrir no jogo" em andamento.
+    roteiro: Option<RoteiroAtivo>,
+    /// Como o último roteiro terminou, para o banner: (texto, cor, quando).
+    fim_do_roteiro: Option<(String, [f32; 4], std::time::Instant)>,
 }
+
+/// O roteiro que está apertando botões no jogo.
+struct RoteiroAtivo {
+    roteiro: roteiro::Roteiro,
+    nome: String,
+    inicio: std::time::Instant,
+    ultima_marca: Option<(Option<crate::telas::Evento>, Option<u32>, u16)>,
+}
+
+/// Por quanto tempo o banner mostra como o roteiro terminou.
+const DURACAO_FIM_DO_ROTEIRO: std::time::Duration = std::time::Duration::from_secs(6);
 
 impl Scout {
     pub fn new() -> Self {
@@ -288,12 +307,20 @@ impl Scout {
             controle_anterior: EstadoControle::default(),
             esperando_soltar: false,
             bloqueio_logado: false,
+            telas: Telas::new(),
+            roteiro: None,
+            fim_do_roteiro: None,
             state: ScoutState::new(),
         }
     }
 
     pub fn painel_aberto(&self) -> bool {
         self.painel_aberto
+    }
+
+    /// O jogador em foco na tela do jogo, como a Central o leu por último.
+    pub fn foco_no_jogo(&self) -> Option<(u32, String)> {
+        self.state.foco_no_jogo()
     }
 
     /// Detecção de borda do atalho (AD-14): só alterna na transição
@@ -332,8 +359,19 @@ impl Scout {
         self.state.definir_rolagem(rolagem);
         self.state.tick();
         self.aplicar_aba_restaurada();
+        self.passo_do_roteiro(controle);
         if self.painel_aberto {
             screens::render_painel(ui, fonts, &mut self.nav, &mut self.state);
+        } else if let Some(ativo) = &self.roteiro {
+            screens::aviso::render_texto(
+                ui,
+                fonts,
+                &format!("Abrindo {} no jogo…", ativo.nome),
+                "Select cancela. Não use o controle até terminar.",
+                screens::theme::ACCENT_PRIMARY,
+            );
+        } else if let Some((texto, cor, _)) = self.fim_do_roteiro.as_ref().filter(|(_, _, q)| q.elapsed() < DURACAO_FIM_DO_ROTEIRO) {
+            screens::aviso::render_texto(ui, fonts, "Central de Scout", texto, *cor);
         } else if let Some(aviso) = self.state.aviso_visivel(std::time::Instant::now()) {
             screens::aviso::render(ui, fonts, aviso);
         }
@@ -485,9 +523,61 @@ impl Scout {
         );
     }
 
-    /// O jogo deve receber o controle parado neste frame?
+    /// O jogo deve receber o controle parado neste frame? (Com o roteiro
+    /// "Abrir no jogo" rodando, o controle de verdade fica de fora: só o
+    /// roteiro aperta botões.)
     pub fn bloqueia_controle(&self) -> bool {
-        self.painel_aberto || self.esperando_soltar
+        self.painel_aberto || self.esperando_soltar || self.roteiro.is_some()
+    }
+
+    /// Roteiro "Abrir no jogo": começa quando a Ficha o pede (fechando o
+    /// painel, para o jogo aparecer) e, a cada frame, deixa o roteiro olhar a
+    /// tela do jogo e apertar os botões. Select cancela, e abrir o painel
+    /// também.
+    fn passo_do_roteiro(&mut self, controle: Option<EstadoControle>) {
+        let leitura = self.telas.ler();
+        if self.roteiro.is_none() {
+            let Some((alvo, nome)) = self.state.tomar_pedido_de_roteiro() else { return };
+            if self.painel_aberto {
+                self.alternar_painel();
+            }
+            let tamanho = self.state.tamanho_da_lista_do_jogo();
+            tracing::info!("[roteiro] Abrir {nome} ({alvo}) no jogo: lista com {tamanho}, tela {:?}.", leitura);
+            self.fim_do_roteiro = None;
+            self.roteiro = Some(RoteiroAtivo { roteiro: roteiro::Roteiro::new(alvo, tamanho), nome, inicio: std::time::Instant::now(), ultima_marca: None });
+        }
+        let Some(ativo) = self.roteiro.as_mut() else { return };
+        let entrada = roteiro::Entrada {
+            agora_ms: u64::try_from(ativo.inicio.elapsed().as_millis()).unwrap_or(u64::MAX),
+            evento: leitura.as_ref().map(|l| l.evento),
+            na_lista: leitura.as_ref().is_some_and(|l| l.na_lista),
+            foco: self.state.foco_ao_vivo(),
+            cancelou: self.painel_aberto || controle.is_some_and(|c| c.segura(botao::BACK)),
+        };
+        let saida = ativo.roteiro.passo(&entrada);
+        crate::gamepad::injetar(saida.botoes);
+        // rastro para afinar o roteiro no jogo: só quando algo muda
+        let marca = (entrada.evento, entrada.foco, saida.botoes);
+        if ativo.ultima_marca != Some(marca) {
+            ativo.ultima_marca = Some(marca);
+            tracing::info!(
+                "[roteiro] t={}ms evento={:?} foco={:?} botoes=0x{:04X}",
+                entrada.agora_ms,
+                entrada.evento,
+                entrada.foco,
+                saida.botoes
+            );
+        }
+        if let Some(fim) = saida.fim {
+            crate::gamepad::injetar(0);
+            let cor = if fim == roteiro::Resultado::Encontrou { screens::theme::FIELD_GREEN } else { screens::theme::WARNING };
+            let texto = fim.texto(&ativo.nome);
+            tracing::info!("[roteiro] Fim: {fim:?} em {} ms, {} linha(s) conferida(s).", entrada.agora_ms, ativo.roteiro.sondas());
+            self.fim_do_roteiro = Some((texto, cor, std::time::Instant::now()));
+            self.roteiro = None;
+            // o jogo fica sem receber botões até o jogador soltar os que segura
+            self.esperando_soltar = controle.is_some_and(|c| !c.solto());
+        }
     }
 
     /// Carreira acabou de ficar ativa: a navegação vai para a aba salva

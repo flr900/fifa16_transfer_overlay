@@ -2255,6 +2255,9 @@ pub struct ScoutState {
     troca_de_aba_pendente: Option<Aba>,
     /// "Demitir" clicado num Olheiro: o aviso de confirmação está aberto.
     demissao_pendente: Option<Uuid>,
+    /// "Abrir no jogo" pedido na Ficha de um Escolhido: o roteiro começa no
+    /// próximo frame (`Scout::passo_do_roteiro`).
+    pedido_de_roteiro: Option<(u32, String)>,
     /// "Aprofundar agora" clicado na Ficha de um Escolhido: o aviso de
     /// confirmação (custo e prazo) está aberto para este jogador.
     aprofundamento_pendente: Option<u32>,
@@ -2403,6 +2406,7 @@ impl ScoutState {
             demissao_pendente: None,
             aprofundamento_pendente: None,
             erro_aprofundamento: None,
+            pedido_de_roteiro: None,
             opcoes_neste_frame: false,
             passo_de_grupo: 0,
             passo_de_coluna: 0,
@@ -3122,6 +3126,50 @@ impl ScoutState {
     /// ainda vale, senão `None` (a tela estima).
     pub fn valor_exato(&self, player_id: u32) -> Option<u32> {
         self.valor_do_jogo(player_id).filter(|v| v.vale_em(self.data_da_carreira())).map(|v| v.valor)
+    }
+
+    /// O jogador está na lista de Escolhidos DO JOGO (a Central o pôs lá ou o
+    /// importou de lá)? Só assim o roteiro "Abrir no jogo" o encontra.
+    pub fn pode_abrir_no_jogo(&self, player_id: u32) -> bool {
+        self.estado_ativo().is_some_and(|e| {
+            e.ler(|d| d.escolhidos.iter().any(|x| x.jogador.player_id == player_id && (x.no_jogo || x.importado)))
+        })
+    }
+
+    /// "Abrir no jogo": pede o roteiro que leva o FIFA até o menu do jogador.
+    pub fn pedir_abrir_no_jogo(&mut self, player_id: u32) -> bool {
+        if !self.pode_abrir_no_jogo(player_id) {
+            return false;
+        }
+        let nome = self.estado_ativo().and_then(|e| {
+            e.ler(|d| d.escolhidos.iter().find(|x| x.jogador.player_id == player_id).map(|x| x.jogador.nome.clone()))
+        });
+        let Some(nome) = nome else { return false };
+        self.pedido_de_roteiro = Some((player_id, nome));
+        true
+    }
+
+    pub fn tomar_pedido_de_roteiro(&mut self) -> Option<(u32, String)> {
+        self.pedido_de_roteiro.take()
+    }
+
+    /// O jogador que o jogo mostra em foco AGORA (leitura direta, sem esperar
+    /// o intervalo da colheita de valores).
+    pub fn foco_ao_vivo(&self) -> Option<u32> {
+        self.fonte.read_focused_value().ok().flatten().map(|f| f.jogador)
+    }
+
+    /// Quantos jogadores a lista de escolhidos do jogo tem (limita a varredura
+    /// do roteiro); 100 é a capacidade dela quando não dá para ler.
+    pub fn tamanho_da_lista_do_jogo(&self) -> usize {
+        crate::save_repo::nativo::read_native_shortlist().map_or(100, |l| l.len().max(1))
+    }
+
+    /// O jogador em foco na tela do jogo (id e nome), pela última leitura da
+    /// linha de valor. É só o que o jogo mostra: pode ser alguém que a
+    /// Central não conhece.
+    pub fn foco_no_jogo(&self) -> Option<(u32, String)> {
+        self.ultimo_foco.as_ref().map(|(id, _, nome)| (*id, nome.clone()))
     }
 
     /// Olha a linha de valor do jogador em foco no jogo e, se for um jogador

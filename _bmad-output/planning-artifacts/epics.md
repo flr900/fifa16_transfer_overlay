@@ -889,3 +889,6 @@ Built in sessions driven by Felipe's tests, without a story file. Listed here so
 - **Knowledge sync**: levels sync only for players the Central knows; players opened in the game arrive exact (level 178+ or open field); contract shown from level 140.
 - **Installer** (Inno Setup, `installer/`) with a version history, and `recarregar_dev.ps1` waiting for every loaded copy to unload.
 - **Sharper text**: FreeType with the auto-hinter (build `7.6-v24`, PR #22).
+- **Aprofundar agora** (Story 6.2, build `7.6-v25`, PR #23): a designated Generalist dedicates himself to one Escolhido for money.
+- **Abrir no jogo** (builds `7.6-v30`/`v31`, not merged yet): the Central presses the game's buttons through the XInput hook to open a shortlisted player's menu in FIFA; reads the game screen from its event table (`telas.rs`). Slow and list-only for now.
+- **Development tools** (inert unless a request file exists in `%TEMP%`): control/screen/focus recorder, `fifa16.exe` image dump, state-machine observer. Findings in `integracao-negociacao.md`.
