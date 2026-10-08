@@ -30,10 +30,16 @@ const PRAZO_LISTA_MS: u64 = 3_000;
 const PRAZO_INICIO_MS: u64 = 2_000;
 /// O foco do jogo atualiza ~0,3 a 0,4 s depois do menu abrir (gravações).
 const ESPERA_FOCO_MS: u64 = 800;
+/// Depois do B a lista avisa que carregou (`NotifyScreenLoadedAndRefresh`) mas
+/// ainda se atualiza por ~1,5 s (o aviso vem duas vezes nas gravações) e
+/// ignora botões nesse tempo: o primeiro teste no jogo (7.6-v30) perdeu o `A`.
+const ASSENTAR_LISTA_MS: u64 = 1_300;
+/// Depois do `↓`, o cursor precisa assentar antes do `A`.
+const ASSENTAR_BAIXO_MS: u64 = 350;
 /// Quanto esperar, depois disso, por uma leitura do jogador em foco.
 const PRAZO_FOCO_MS: u64 = 1_500;
 /// Tempo máximo de um roteiro inteiro.
-const PRAZO_TOTAL_MS: u64 = 240_000;
+const PRAZO_TOTAL_MS: u64 = 600_000;
 
 /// O que aconteceu no fim.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +98,7 @@ enum Fase {
     EsperarFoco,
     EsperarLista,
     ApertarBaixo,
+    AssentarBaixo,
     Fim,
 }
 
@@ -252,15 +259,25 @@ impl Roteiro {
                 self.tocar(botao::B, e.agora_ms, Fase::EsperarLista)
             }
             Fase::EsperarLista => match e.evento {
-                Some(Evento::TelaCarregada) => {
+                // a lista avisa que carregou, mas só aceita botões depois de assentar
+                Some(Evento::TelaCarregada) if decorrido >= ASSENTAR_LISTA_MS => {
                     self.ir_para(Fase::ApertarBaixo, e.agora_ms);
                     self.passo(e)
                 }
+                Some(Evento::TelaCarregada) => Saida { botoes: 0, fim: None },
                 Some(Evento::Hub) => self.terminar(Resultado::Falhou("o jogo voltou ao hub".to_string())),
-                _ if decorrido > PRAZO_LISTA_MS => self.terminar(Resultado::Falhou("a lista não voltou".to_string())),
+                _ if decorrido > PRAZO_LISTA_MS + ASSENTAR_LISTA_MS => self.terminar(Resultado::Falhou("a lista não voltou".to_string())),
                 _ => Saida { botoes: 0, fim: None },
             },
-            Fase::ApertarBaixo => self.tocar(botao::DPAD_BAIXO, e.agora_ms, Fase::ApertarA),
+            Fase::ApertarBaixo => self.tocar(botao::DPAD_BAIXO, e.agora_ms, Fase::AssentarBaixo),
+            Fase::AssentarBaixo => {
+                if decorrido >= ASSENTAR_BAIXO_MS {
+                    self.ir_para(Fase::ApertarA, e.agora_ms);
+                    self.passo(e)
+                } else {
+                    Saida { botoes: 0, fim: None }
+                }
+            }
             Fase::Fim => match self.final_depois_do_toque.take() {
                 Some(resultado) => self.terminar(resultado),
                 None => Saida { botoes: 0, fim: self.fim.clone() },
@@ -286,6 +303,11 @@ mod tests {
         botoes_anteriores: u16,
         a_cada_botao: Vec<u16>,
         com_volta: bool,
+        /// A lista ignora botões até este instante (como a de verdade, logo depois do B).
+        ignora_ate: u64,
+        /// Quanto a lista demora para voltar a aceitar botões depois do B.
+        assenta_em: u64,
+        ignorados: u32,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -306,12 +328,20 @@ mod tests {
                 botoes_anteriores: 0,
                 a_cada_botao: Vec::new(),
                 com_volta: true,
+                ignora_ate: 0,
+                assenta_em: 1_200,
+                ignorados: 0,
             }
         }
 
         fn atualizar(&mut self, agora: u64, botoes: u16) {
-            let novos = botoes & !self.botoes_anteriores;
+            let mut novos = botoes & !self.botoes_anteriores;
             self.botoes_anteriores = botoes;
+            if novos != 0 && novos != botao::B && agora < self.ignora_ate {
+                // a lista ainda se atualiza: o botão se perde
+                self.ignorados += 1;
+                novos = 0;
+            }
             if novos != 0 {
                 self.a_cada_botao.push(novos);
             }
@@ -325,6 +355,7 @@ mod tests {
             }
             if novos & botao::B != 0 && self.evento == Some(Evento::Menu) {
                 self.agenda.push((agora + 100, Acao::Evento(Evento::TelaCarregada)));
+                self.ignora_ate = agora + self.assenta_em;
             }
             let (prontos, resto): (Vec<_>, Vec<_>) = self.agenda.drain(..).partition(|(t, _)| *t <= agora);
             self.agenda = resto;
@@ -372,6 +403,17 @@ mod tests {
         // A (10), B, ↓, A (20), B, ↓, A (30), B, ↓, A (40)
         assert_eq!(jogo.a_cada_botao.iter().filter(|b| **b == botao::DPAD_BAIXO).count(), 3);
         assert_eq!(jogo.a_cada_botao.last(), Some(&botao::A));
+    }
+
+    #[test]
+    fn it_waits_for_the_list_to_settle_after_the_b_so_no_button_is_lost() {
+        // a lista de verdade ignorou o A logo depois do B (teste no jogo, 7.6-v30)
+        let mut jogo = JogoFalso::novo(&[10, 20, 30, 40], 0);
+        let mut roteiro = Roteiro::new(30, 4);
+        let (fim, _) = rodar(&mut jogo, &mut roteiro, None);
+        assert_eq!(fim, Resultado::Encontrou);
+        assert_eq!(jogo.ignorados, 0, "nenhum botão apertado com a lista ainda atualizando");
+        assert_eq!(jogo.cursor, 2);
     }
 
     #[test]

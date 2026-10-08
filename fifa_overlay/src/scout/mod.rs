@@ -292,6 +292,7 @@ struct RoteiroAtivo {
     roteiro: roteiro::Roteiro,
     nome: String,
     inicio: std::time::Instant,
+    ultima_marca: Option<(Option<crate::telas::Evento>, Option<u32>, u16)>,
 }
 
 /// Por quanto tempo o banner mostra como o roteiro terminou.
@@ -543,7 +544,7 @@ impl Scout {
             let tamanho = self.state.tamanho_da_lista_do_jogo();
             tracing::info!("[roteiro] Abrir {nome} ({alvo}) no jogo: lista com {tamanho}, tela {:?}.", leitura);
             self.fim_do_roteiro = None;
-            self.roteiro = Some(RoteiroAtivo { roteiro: roteiro::Roteiro::new(alvo, tamanho), nome, inicio: std::time::Instant::now() });
+            self.roteiro = Some(RoteiroAtivo { roteiro: roteiro::Roteiro::new(alvo, tamanho), nome, inicio: std::time::Instant::now(), ultima_marca: None });
         }
         let Some(ativo) = self.roteiro.as_mut() else { return };
         let entrada = roteiro::Entrada {
@@ -555,6 +556,18 @@ impl Scout {
         };
         let saida = ativo.roteiro.passo(&entrada);
         crate::gamepad::injetar(saida.botoes);
+        // rastro para afinar o roteiro no jogo: só quando algo muda
+        let marca = (entrada.evento, entrada.foco, saida.botoes);
+        if ativo.ultima_marca != Some(marca) {
+            ativo.ultima_marca = Some(marca);
+            tracing::info!(
+                "[roteiro] t={}ms evento={:?} foco={:?} botoes=0x{:04X}",
+                entrada.agora_ms,
+                entrada.evento,
+                entrada.foco,
+                saida.botoes
+            );
+        }
         if let Some(fim) = saida.fim {
             crate::gamepad::injetar(0);
             let cor = if fim == roteiro::Resultado::Encontrou { screens::theme::FIELD_GREEN } else { screens::theme::WARNING };
