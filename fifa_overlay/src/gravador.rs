@@ -20,6 +20,7 @@
 //! Desligado, não faz nada além dessa checagem. Só LÊ o controle (o mesmo
 //! estado que o overlay já lê); nunca escreve nada no jogo.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -30,8 +31,13 @@ use crate::pointer_scan::enumerate_modules;
 /// Deslocamento, dentro do `fifa16.exe`, do ponteiro para o buffer de
 /// componentes de interface (build 16.0.2904053; achado em 2026-09).
 const OFFSET_BUFFER_DE_TELA: usize = 0x335_7378;
-/// Quantos bytes ler a partir do que o ponteiro aponta.
-const TAMANHO_DO_BUFFER: usize = 256;
+/// O buffer é um anel de entradas de 64 bytes; o ponteiro marca a entrada
+/// escrita por último. Lê-se uma janela em volta (antes e depois dela).
+const TAMANHO_DA_ENTRADA: usize = 64;
+const JANELA_ANTES: usize = 1024;
+const JANELA_TOTAL: usize = 2048;
+/// Textos menores que isto (como `p+Z.`) são lixo binário, não nome de evento.
+const MIN_TEXTO_DA_TELA: usize = 6;
 /// Uma leitura por frame: o jogo reescreve o buffer em poucos milissegundos
 /// e leituras a cada 100 ms perdiam nomes de evento inteiros.
 const INTERVALO_TELA: Duration = Duration::ZERO;
@@ -111,13 +117,17 @@ fn diferencas(antes: &Apertos, depois: &Apertos) -> Vec<String> {
 
 /// Textos imprimíveis (4+ caracteres ASCII) de um pedaço de memória.
 fn textos_imprimiveis(bytes: &[u8]) -> Vec<String> {
+    textos_com_minimo(bytes, 4)
+}
+
+fn textos_com_minimo(bytes: &[u8], minimo: usize) -> Vec<String> {
     let mut textos = Vec::new();
     let mut atual = Vec::new();
     for &b in bytes.iter().chain(std::iter::once(&0u8)) {
         if (0x20..=0x7E).contains(&b) {
             atual.push(b);
         } else {
-            if atual.len() >= 4 {
+            if atual.len() >= minimo {
                 textos.push(String::from_utf8_lossy(&atual).into_owned());
             }
             atual.clear();
@@ -126,16 +136,56 @@ fn textos_imprimiveis(bytes: &[u8]) -> Vec<String> {
     textos
 }
 
-/// Lê o buffer de componentes de tela: `(ponteiro, textos)`, com TODOS os
-/// textos (nomes de evento, `.swf`, frases de interface) em ordem de memória.
-fn ler_tela(base_exe: usize) -> Option<(usize, Vec<String>)> {
+/// Lê a janela do anel em volta do ponteiro de escrita:
+/// `(ponteiro, endereço do início da janela, bytes)`. Se a janela grande
+/// passa de memória legível, tenta janelas menores.
+fn ler_janela(base_exe: usize) -> Option<(usize, usize, Vec<u8>)> {
     let bruto = read_region_bytes(&Region { base: base_exe.checked_add(OFFSET_BUFFER_DE_TELA)?, size: 8 })?;
     let ponteiro = usize::try_from(u64::from_le_bytes(bruto.get(..8)?.try_into().ok()?)).ok()?;
     if ponteiro == 0 {
-        return Some((0, Vec::new()));
+        return None;
     }
-    let conteudo = read_region_bytes(&Region { base: ponteiro, size: TAMANHO_DO_BUFFER })?;
-    Some((ponteiro, textos_imprimiveis(&conteudo)))
+    let alinhado = ponteiro & !(TAMANHO_DA_ENTRADA - 1);
+    [(JANELA_ANTES, JANELA_TOTAL), (JANELA_ANTES / 2, JANELA_TOTAL / 2), (0, TAMANHO_DA_ENTRADA * 4)].into_iter().find_map(|(antes, total)| {
+        let inicio = alinhado.checked_sub(antes)?;
+        read_region_bytes(&Region { base: inicio, size: total }).map(|bytes| (ponteiro, inicio, bytes))
+    })
+}
+
+/// O anel de entradas como o gravador o viu por último, para registrar só o
+/// que muda (a cada entrada nova que o jogo escreve).
+#[derive(Default)]
+struct Anel {
+    entradas: HashMap<usize, [u8; TAMANHO_DA_ENTRADA]>,
+}
+
+/// Uma entrada que mudou: endereço, se é a que o ponteiro marca, textos.
+#[derive(Debug, PartialEq, Eq)]
+struct Novidade {
+    endereco: usize,
+    atual: bool,
+    textos: Vec<String>,
+}
+
+impl Anel {
+    /// Compara a janela com o que já se viu e devolve as entradas que mudaram
+    /// e têm texto (as sem texto só atualizam a memória do anel).
+    fn novidades(&mut self, ponteiro: usize, inicio: usize, bytes: &[u8]) -> Vec<Novidade> {
+        let mut novas = Vec::new();
+        for (i, pedaco) in bytes.chunks_exact(TAMANHO_DA_ENTRADA).enumerate() {
+            let endereco = inicio + i * TAMANHO_DA_ENTRADA;
+            let Ok(entrada) = <[u8; TAMANHO_DA_ENTRADA]>::try_from(pedaco) else { continue };
+            if self.entradas.get(&endereco) == Some(&entrada) {
+                continue;
+            }
+            self.entradas.insert(endereco, entrada);
+            let textos = textos_com_minimo(&entrada, MIN_TEXTO_DA_TELA);
+            if !textos.is_empty() {
+                novas.push(Novidade { endereco, atual: ponteiro & !(TAMANHO_DA_ENTRADA - 1) == endereco, textos });
+            }
+        }
+        novas
+    }
 }
 
 /// Os textos numa linha de log: separados por `|`, cada um cortado em 90.
@@ -154,7 +204,7 @@ pub struct Gravador {
     ultimo_foco: Option<u32>,
     base_exe: Option<usize>,
     proxima_leitura_de_tela: Instant,
-    ultima_tela: Option<(usize, Vec<String>)>,
+    anel: Anel,
 }
 
 impl Gravador {
@@ -167,7 +217,7 @@ impl Gravador {
             ultimo_foco: None,
             base_exe: None,
             proxima_leitura_de_tela: Instant::now(),
-            ultima_tela: None,
+            anel: Anel::default(),
         }
     }
 
@@ -183,7 +233,7 @@ impl Gravador {
                     self.ligado_desde = Some(agora);
                     self.anterior = Apertos::default();
                     self.ultimo_foco = None;
-                    self.ultima_tela = None;
+                    self.anel = Anel::default();
                     tracing::info!("[gravador] ligado: aperte os botões como de costume; apague {} para parar.", self.arquivo.display());
                 }
                 (false, Some(_)) => {
@@ -209,12 +259,11 @@ impl Gravador {
                 enumerate_modules().into_iter().find(|m| m.name.to_ascii_lowercase().ends_with("fifa16.exe")).map_or(0, |m| m.base)
             });
             if base != 0 {
-                let tela = ler_tela(base);
-                if tela != self.ultima_tela {
-                    if let Some((ponteiro, textos)) = &tela {
-                        tracing::info!("[gravador] t={ms}ms tela: {} (ponteiro 0x{ponteiro:X})", texto_para_log(textos));
+                if let Some((ponteiro, inicio_janela, bytes)) = ler_janela(base) {
+                    for n in self.anel.novidades(ponteiro, inicio_janela, &bytes) {
+                        let marca = if n.atual { "*" } else { " " };
+                        tracing::info!("[gravador] t={ms}ms tela{marca} 0x{:X}: {}", n.endereco, texto_para_log(&n.textos));
                     }
-                    self.ultima_tela = tela;
                 }
             }
         }
@@ -247,6 +296,35 @@ mod tests {
         assert_eq!(texto_para_log(&["a".repeat(120)]).chars().count(), 90, "cada texto é cortado em 90");
         assert_eq!(textos_imprimiveis(b"abcd\x00efgh"), ["abcd", "efgh"]);
         assert!(textos_imprimiveis(b"\x00ab\x00\x01").is_empty(), "menos de 4 letras não é texto");
+    }
+
+    fn entrada(texto: &str) -> Vec<u8> {
+        let mut e = vec![0u8; TAMANHO_DA_ENTRADA];
+        e[..texto.len()].copy_from_slice(texto.as_bytes());
+        e
+    }
+
+    #[test]
+    fn the_ring_reports_only_entries_that_changed_and_marks_the_one_the_pointer_names() {
+        let mut anel = Anel::default();
+        let inicio = 0x1000;
+        let mut janela: Vec<u8> = [entrada("ActionPopup"), entrada("p+Z."), entrada("ContractOffer"), entrada("")].concat();
+        let primeira = anel.novidades(inicio + 2 * TAMANHO_DA_ENTRADA + 5, inicio, &janela);
+        assert_eq!(
+            primeira,
+            [
+                Novidade { endereco: inicio, atual: false, textos: vec!["ActionPopup".to_string()] },
+                Novidade { endereco: inicio + 2 * TAMANHO_DA_ENTRADA, atual: true, textos: vec!["ContractOffer".to_string()] },
+            ],
+            "lixo curto e entrada vazia ficam de fora"
+        );
+        assert!(anel.novidades(inicio, inicio, &janela).is_empty(), "nada mudou");
+        // o jogo escreve uma entrada nova na posição 3
+        janela[3 * TAMANHO_DA_ENTRADA..4 * TAMANHO_DA_ENTRADA].copy_from_slice(&entrada("TransferOffer"));
+        let depois = anel.novidades(inicio + 3 * TAMANHO_DA_ENTRADA, inicio, &janela);
+        assert_eq!(depois, [Novidade { endereco: inicio + 3 * TAMANHO_DA_ENTRADA, atual: true, textos: vec!["TransferOffer".to_string()] }]);
+        // uma janela deslocada (o ponteiro andou) não repete o que já foi visto
+        assert!(anel.novidades(inicio, inicio + TAMANHO_DA_ENTRADA, &janela[TAMANHO_DA_ENTRADA..]).is_empty());
     }
 
     #[test]
