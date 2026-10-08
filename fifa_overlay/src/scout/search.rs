@@ -608,7 +608,13 @@ pub fn reobservar(
 /// `atributos` primeiros dados (0 e todos = valores exatos). Serve ao que a
 /// Central sabe sem Missão: o elenco do clube e a lista do jogo.
 pub fn fotografar(jogador: &PlayerRaw, pool: &PlayerPool, hoje: Date, precisao: u8, atributos: usize) -> JogadorEncontrado {
-    reobservar(&JogadorEncontrado::vazio(jogador.player_id), jogador, pool, hoje, precisao, atributos, None, None)
+    let mut foto = reobservar(&JogadorEncontrado::vazio(jogador.player_id), jogador, pool, hoje, precisao, atributos, None, None);
+    // quem o jogo conhece o bastante para mostrar valor e salário (nível 140
+    // em diante, precisão ±15 ou melhor) também mostra o contrato
+    if precisao <= 15 {
+        foto.contrato_ate = jogador.clube_id.map(|_| jogador.contrato_ate);
+    }
+    foto
 }
 
 /// O que o Relatório mostra de um jogador: faixas de Overall/Potencial e

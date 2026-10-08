@@ -45,7 +45,7 @@ use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, RitmoTrabalho};
 pub use super::quality::{Atalho, NivelEquipe, Perfil, PosicaoAlvo};
 
-use super::lista::{FiltrosLista, ListaId, Ordenacao, PrefsLista};
+use super::lista::{Coluna, FiltrosLista, ListaId, Ordenacao, PrefsLista};
 use super::mapeamento;
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::{Densidade, VisaoRelatorios};
@@ -1563,6 +1563,8 @@ pub enum MotivoMapeamento {
     ExClube,
     /// Estava na lista de escolhidos do jogo.
     ListaDoJogo,
+    /// O jogo tem o relatório completo dele (conhecimento no máximo).
+    RelatorioDoJogo,
 }
 
 impl MotivoMapeamento {
@@ -1571,6 +1573,7 @@ impl MotivoMapeamento {
         match self {
             MotivoMapeamento::ExClube => "Ex-jogador do clube",
             MotivoMapeamento::ListaDoJogo => "Lista do jogo",
+            MotivoMapeamento::RelatorioDoJogo => "Relatório do jogo",
         }
     }
 }
@@ -1953,7 +1956,7 @@ fn pedidos_de_nivel(dados: &persistence::ScoutStateFile, hoje: Date, cobre: impl
 /// A lista de escolhidos do jogo agora, com o nível de conhecimento de cada
 /// um (`None` = o jogo não tem registro). Vazia se a sincronização está
 /// desligada ou o jogo não foi localizado.
-fn lista_do_jogo() -> Vec<(u32, Option<i32>)> {
+fn lista_do_jogo() -> Vec<(u32, Option<mapeamento::Conhecimento>)> {
     use crate::save_repo::nativo;
     if !nativo::sincronizacao_ligada() {
         return Vec::new();
@@ -1964,9 +1967,24 @@ fn lista_do_jogo() -> Vec<(u32, Option<i32>)> {
         .iter()
         .filter_map(|e| u32::try_from(e.jogador).ok())
         .map(|id| {
-            let nivel = conhecimento.iter().find(|r| u32::try_from(r.jogador) == Ok(id)).map(|r| r.nivel);
+            let nivel = conhecimento.iter().find(|r| u32::try_from(r.jogador) == Ok(id)).map(|r| (r.nivel, r.a));
             (id, nivel)
         })
+        .collect()
+}
+
+/// O que o jogo sabe de cada jogador: nível de conhecimento (0–198) e o campo
+/// `a` (quais atributos estão abertos). Vazio com a sincronização desligada
+/// ou o jogo não localizado.
+fn conhecimento_do_jogo() -> std::collections::HashMap<u32, mapeamento::Conhecimento> {
+    use crate::save_repo::nativo;
+    if !nativo::sincronizacao_ligada() {
+        return std::collections::HashMap::new();
+    }
+    nativo::read_native_knowledge()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| Some((u32::try_from(r.jogador).ok()?, (r.nivel, r.a))))
         .collect()
 }
 
@@ -2188,6 +2206,18 @@ pub struct ScoutState {
     demissao_pendente: Option<Uuid>,
     /// O jogador apertou Y neste frame (o menu de Opções da tela em foco).
     opcoes_neste_frame: bool,
+    /// L2 (-1) / R2 (+1) neste frame: troca o grupo de posição da lista.
+    passo_de_grupo: i8,
+    /// D-pad ← (-1) / → (+1) neste frame: o cursor de coluna da lista Tabular.
+    passo_de_coluna: i8,
+    /// O X (quadrado) neste frame: ordena a Tabular pela coluna do cursor.
+    ordenar_pedido: bool,
+    /// O foco do controle esteve numa linha da tabela no frame anterior (só
+    /// então ← / → e X valem para a tabela).
+    linha_da_tabela_focada: bool,
+    /// A posição (o índice da linha) que o foco mantém depois de uma
+    /// reordenação da tabela: a lista muda, o foco fica no mesmo lugar.
+    linha_mantida: Option<usize>,
     /// Filtros e ordenação de cada lista de jogadores (só enquanto o Scout
     /// está carregado; a visão vai para o arquivo da carreira).
     prefs_listas: HashMap<ListaId, PrefsLista>,
@@ -2242,11 +2272,22 @@ pub struct ScoutState {
     /// A Ficha aberta é de um jogador da Base do Scout, sem Relatório
     /// (ex-jogador do clube ou da lista do jogo).
     ficha_da_base: bool,
+    /// O foco pedido (abrir o painel, trocar de aba, voltar de um modal ou de
+    /// uma tela) vai para o PRIMEIRO item do conteúdo principal — o card ou
+    /// a linha —, não para a barra de botões acima dele (2026-10-08). A tela
+    /// que desenha o conteúdo toma o sinal (`tomar_foco_no_principal`).
+    foco_no_principal: std::sync::atomic::AtomicBool,
+    /// Ninguém tomou o sinal (conteúdo vazio): o foco vai para o primeiro
+    /// item da tela no frame seguinte.
+    foco_na_barra: std::sync::atomic::AtomicBool,
     /// O mapeamento do elenco e da lista do jogo (`scout::mapeamento`).
     tarefa_mapeamento: AsyncTask<(String, Date, mapeamento::Mapeamento)>,
     mapeamento_pendente: bool,
     /// Pediram outro mapeamento enquanto um rodava.
     remapear: bool,
+    /// O conhecimento do jogo sobre quem a Central conhece, na última leitura
+    /// (para só refazer o mapeamento quando algum nível muda).
+    niveis_vistos: std::collections::HashMap<u32, mapeamento::Conhecimento>,
 }
 
 /// Nível aberto no filtro geográfico: a lista de continentes (o filtro
@@ -2305,6 +2346,11 @@ impl ScoutState {
             troca_de_aba_pendente: None,
             demissao_pendente: None,
             opcoes_neste_frame: false,
+            passo_de_grupo: 0,
+            passo_de_coluna: 0,
+            ordenar_pedido: false,
+            linha_da_tabela_focada: false,
+            linha_mantida: None,
             prefs_listas: HashMap::new(),
             painel_de_filtros: None,
             opcoes_do_olheiro: None,
@@ -2330,9 +2376,12 @@ impl ScoutState {
             reatualizar_escolhidos: false,
             ficha_de_escolhido: false,
             ficha_da_base: false,
+            foco_no_principal: std::sync::atomic::AtomicBool::new(false),
+            foco_na_barra: std::sync::atomic::AtomicBool::new(false),
             tarefa_mapeamento: AsyncTask::new(),
             mapeamento_pendente: false,
             remapear: false,
+            niveis_vistos: std::collections::HashMap::new(),
         }
     }
 
@@ -2467,6 +2516,27 @@ impl ScoutState {
 
     /// Abre a Ficha de um jogador da Base do Scout que não tem Relatório
     /// (ex-jogador do clube, lista do jogo).
+    /// Pede o foco no conteúdo principal da tela (ver `foco_no_principal`).
+    pub fn pedir_foco_no_principal(&self) {
+        self.foco_no_principal.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Consome o pedido: `true` = a tela deve focar o próximo item que
+    /// desenhar (o primeiro card ou linha do conteúdo).
+    pub fn tomar_foco_no_principal(&self) -> bool {
+        self.foco_no_principal.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Conteúdo vazio: o foco vai para o primeiro item da tela no frame
+    /// seguinte.
+    pub fn pedir_foco_na_barra(&self) {
+        self.foco_na_barra.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn tomar_foco_na_barra(&self) -> bool {
+        self.foco_na_barra.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn abrir_ficha_da_base(&mut self, player_id: u32) {
         if self.base_do_scout().iter().any(|b| b.melhor.jogador.player_id == player_id) {
             self.ficha = Some(player_id);
@@ -3113,9 +3183,30 @@ impl ScoutState {
             return;
         }
         let lista = lista_do_jogo();
-        let conhecidos: std::collections::HashSet<u32> =
-            estado.ler(|d| d.escolhidos.iter().map(|e| e.jogador.player_id).chain(d.importacao_ignorada.iter().copied()).collect());
-        if so_com_novidade && !lista.iter().any(|(id, _)| !conhecidos.contains(id)) {
+        // quem a Central conhece: Escolhidos, Relatórios e o que já mapeou
+        let (conhecidos, na_central): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) = estado.ler(|d| {
+            let escolhidos: std::collections::HashSet<u32> =
+                d.escolhidos.iter().map(|e| e.jogador.player_id).chain(d.importacao_ignorada.iter().copied()).collect();
+            let todos = escolhidos
+                .iter()
+                .copied()
+                .chain(d.mapeados.iter().map(|m| m.jogador.player_id))
+                .chain(d.relatorios.iter().flat_map(|r| r.jogadores.iter().chain(r.da_base.iter())).map(|j| j.player_id))
+                .collect();
+            (escolhidos, todos)
+        });
+        // o conhecimento do jogo sobre eles: se algum nível mudou (um olheiro
+        // do FIFA observou, ou a Central subiu o dela), o mapeamento roda
+        let mut niveis: std::collections::HashMap<u32, mapeamento::Conhecimento> =
+            conhecimento_do_jogo().into_iter().filter(|(id, _)| na_central.contains(id)).collect();
+        // na lista do jogo sem registro de conhecimento: o jogo o mostra aberto
+        for (id, conhecimento) in &lista {
+            if conhecimento.is_none() && na_central.contains(id) {
+                niveis.insert(*id, (mapeamento::SEM_REGISTRO, 0));
+            }
+        }
+        let novidade = lista.iter().any(|(id, _)| !conhecidos.contains(id)) || niveis.iter().any(|(id, n)| self.niveis_vistos.get(id) != Some(n));
+        if so_com_novidade && !novidade {
             return;
         }
         if self.mapeamento_pendente {
@@ -3123,9 +3214,36 @@ impl ScoutState {
             return;
         }
         let fonte = Arc::clone(&self.fonte);
+        self.niveis_vistos = niveis.clone();
+        {
+            // para calibrar o que o jogo mostra: id:nível:campo a / precisão na Central
+            let precisoes: std::collections::HashMap<u32, u8> =
+                estado.ler(|d| d.escolhidos.iter().map(|e| (e.jogador.player_id, e.precisao)).collect());
+            let mut linhas: Vec<String> = niveis
+                .iter()
+                .filter(|(id, _)| precisoes.contains_key(id))
+                .map(|(id, (n, a))| format!("{id}:{n}:{a:X}/{}", precisoes.get(id).copied().unwrap_or(0)))
+                .collect();
+            linhas.sort();
+            tracing::info!("[scout::state] Conhecimento do jogo dos Escolhidos (id:nível:a/precisão): {}", linhas.join(" "));
+            // a lista do jogo: o que cada entrada guarda além do jogador e as sem registro de conhecimento
+            if let Ok(entradas) = crate::save_repo::nativo::read_native_shortlist() {
+                let sem_registro: Vec<String> = entradas
+                    .iter()
+                    .filter(|e| u32::try_from(e.jogador).map_or(false, |id| !niveis.contains_key(&id)))
+                    .map(|e| format!("{}:{:?}:{}", e.jogador, e.revelado, e.marca))
+                    .collect();
+                let com_revelado: Vec<String> = entradas
+                    .iter()
+                    .filter(|e| e.revelado != [-1; 4])
+                    .map(|e| format!("{}:{:?}", e.jogador, e.revelado))
+                    .collect();
+                tracing::info!("[scout::state] Lista do jogo: sem registro de conhecimento {}; com campo revelado {}", sem_registro.join(" "), com_revelado.join(" "));
+            }
+        }
         self.mapeamento_pendente = self.tarefa_mapeamento.start(move || {
             let pool = fonte.read_players_for_mapping()?;
-            Ok((id_save, hoje, mapeamento::montar(&pool, hoje, &lista, &conhecidos)))
+            Ok((id_save, hoje, mapeamento::montar(&pool, hoje, &lista, &niveis, &conhecidos)))
         });
     }
 
@@ -3142,9 +3260,10 @@ impl ScoutState {
                 if let Some(estado) = self.estados.get(&dono).cloned() {
                     match estado.mutar(|d| mapeamento::aplicar(d, resultado, hoje)) {
                         Ok(resumo) if resumo.mudou() => tracing::info!(
-                            "[scout::state] Mapeamento: {} ex-jogador(es) do clube, {} da lista do jogo.",
+                            "[scout::state] Mapeamento: {} ex-jogador(es) do clube, {} da lista do jogo, {} completo(s) do jogo.",
                             resumo.sairam,
-                            resumo.importados
+                            resumo.importados,
+                            resumo.completados
                         ),
                         Ok(_) => {}
                         Err(err) => tracing::warn!("[scout::state] Mapeamento não foi salvo: {err:?}"),
@@ -3160,6 +3279,7 @@ impl ScoutState {
                 self.mapeamento_pendente = false;
                 self.tarefa_mapeamento.reset();
                 self.remapear = false;
+                self.niveis_vistos.clear();
                 tracing::warn!("[scout::state] Mapeamento falhou: {err:?}");
             }
         }
@@ -4130,7 +4250,9 @@ impl ScoutState {
 
     pub fn definir_ordenacao_da_lista(&mut self, id: ListaId, ordenacao: Ordenacao) {
         let modo = self.modo_da_lista(id);
-        self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo)).ordenacao = ordenacao;
+        let prefs = self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo));
+        prefs.ordenacao = ordenacao;
+        prefs.cursor = None;
     }
 
     /// O painel de filtros (Y) aberto, e de qual lista.
@@ -4144,6 +4266,75 @@ impl ScoutState {
 
     pub fn fechar_painel_de_filtros(&mut self) {
         self.painel_de_filtros = None;
+    }
+
+    /// O jogador apertou L2 (-1) ou R2 (+1) neste frame: a lista na tela
+    /// passa para o grupo de posição anterior ou seguinte. Vale um frame.
+    pub fn passo_de_grupo(&self) -> i8 {
+        self.passo_de_grupo
+    }
+
+    pub fn definir_passo_de_grupo(&mut self, passo: i8) {
+        self.passo_de_grupo = passo;
+    }
+
+    pub fn passo_de_coluna(&self) -> i8 {
+        self.passo_de_coluna
+    }
+
+    pub fn definir_passo_de_coluna(&mut self, passo: i8) {
+        self.passo_de_coluna = passo;
+    }
+
+    pub fn ordenar_pedido(&self) -> bool {
+        self.ordenar_pedido
+    }
+
+    pub fn definir_ordenar_pedido(&mut self, pedido: bool) {
+        self.ordenar_pedido = pedido;
+    }
+
+    /// A coluna que o cursor da tabela marca: a escolhida com ← / →, ou a
+    /// que ordena a lista.
+    pub fn coluna_do_cursor(&self, id: ListaId) -> Coluna {
+        self.prefs_listas.get(&id).and_then(|p| p.cursor).unwrap_or_else(|| self.ordenacao_da_lista(id).coluna)
+    }
+
+    pub fn definir_coluna_do_cursor(&mut self, id: ListaId, coluna: Coluna) {
+        let modo = self.modo_da_lista(id);
+        self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo)).cursor = Some(coluna);
+    }
+
+    /// Depois de ordenar, o foco continua na linha de posição `indice` (o
+    /// jogador dessa posição mudou, o lugar do foco não).
+    pub fn manter_linha_na_tabela(&mut self, indice: usize) {
+        self.linha_mantida = Some(indice);
+    }
+
+    /// Consome o pedido: `true` = a linha `indice` recebe o foco.
+    pub fn tomar_linha_mantida(&mut self, indice: usize) -> bool {
+        if self.linha_mantida == Some(indice) {
+            self.linha_mantida = None;
+            return true;
+        }
+        false
+    }
+
+    /// Há uma posição esperando o foco (a tabela ainda não a desenhou).
+    pub fn linha_mantida_pendente(&self) -> bool {
+        self.linha_mantida.is_some()
+    }
+
+    pub fn largar_linha_mantida(&mut self) {
+        self.linha_mantida = None;
+    }
+
+    pub fn definir_linha_da_tabela_focada(&mut self, focada: bool) {
+        self.linha_da_tabela_focada = focada;
+    }
+
+    pub fn linha_da_tabela_focada(&self) -> bool {
+        self.linha_da_tabela_focada
     }
 
     pub fn definir_opcoes(&mut self, pedidas: bool) {

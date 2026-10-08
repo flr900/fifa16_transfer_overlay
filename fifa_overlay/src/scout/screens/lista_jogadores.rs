@@ -127,9 +127,18 @@ pub fn barra(
         state.abrir_painel_de_filtros(id);
     }
 
-    // a posição: escolha única, mas só o clique (ou o A) escolhe
+    // a posição: escolha única, mas só o clique (ou o A) escolhe; L2/R2
+    // passam para o grupo anterior/seguinte
     ui.dummy([0.0, theme::ESPACO_1]);
     let contagens = lista::contagem_por_grupo(itens, &filtros);
+    let passo = state.passo_de_grupo();
+    if passo != 0 {
+        let novo = lista::grupo_com_passo(&contagens, filtros.grupo, passo);
+        if novo != filtros.grupo {
+            state.mutar_filtros_da_lista(id, |f| f.grupo = novo);
+        }
+    }
+    let filtros = state.filtros_da_lista(id);
     for (indice, (grupo, quantos)) in contagens.into_iter().enumerate() {
         if indice > 0 {
             ui.same_line_with_spacing(0.0, theme::ESPACO_2);
@@ -146,6 +155,14 @@ pub fn barra(
             ui.tooltip_text(grupo.nome());
         }
     }
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        ui.same_line_with_spacing(0.0, theme::ESPACO_4);
+        let y = ui.cursor_pos()[1];
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
+        let tabular = state.modo_da_lista(id) == Densidade::Tabular;
+        let dica = if tabular { "L2 / R2 trocam a posição  ·  ← → escolhem a coluna  ·  X ordena" } else { "L2 / R2 trocam a posição" };
+        ui.text_colored(theme::TEXT_SECONDARY, dica);
+    });
     ui.dummy([0.0, theme::ESPACO_2]);
 }
 
@@ -181,6 +198,9 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     let ordenacao = state.ordenacao_da_lista(id);
     let hoje = state.data_da_carreira();
     let todas = colunas(id);
+    let cursor = state.coluna_do_cursor(id);
+    // com o foco numa linha, ← / → andam pelas colunas e o X ordena: sem subir ao cabeçalho
+    let cursor_visivel = state.linha_da_tabela_focada();
 
     let flags = TableFlags::BORDERS_INNER_H | TableFlags::SIZING_FIXED_FIT | TableFlags::NO_SAVED_SETTINGS;
     let _c1 = ui.push_style_color(StyleColor::TableBorderLight, theme::BORDER_HAIRLINE_SUBTLE);
@@ -202,7 +222,8 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
             let escolhida = ordenacao.coluna == *coluna;
             let cor = if escolhida { theme::ACCENT_PRIMARY } else { theme::TEXT_SECONDARY };
             let _cor = ui.push_style_color(StyleColor::Text, cor);
-            let clicou = cabecalho(ui, titulo_da_coluna(id, *coluna), cor, escolhida.then_some(ordenacao.decrescente));
+            let marcada = cursor_visivel && cursor == *coluna;
+            let clicou = cabecalho(ui, titulo_da_coluna(id, *coluna), cor, escolhida.then_some(ordenacao.decrescente), marcada);
             if clicou {
                 nova_ordem = Some(ordenacao.alternar(*coluna));
             }
@@ -210,6 +231,9 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     });
 
     // linhas: só as visíveis (a Base pode ter milhares)
+    let mut foco = state.tomar_foco_no_principal();
+    let mut linha_focada = false;
+    let mut indice_focado = None;
     let clipper = imgui::ListClipper::new(i32::try_from(itens.len()).unwrap_or(i32::MAX)).items_height(ALTURA_LINHA).begin(ui);
     for indice in clipper.iter() {
         let Some(item) = usize::try_from(indice).ok().and_then(|i| itens.get(i)) else {
@@ -217,31 +241,71 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
         };
         let _id = ui.push_id_usize(item.chave as usize);
         ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
+        let mantida = usize::try_from(indice).is_ok_and(|i| state.tomar_linha_mantida(i));
+        if std::mem::take(&mut foco) || mantida {
+            ui.table_set_column_index(0);
+            componentes::focar_proximo_item();
+        }
         if linha_selecionavel(ui) {
             ativado = Some(indice_do_item(itens, item));
+        }
+        let centro = componentes::centro_da_linha(ui);
+        if componentes::focado_pelo_controle(ui) {
+            linha_focada = true;
+            indice_focado = usize::try_from(indice).ok();
         }
         for (i, coluna) in todas.iter().enumerate() {
             ui.table_set_column_index(i);
             let (texto, cor) = celula(state, item, *coluna, hoje);
             let fonte = if matches!(coluna, Coluna::Nome) { fonts.map(|f| f.body) } else { fonts.map(|f| f.meta) };
-            texto_na_celula(ui, fonte, &texto, cor);
+            componentes::texto_na_celula(ui, fonte, &texto, cor, centro);
         }
     }
     if let Some(ordem) = nova_ordem {
         state.definir_ordenacao_da_lista(id, ordem);
     }
+    // uma posição pedida que não foi desenhada (a lista encolheu) não fica esperando
+    state.largar_linha_mantida();
+    // ← / → e X do controle, com o foco numa linha (o cursor aparece no cabeçalho)
+    if linha_focada && state.linha_da_tabela_focada() {
+        let mut coluna = cursor;
+        let passo = state.passo_de_coluna();
+        if passo != 0 {
+            coluna = lista::coluna_com_passo(&todas, cursor, passo);
+            state.definir_coluna_do_cursor(id, coluna);
+        }
+        if state.ordenar_pedido() {
+            state.definir_ordenacao_da_lista(id, state.ordenacao_da_lista(id).alternar(coluna));
+            state.definir_coluna_do_cursor(id, coluna);
+            // a lista mudou de ordem: o foco fica na mesma posição da tabela
+            // (o jogador dessa posição é outro, o lugar do foco não muda)
+            if let Some(indice) = indice_focado {
+                state.manter_linha_na_tabela(indice);
+            }
+        }
+    }
+    state.definir_linha_da_tabela_focada(linha_focada);
     ativado
 }
 
 /// Cards em grade (quantos couberem por linha). `desenhar` desenha o card do
 /// item e devolve se foi ativado; devolve o ÍNDICE ativado.
-pub fn grade(ui: &Ui, largura_card: f32, itens: &[ItemLista<'_>], mut desenhar: impl FnMut(&ItemLista<'_>) -> bool) -> Option<usize> {
+pub fn grade(
+    ui: &Ui,
+    largura_card: f32,
+    itens: &[ItemLista<'_>],
+    foco_inicial: bool,
+    mut desenhar: impl FnMut(&ItemLista<'_>) -> bool,
+) -> Option<usize> {
     let mut ativado = None;
     let disponivel = ui.content_region_avail()[0];
     let por_linha = (((disponivel + theme::ESPACO_3) / (largura_card + theme::ESPACO_3)).floor() as usize).max(1);
     for (indice, item) in itens.iter().enumerate() {
         if indice % por_linha != 0 {
             ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+        }
+        if indice == 0 && foco_inicial {
+            componentes::focar_proximo_item();
         }
         if desenhar(item) {
             ativado = Some(indice);
@@ -324,21 +388,13 @@ fn linha_selecionavel(ui: &Ui) -> bool {
     ativou
 }
 
-fn texto_na_celula(ui: &Ui, fonte: Option<imgui::FontId>, texto: &str, cor: [f32; 4]) {
-    com_fonte(ui, fonte, || {
-        let [x, y] = ui.cursor_pos();
-        ui.set_cursor_pos([x, y + ((ALTURA_LINHA - 4.0 - ui.text_line_height()) * 0.5).max(0.0)]);
-        ui.text_colored(cor, texto);
-    });
-}
-
 /// O título de uma coluna: um botão do tamanho da célula, desenhado à mão.
 /// Tem de ser botão (e não `Selectable`): a área do `Selectable` numa célula
 /// invade as vizinhas e o D-pad → não passava de um cabeçalho para o
 /// seguinte (teste `the_controller_can_walk_the_table_headers_and_sort_with_a`).
 /// `true` = ativado (clique ou A). `ordem`: `Some(decrescente)` na coluna que
-/// ordena a lista.
-fn cabecalho(ui: &Ui, titulo: &str, cor: [f32; 4], ordem: Option<bool>) -> bool {
+/// ordena a lista; `marcada`: a coluna do cursor do D-pad.
+fn cabecalho(ui: &Ui, titulo: &str, cor: [f32; 4], ordem: Option<bool>, marcada: bool) -> bool {
     let largura = ui.content_region_avail()[0];
     let clicou = ui.invisible_button("##cabecalho", [largura, ALTURA_LINHA - 8.0]);
     let [x0, y0] = ui.item_rect_min();
@@ -349,6 +405,9 @@ fn cabecalho(ui: &Ui, titulo: &str, cor: [f32; 4], ordem: Option<bool>) -> bool 
         if destaque {
             dl.add_rect([x0, y0], [x1, y1], theme::ACCENT_PRIMARY_DIM).filled(true).rounding(theme::RAIO_SM).build();
             dl.add_rect([x0, y0], [x1, y1], theme::ACCENT_PRIMARY).rounding(theme::RAIO_SM).build();
+        } else if marcada {
+            // o cursor de coluna do D-pad: a coluna que o X vai ordenar
+            dl.add_rect([x0, y0], [x1, y1], theme::ACCENT_PRIMARY_DIM).filled(true).rounding(theme::RAIO_SM).build();
         }
         dl.add_text([x0 + theme::ESPACO_1, y0 + (y1 - y0 - ui.text_line_height()) * 0.5], cor, titulo);
     }
@@ -435,7 +494,6 @@ pub fn painel_de_filtros(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState,
             if componentes::botao(ui, fonts, "Fechar", EstiloBotao::Primario, true) {
                 acao = AcaoPainel::Fechar;
             }
-            ui.set_item_default_focus();
             ui.same_line_with_spacing(0.0, theme::ESPACO_3);
             if componentes::botao(ui, fonts, "Limpar filtros", EstiloBotao::Secundario, filtros.ativos() > 0) {
                 novos.limpar_painel();
@@ -599,21 +657,32 @@ mod tests {
     /// tabela faz com elas.
     struct Mesa {
         ctx: imgui::Context,
+        /// Põe um botão (a "barra") acima da tabela, como nas telas.
+        com_barra: bool,
+        /// Quantas vezes o botão da "barra" foi ativado.
+        barra: usize,
+        /// O ImGui só aceita um contexto ativo por vez: os testes em paralelo
+        /// esperam a vez.
+        _vez: std::sync::MutexGuard<'static, ()>,
     }
+
+    static VEZ: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     impl Mesa {
         fn nova() -> Mesa {
+            let vez = VEZ.lock().unwrap_or_else(|p| p.into_inner());
             let mut ctx = imgui::Context::create();
             ctx.set_ini_filename(None);
             ctx.io_mut().display_size = [1600.0, 900.0];
             ctx.io_mut().config_flags |= imgui::ConfigFlags::NAV_ENABLE_GAMEPAD;
             ctx.io_mut().backend_flags |= imgui::BackendFlags::HAS_GAMEPAD;
             ctx.fonts().build_rgba32_texture();
-            Mesa { ctx }
+            Mesa { ctx, com_barra: false, barra: 0, _vez: vez }
         }
 
         /// Um quadro com a tabela; `tecla` apertada neste quadro.
         fn quadro(&mut self, estado: &mut ScoutState, itens: &[ItemLista<'_>], tecla: Option<imgui::Key>) -> Option<usize> {
+            let com_barra = self.com_barra;
             let io = self.ctx.io_mut();
             io.delta_time = 1.0 / 60.0;
             for k in [
@@ -627,12 +696,20 @@ mod tests {
             }
             let ui = self.ctx.new_frame();
             let mut ativado = None;
+            let mut barra = false;
             ui.window("teste").size([1500.0, 800.0], Condition::Always).position([0.0, 0.0], Condition::Always).build(|| {
                 ui.child_window("conteudo").size([0.0, 0.0]).flags(super::super::flags_conteudo()).build(|| {
-                    ativado = tabela(ui, None, estado, ListaId::Base, itens);
+                    // um botão acima da tabela, como a barra de filtros das telas
+                    if com_barra {
+                        barra = ui.button("barra");
+                    }
+                    // como as telas: filtra e ordena a cada quadro
+                    let visiveis = preparar(estado, ListaId::Base, itens.to_vec());
+                    ativado = tabela(ui, None, estado, ListaId::Base, &visiveis);
                 });
             });
             self.ctx.render();
+            self.barra += usize::from(barra);
             ativado
         }
 
@@ -644,6 +721,126 @@ mod tests {
             for _ in 0..2 {
                 self.quadro(estado, itens, None);
             }
+        }
+    }
+
+    #[test]
+    fn a_focus_request_lands_on_the_first_row_not_on_the_header() {
+        let jogadores: Vec<JogadorEncontrado> =
+            (1..=5).map(|i| JogadorEncontrado::de_teste(i, &format!("Jogador {i}"), 18, (60 + i as u8, 62 + i as u8))).collect();
+        let itens: Vec<ItemLista<'_>> = jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
+        let mut estado = ScoutState::new();
+        let mut mesa = Mesa::nova();
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        // voltar de um modal / trocar de aba: o foco vai para o conteúdo principal
+        estado.pedir_foco_no_principal();
+        mesa.quadro(&mut estado, &itens, None);
+        mesa.quadro(&mut estado, &itens, None);
+        // com o foco na primeira linha, A abre o primeiro jogador (e não ordena por um cabeçalho)
+        let mut ativado = None;
+        for _ in 0..3 {
+            ativado = ativado.or(mesa.quadro(&mut estado, &itens, Some(imgui::Key::GamepadFaceDown)));
+        }
+        assert_eq!(ativado, Some(0), "A abre a primeira linha");
+        assert_eq!(estado.ordenacao_da_lista(ListaId::Base), Ordenacao::default(), "e nenhuma coluna foi reordenada");
+    }
+
+    #[test]
+    fn dpad_left_right_pick_the_column_and_x_sorts_it_with_the_focus_on_a_row() {
+        let jogadores: Vec<JogadorEncontrado> =
+            (1..=5).map(|i| JogadorEncontrado::de_teste(i, &format!("Jogador {i}"), 18, (60 + i as u8, 62 + i as u8))).collect();
+        let itens: Vec<ItemLista<'_>> = jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
+        let mut estado = ScoutState::new();
+        let mut mesa = Mesa::nova();
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        // o foco entra na primeira linha (sem subir ao cabeçalho)
+        estado.pedir_foco_no_principal();
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Overall, "o cursor começa na coluna que ordena");
+        let passo = |estado: &mut ScoutState, mesa: &mut Mesa, passo: i8| {
+            estado.definir_passo_de_coluna(passo);
+            mesa.quadro(estado, &itens, None);
+            estado.definir_passo_de_coluna(0);
+            mesa.quadro(estado, &itens, None);
+        };
+        passo(&mut estado, &mut mesa, 1);
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Potencial, "→ anda uma coluna");
+        passo(&mut estado, &mut mesa, 1);
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Valor);
+        passo(&mut estado, &mut mesa, -1);
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Potencial, "← volta");
+        // X ordena pela coluna do cursor; de novo, inverte
+        let x = |estado: &mut ScoutState, mesa: &mut Mesa| {
+            estado.definir_ordenar_pedido(true);
+            mesa.quadro(estado, &itens, None);
+            estado.definir_ordenar_pedido(false);
+            mesa.quadro(estado, &itens, None);
+        };
+        x(&mut estado, &mut mesa);
+        let ordem = estado.ordenacao_da_lista(ListaId::Base);
+        assert_eq!(ordem.coluna, Coluna::Potencial);
+
+        x(&mut estado, &mut mesa);
+        assert_eq!(estado.ordenacao_da_lista(ListaId::Base), Ordenacao { decrescente: !ordem.decrescente, ..ordem });
+        // nas pontas o cursor para
+        for _ in 0..20 {
+            passo(&mut estado, &mut mesa, 1);
+        }
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), *colunas(ListaId::Base).last().expect("colunas"));
+        for _ in 0..20 {
+            passo(&mut estado, &mut mesa, -1);
+        }
+        assert_eq!(estado.coluna_do_cursor(ListaId::Base), Coluna::Nome);
+        // o ← / → que o ImGui também recebe não tira o foco da linha: A ainda abre a primeira
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadRight);
+        mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadLeft);
+        let mut ativado = None;
+        for _ in 0..3 {
+            ativado = ativado.or(mesa.quadro(&mut estado, &itens, Some(imgui::Key::GamepadFaceDown)));
+        }
+        assert!(ativado.is_some(), "o foco continua numa linha (a do jogador que estava em foco)");
+    }
+
+    #[test]
+    fn sorting_with_x_in_a_long_list_keeps_the_focus_on_a_row() {
+        let jogadores: Vec<JogadorEncontrado> =
+            (1..=300).map(|i| JogadorEncontrado::de_teste(i, &format!("Jogador {i}"), 18, (40 + (i % 50) as u8, 42 + (i % 50) as u8))).collect();
+        let itens: Vec<ItemLista<'_>> = jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
+        let mut estado = ScoutState::new();
+        let mut mesa = Mesa::nova();
+        mesa.com_barra = true;
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        estado.pedir_foco_no_principal();
+        for _ in 0..3 {
+            mesa.quadro(&mut estado, &itens, None);
+        }
+        // o foco desce até a 4ª linha; o X inverte a ordem e o foco fica nessa mesma posição
+        for _ in 0..3 {
+            mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadDown);
+        }
+        let posicao = 3;
+        for volta in 0..3 {
+            estado.definir_ordenar_pedido(true);
+            mesa.quadro(&mut estado, &itens, None);
+            estado.definir_ordenar_pedido(false);
+            for _ in 0..6 {
+                mesa.quadro(&mut estado, &itens, None);
+            }
+            let mut ativado = None;
+            for _ in 0..3 {
+                ativado = ativado.or(mesa.quadro(&mut estado, &itens, Some(imgui::Key::GamepadFaceDown)));
+            }
+            assert_eq!(ativado, Some(posicao), "volta {volta}: o foco fica na mesma posição da tabela");
+            assert_eq!(mesa.barra, 0, "e não vai parar no botão da barra, no alto da tela");
+            mesa.quadro(&mut estado, &itens, None);
         }
     }
 

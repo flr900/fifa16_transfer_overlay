@@ -282,9 +282,10 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         .filter_map(|c| c.missao.as_ref().map(|m| (c.olheiro.id, state.regiao_da_missao(&m.filtros))))
         .collect();
     let pediu_opcoes = state.opcoes_pedidas();
+    let foco_inicial = state.tomar_foco_no_principal();
     com_nacoes(state, |nacoes| match densidade {
-        Densidade::Cards => cards(ui, fonts, &contratados, nacoes, &regioes, pediu_opcoes),
-        Densidade::Tabular => tabela(ui, fonts, &contratados, pediu_opcoes),
+        Densidade::Cards => cards(ui, fonts, &contratados, nacoes, &regioes, pediu_opcoes, foco_inicial),
+        Densidade::Tabular => tabela(ui, fonts, &contratados, pediu_opcoes, foco_inicial),
     })
 }
 
@@ -326,6 +327,7 @@ fn cards(
     nacoes: &Nacoes<'_>,
     regioes: &std::collections::HashMap<Uuid, String>,
     pediu_opcoes: bool,
+    foco_inicial: bool,
 ) -> Acao {
     let mut acao = Acao::Nenhuma;
     let [largura_area, altura_area] = ui.content_region_avail();
@@ -344,6 +346,9 @@ fn cards(
             for indice in 0..total {
                 if indice > 0 {
                     ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+                }
+                if indice == 0 && foco_inicial {
+                    componentes::focar_proximo_item();
                 }
                 let resultado = if indice == 0 {
                     let r = olheiro_card::desenhar_novo(ui, fonts, "contratar", dim, ROTULO_CONTRATAR, DETALHE_CONTRATAR);
@@ -394,7 +399,7 @@ fn cor_status(c: &OlheiroContratado) -> [f32; 4] {
 }
 
 /// Visão Tabular: uma linha por Olheiro e, por último, "Contratar Olheiro".
-fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], pediu_opcoes: bool) -> Acao {
+fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], pediu_opcoes: bool, foco_inicial: bool) -> Acao {
     let mut acao = Acao::Nenhuma;
     let flags = TableFlags::ROW_BG | TableFlags::BORDERS_INNER_H | TableFlags::SIZING_FIXED_FIT | TableFlags::NO_SAVED_SETTINGS;
     let _c1 = ui.push_style_color(StyleColor::TableRowBg, theme::TRANSPARENTE);
@@ -422,38 +427,45 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], ped
             ui.table_header(nome);
         }
     });
-    for c in contratados {
+    for (indice, c) in contratados.iter().enumerate() {
         let _id = ui.push_id(c.olheiro.id.to_string());
         ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
+        if indice == 0 && foco_inicial {
+            ui.table_set_column_index(0);
+            componentes::focar_proximo_item();
+        }
         let (ativou, focada) = linha_selecionavel(ui);
+        let centro = componentes::centro_da_linha(ui);
         if ativou {
             acao = Acao::Ativar(c.olheiro.id);
         }
         if focada && pediu_opcoes {
             acao = Acao::Opcoes(c.olheiro.id);
         }
-        texto_na_celula(ui, fonts.map(|f| f.body), &c.olheiro.nome_exibicao(), theme::TEXT_PRIMARY);
+        componentes::texto_na_celula(ui, fonts.map(|f| f.body), &c.olheiro.nome_exibicao(), theme::TEXT_PRIMARY, centro);
         ui.table_set_column_index(1);
         let perfil = c.olheiro.perfil();
         let foco = format!("{} ({} estrelas)", perfil.foco().nome(), perfil.principal().texto());
-        texto_na_celula(ui, fonts.map(|f| f.meta), &foco, theme::TEXT_SECONDARY);
+        componentes::texto_na_celula(ui, fonts.map(|f| f.meta), &foco, theme::TEXT_SECONDARY, centro);
         ui.table_set_column_index(2);
         let pos = ui.cursor_screen_pos();
-        desenhar_badge(ui, fonts, &ui.get_window_draw_list(), &badge_tier(c.olheiro.tier), [pos[0], pos[1] + 4.0], ALTURA_LINHA - 8.0);
+        let altura_badge = ALTURA_LINHA - 8.0;
+        desenhar_badge(ui, fonts, &ui.get_window_draw_list(), &badge_tier(c.olheiro.tier), [pos[0], centro - altura_badge * 0.5], altura_badge);
         ui.table_set_column_index(3);
-        texto_na_celula(ui, fonts.map(|f| f.body), texto_status(c), cor_status(c));
+        componentes::texto_na_celula(ui, fonts.map(|f| f.body), texto_status(c), cor_status(c), centro);
         ui.table_set_column_index(4);
-        texto_na_celula(ui, fonts.map(|f| f.meta), &texto_missao(c), theme::TEXT_SECONDARY);
+        componentes::texto_na_celula(ui, fonts.map(|f| f.meta), &texto_missao(c), theme::TEXT_SECONDARY, centro);
         ui.table_set_column_index(5);
-        texto_na_celula(ui, fonts.map(|f| f.meta), &texto_relatorios(c.relatorios), theme::TEXT_SECONDARY);
+        componentes::texto_na_celula(ui, fonts.map(|f| f.meta), &texto_relatorios(c.relatorios), theme::TEXT_SECONDARY, centro);
     }
     ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
     if linha_selecionavel(ui).0 {
         acao = Acao::AbrirContratacao;
     }
-    texto_na_celula(ui, fonts.map(|f| f.heading), &format!("+ {ROTULO_CONTRATAR}"), theme::FIELD_GREEN);
+    let centro = componentes::centro_da_linha(ui);
+    componentes::texto_na_celula(ui, fonts.map(|f| f.heading), &format!("+ {ROTULO_CONTRATAR}"), theme::FIELD_GREEN, centro);
     ui.table_set_column_index(4);
-    texto_na_celula(ui, fonts.map(|f| f.meta), DETALHE_CONTRATAR, theme::TEXT_SECONDARY);
+    componentes::texto_na_celula(ui, fonts.map(|f| f.meta), DETALHE_CONTRATAR, theme::TEXT_SECONDARY, centro);
     acao
 }
 
@@ -472,14 +484,6 @@ fn linha_selecionavel(ui: &Ui) -> (bool, bool) {
     let focada = ui.is_item_focused() && ui.io().nav_visible;
     ui.set_cursor_pos(inicio);
     (ativou, focada)
-}
-
-fn texto_na_celula(ui: &Ui, fonte: Option<imgui::FontId>, texto: &str, cor: [f32; 4]) {
-    com_fonte(ui, fonte, || {
-        let [x, y] = ui.cursor_pos();
-        ui.set_cursor_pos([x, y + ((ALTURA_LINHA - 4.0 - ui.text_line_height()) * 0.5).max(0.0)]);
-        ui.text_colored(cor, texto);
-    });
 }
 
 /// "Atratividade do clube: Alta (prestígio 20/20 nacional, 20/20

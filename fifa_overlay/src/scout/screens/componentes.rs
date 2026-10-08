@@ -263,6 +263,37 @@ pub fn focado_pelo_controle(ui: &Ui) -> bool {
     ui.is_item_focused() && ui.io().nav_visible
 }
 
+/// O y (de tela) do meio da linha da tabela: chame logo depois do item que
+/// ocupa a linha (o `Selectable` da linha).
+pub fn centro_da_linha(ui: &Ui) -> f32 {
+    let [_, y0] = ui.item_rect_min();
+    let [_, y1] = ui.item_rect_max();
+    (y0 + y1) * 0.5
+}
+
+/// Quanto o texto desce para parecer centrado: a caixa da linha de texto tem
+/// mais espaço embaixo (descendentes) do que em cima, e o meio dos números e
+/// das maiúsculas fica ~1 px acima do meio da caixa (medido no jogo).
+const AJUSTE_VERTICAL_DO_TEXTO: f32 = 1.0;
+
+/// Texto na célula atual da tabela, centrado na vertical em `centro` (o meio
+/// da linha, `centro_da_linha`).
+pub fn texto_na_celula(ui: &Ui, fonte: Option<imgui::FontId>, texto: &str, cor: [f32; 4], centro: f32) {
+    com_fonte(ui, fonte, || {
+        let [x, _] = ui.cursor_screen_pos();
+        let y = (centro - ui.text_line_height() * 0.5 + AJUSTE_VERTICAL_DO_TEXTO).round();
+        ui.set_cursor_screen_pos([x, y]);
+        ui.text_colored(cor, texto);
+    });
+}
+
+/// O próximo item navegável que for desenhado recebe o foco do controle
+/// (botões não são "clicados": só focados).
+pub fn focar_proximo_item() {
+    // SAFETY: chamada simples do ImGui 1.89, com um quadro em andamento.
+    unsafe { imgui::sys::igSetKeyboardFocusHere(0) };
+}
+
 /// Seletor de dois ou mais botões (ex.: Tabular / Cards): o escolhido em
 /// roxo. Só muda com o clique (ou o A em cima do botão): passar o foco por
 /// cima não escolhe nada (2026-10-08, pedido do Felipe para as telas de

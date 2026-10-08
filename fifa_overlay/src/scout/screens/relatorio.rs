@@ -359,9 +359,13 @@ fn lista(
         }
         let disponivel = ui.content_region_avail()[0];
         let por_linha = (((disponivel + theme::ESPACO_3) / (LARGURA_CARD + theme::ESPACO_3)).floor() as usize).max(1);
+        let mut foco = state.tomar_foco_no_principal();
         for (indice, item) in visiveis.iter().enumerate() {
             if indice % por_linha != 0 {
                 ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+            }
+            if std::mem::take(&mut foco) {
+                componentes::focar_proximo_item();
             }
             if card_jogador(ui, fonts, state, &item.jogador.player_id.to_string(), item.jogador, perfil, hoje, None) {
                 ativado = Some(item.jogador.player_id);
