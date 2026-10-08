@@ -4,7 +4,7 @@ baseline_commit: d110eca
 
 # Story 3.1: Open a player's Ficha with the Radar de Atributos
 
-Status: review
+Status: done
 
 ## Story
 

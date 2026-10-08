@@ -4,7 +4,7 @@ baseline_commit: 2e90313
 
 # Story 7.3: Sync the knowledge level with the game
 
-Status: review
+Status: done
 
 ## Story
 

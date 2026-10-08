@@ -4,7 +4,7 @@ baseline_commit: 79252a3
 
 # Story 5.1: Olheiros with identity, stars, markets and a monthly market
 
-Status: review
+Status: done
 
 ## Story
 

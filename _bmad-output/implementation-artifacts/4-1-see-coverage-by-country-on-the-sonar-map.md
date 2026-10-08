@@ -4,7 +4,7 @@ baseline_commit: d110eca
 
 # Story 4.1: See coverage by country on the Sonar map
 
-Status: review
+Status: done (substituída: o Sonar foi removido do main em 2026-10-08, commit 1c6d794; a 5ª aba virou a Base do Scout)
 
 ## Story
 

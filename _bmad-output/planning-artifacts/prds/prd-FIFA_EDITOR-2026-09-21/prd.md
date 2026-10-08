@@ -447,7 +447,7 @@ geral de onde a rede de scouting do usuário está atuando.
 - Relatório de Scouting com Qualidade variável (precisão numérica,
   atributos revelados, quantidade de jogadores).
 - Radar de Atributos por jogador, com sobreposição a Jogador de Referência.
-- Sonar de Cobertura (mapa por país/liga/continente).
+- Sonar de Cobertura (mapa por país/liga/continente). **Removido em 2026-10-08** (commit `1c6d794`); a quinta aba virou a Base do Scout. Ver `epics.md`, Épico 4.
 
 ### 6.2 Fora de Escopo para o MVP
 
@@ -455,7 +455,7 @@ geral de onde a rede de scouting do usuário está atuando.
   jogador já encontrado) — adiado para v2. `[NOTE FOR PM]`: essa ideia foi
   claramente valorizada na elicitação inicial e é um candidato forte para a
   primeira expansão pós-validação do v1.
-- Demissão/venda de Olheiros contratados de volta.
+- Demissão/venda de Olheiros contratados de volta. **Demissão implementada em 2026-10-08** ("Demitir", com confirmação, bloqueada durante uma Missão); a venda segue fora de escopo.
 - Limite de slots simultâneos de Olheiros.
 - Acúmulo de "conhecimento" progressivo por região entre Missões.
 - Granularidade geográfica abaixo de país (cidade/clube) no Sonar de

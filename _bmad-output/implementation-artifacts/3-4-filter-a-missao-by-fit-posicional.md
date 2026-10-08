@@ -4,7 +4,7 @@ baseline_commit: d110eca
 
 # Story 3.4: Filter a Missão by Fit Posicional
 
-Status: review
+Status: done
 
 ## Story
 

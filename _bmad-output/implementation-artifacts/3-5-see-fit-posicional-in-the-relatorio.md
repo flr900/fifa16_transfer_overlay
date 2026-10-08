@@ -4,7 +4,7 @@ baseline_commit: d110eca
 
 # Story 3.5: See Fit Posicional in the Relatório
 
-Status: review
+Status: done
 
 ## Story
 

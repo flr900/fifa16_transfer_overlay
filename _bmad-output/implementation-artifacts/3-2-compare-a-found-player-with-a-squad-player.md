@@ -4,7 +4,7 @@ baseline_commit: d110eca
 
 # Story 3.2: Compare a found player with a squad player
 
-Status: review
+Status: done
 
 ## Story
 

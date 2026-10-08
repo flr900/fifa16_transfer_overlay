@@ -4,7 +4,7 @@ baseline_commit: 4f68ef5
 
 # Story 7.1: Locate the native shortlist and knowledge vectors
 
-Status: review
+Status: done
 
 ## Story
 

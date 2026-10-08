@@ -4,7 +4,7 @@ baseline_commit: 38ca169
 
 # Story 7.4: Sync switch, notices and retry
 
-Status: review
+Status: done
 
 ## Story
 

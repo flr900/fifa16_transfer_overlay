@@ -4,7 +4,7 @@ baseline_commit: ae0252d
 
 # Story 2.9: Filter a Missão by country on the map
 
-Status: review
+Status: done
 
 ## Story
 

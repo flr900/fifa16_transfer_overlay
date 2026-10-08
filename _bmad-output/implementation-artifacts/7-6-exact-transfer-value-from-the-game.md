@@ -4,7 +4,7 @@ baseline_commit: 43826e2
 
 # Story 7.6: Exact transfer value from the game
 
-Status: review
+Status: done
 
 ## Story
 

@@ -4,7 +4,7 @@ baseline_commit: 9cbbe99
 
 # Story 7.2: Add and remove Escolhidos in the native shortlist
 
-Status: review
+Status: done
 
 ## Story
 
