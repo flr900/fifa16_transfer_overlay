@@ -16,6 +16,7 @@ mod dds;
 mod gamepad;
 mod despejo;
 mod gravador;
+mod maquina;
 mod telas;
 // Infraestrutura de memória (AD-2): usada só através do `save_repo`;
 // partes dela (escrita, CZUM, pointer scan) servem a stories futuras.
@@ -38,7 +39,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v32 — Despejo da imagem do jogo (desenvolvimento)";
+const BUILD_TAG: &str = "7.6-v33 — Observador da máquina de estados (desenvolvimento)";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.
@@ -78,6 +79,8 @@ struct FifaOverlay {
     gravador: gravador::Gravador,
     /// Copia a imagem do fifa16.exe quando o arquivo de pedido existe (desenvolvimento).
     despejo: despejo::Despejo,
+    /// Acha e observa a máquina de estados do modo carreira (desenvolvimento).
+    maquina: maquina::Maquina,
     /// Leitura do controle feita em `before_render`, usada no `render`.
     ultimo_controle: Option<gamepad::EstadoControle>,
     proxima_verificacao_pedido: std::time::Instant,
@@ -94,6 +97,7 @@ impl FifaOverlay {
             controle: gamepad::Controle::new(),
             gravador: gravador::Gravador::new(),
             despejo: despejo::Despejo::new(),
+            maquina: maquina::Maquina::new(),
             ultimo_controle: None,
             proxima_verificacao_pedido: std::time::Instant::now(),
             descarregando: false,
@@ -155,8 +159,12 @@ impl ImguiRenderLoop for FifaOverlay {
         io.backend_flags.insert(BackendFlags::HAS_GAMEPAD);
         self.ultimo_controle = self.controle.ler();
         self.despejo.verificar();
+        self.maquina.verificar();
         let foco = self.scout.foco_no_jogo();
         self.gravador.registrar(self.ultimo_controle, foco.as_ref().map(|(id, nome)| (*id, nome.as_str())));
+        if let Some(desde) = self.gravador.ligado_desde() {
+            self.maquina.observar(desde.elapsed().as_millis());
+        }
         let navegacao = self.ultimo_controle.filter(|_| aberto).map(gamepad::para_navegacao);
         gamepad::alimentar_imgui(io, navegacao);
     }

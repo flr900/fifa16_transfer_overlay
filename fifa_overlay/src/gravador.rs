@@ -208,6 +208,11 @@ pub struct Gravador {
 }
 
 impl Gravador {
+    /// Desde quando o gravador está ligado (para alinhar outros registros ao tempo dele).
+    pub fn ligado_desde(&self) -> Option<Instant> {
+        self.ligado_desde
+    }
+
     pub fn new() -> Self {
         Gravador {
             arquivo: std::env::temp_dir().join("fifa_gravar_controle.pedido"),
