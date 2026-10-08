@@ -4,7 +4,7 @@ baseline_commit: 11dbb86
 
 # Story 6.2: Deep-dive an Escolhido on demand ("Aprofundar agora")
 
-Status: review
+Status: done
 
 ## Story
 
@@ -47,7 +47,7 @@ The PRD left the "núcleo de olheiros detalhistas" (a second, deeper stage on a 
 - [x] state: `Escolhido.aprofundando` (`#[serde(default)]`, old files stay valid), `Aprofundamento`, `aprofundando_ativo`, queue order, short deadline in `avancar_escolhido`, merge guard, end on lost vacancy, rollback, `pode_aprofundar` / `pedir_` / `aprofundamento_pendente` / `cancelar_` / `confirmar_aprofundamento`.
 - [x] screens: `aprofundamento.rs` (aviso), Ficha button, card state, B to cancel (`mod.rs`), modal wiring (`screens/mod.rs`).
 - [x] Tests — `cargo test`: 401 passed (cost and speed tables; full flow: needs a Generalist, cancel charges nothing, confirm debits, jumps the queue, exact at the short deadline; insufficient budget; lost vacancy and older save; first step uses the short deadline; texts).
-- [ ] Manual check in game (Felipe): feel of the numbers (cost, days) and the aviso with the gamepad.
+- [x] Manual check in game (Felipe, 2026-10-08): working as expected.
 
 ## Known gaps
 
