@@ -219,6 +219,45 @@ jogo, a função que despacha esses eventos e o que ela recebe. Plano em etapas,
 Incógnitas: se o código da imagem despejada está desembaralhado; se o evento recebe
 só o nome ou também o contexto do jogador selecionado.
 
+### Resultado da etapa de leitura (2026-10-08)
+
+Despejo: 156.389.376 bytes (`SizeOfImage 0x9524000`), base `0x140000000` (**sem ASLR**: os
+endereços do executável são os mesmos a cada sessão), 986 ms, nenhuma página ilegível.
+Os nomes das seções são ofuscados (`.data` executável com 34 MB zerado, `.tls em` com
+95 MB). **O código real está desempacotado em memória**: a seção `.tls em` (RVA
+`0x39FC000`) tem entropia 6,6 e ~25% de bytes de código; as strings dos eventos estão em
+`.xpdata` (o `.rdata`).
+
+O que o código mostra:
+
+- Os eventos de tela são **Actions de uma máquina de estados (FSM)**, construídas por um
+  construtor gigante (`~0x59F5040`, classe `CareerModeInitModeStateMachine...`, vtable RVA
+  `0x3068590`). Cada Action é só um **token nomeado**: `[0]` vtable (RVA `0x30A8BF8`),
+  `[8]` ponteiro do nome, `[0x10]` nome da máquina dona (`CareerModeStates`). Fica num campo
+  do objeto da máquina (ações em `+0xe80`, `+0xe98`...). Há também um **mapa nome → Action**
+  (`operator[]` em RVA `0x4274EC0`, string em `0x3A20E80`).
+- Ações relevantes (`+offset` no objeto da máquina): `ActionShowMyActions` (`+0xe80`),
+  `ActionEnterTransferOfferActionPopup` (`+0xe98`, compra),
+  **`ActionEnterLoanOfferActionPopup` (`+0xeb0`, empréstimo: ação própria, sem o `RB`)**,
+  `ActionEnterPlayerContractNegotiationFromActionPopup` (`+0xec8`),
+  `ActionEnterContractOfferFromActionPopup` (`+0xee0`),
+  `ActionEnterPreContractOfferFromActionPopup` (`+0xef8`).
+- A Action não tem método de execução (a vtable tem só destrutor e um método de tipo):
+  quem a executa é a máquina de estados.
+- A instância da máquina **não está na imagem estática** (nenhuma ocorrência da vtable no
+  despejo): é alocada no heap.
+
+Ainda não achado: a função que posta uma Action na máquina, e onde fica o "contexto do
+jogador selecionado" que a ação `...FromActionPopup` consome.
+
+Próximo passo (só leitura): achar a instância da máquina na memória viva (varrer o heap pelo
+valor da vtable `0x143068590`) e **observar** os campos dela enquanto o Felipe faz os fluxos,
+para ver se há um campo de "estado atual" ou "ação pendente". Se houver um campo simples,
+escrevê-lo seria o mesmo tipo de escrita que já funcionou no orçamento, sem chamar função.
+
+Ferramentas: `fifa_process_identifier/re_desmontar.py`, `re_usos_desloc.py`, `re_refs_rip.py`,
+`re_vtable.py` (usam o despejo de `%TEMP%` e o `capstone`).
+
 ## Fora do escopo por ora
 
 O limite de slots de Olheiros foi adiado a pedido do Felipe (2026-10-08): o
