@@ -258,6 +258,34 @@ escrevê-lo seria o mesmo tipo de escrita que já funcionou no orçamento, sem c
 Ferramentas: `fifa_process_identifier/re_desmontar.py`, `re_usos_desloc.py`, `re_refs_rip.py`,
 `re_vtable.py` (usam o despejo de `%TEMP%` e o `capstone`).
 
+### Observação da máquina de estados (builds 7.6-v33 a v37, 2026-10-08)
+
+A máquina de estados do modo carreira (objeto de ~8 KB+ no heap, 204 Actions de `+0x28` a
+`+0x1348`, vtable RVA `0x304BFE8`) foi achada pelo ponteiro do nome da Action de compra
+(`[Action+8]`, `+0xE98`) e conferida pelos vizinhos (empréstimo `+0xEB0`, negociação
+`+0xEC8`). A vtable das Actions é sobrescrita pela do tipo de cada uma; só o nome serve de prova.
+
+O que a observação com amostrador de 1 ms mostrou:
+
+- O cabeçalho é uma **caixa de correio de uma posição**: `+0x10 = 1` e `+0x18 = ponteiro
+  da mensagem` por ~18 a 28 ms, e a máquina consome (volta a 0). Mensagens têm a vtable
+  `RVA 0x308D2E8` (classe "Mensagem", referenciada em dezenas de pontos do código: é a fila
+  genérica de eventos da interface).
+- `B` gera um **par** de mensagens pequenas (começo e fim de transição, ~700 ms entre elas)
+  e o campo `+0x13A0` vai `0x1300 -> 0x1301 -> 0x1300`. `A` numa opção do menu gera **uma**
+  mensagem grande.
+- A mensagem de `A` tem contadores de sequência (`+0x8..+0x14`, que mudam de uma vez para
+  outra) e uma carga com **um nome de ação** (`"ActionP..."`, cortado pelo despejo). A de compra e
+  a de empréstimo diferem nas listas de ponteiros da carga, não no cabeçalho.
+- **Nenhum campo da máquina muda com a tela aberta** (compra, empréstimo): a máquina
+  recebe eventos da interface; a escolha da ação nasce na camada acima (Flash).
+
+Conclusão: não há um campo simples de "ação pendente" para escrever. Disparar uma tela direto
+exigiria construir uma mensagem válida (classe, carga, alocação) e conhecer o contexto do
+jogador selecionado, ou achar e chamar a função do menu. Risco de derrubar o jogo alto, ganho
+incerto. **Linha pausada.** O que resta de útil: o roteiro de botões com salto por ordenação
+por nome.
+
 ## Fora do escopo por ora
 
 O limite de slots de Olheiros foi adiado a pedido do Felipe (2026-10-08): o
