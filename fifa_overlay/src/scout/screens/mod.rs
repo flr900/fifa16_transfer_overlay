@@ -15,6 +15,7 @@ mod missoes;
 mod campo_atributo;
 mod campo_fit;
 mod escolhidos;
+mod lista_jogadores;
 mod ficha_jogador;
 mod nova_missao;
 mod olheiros;
@@ -86,7 +87,8 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     if !demitindo {
         state.cancelar_demissao();
     }
-    let modal = confirmando || trocando.is_some() || demitindo;
+    let filtrando = state.painel_de_filtros().is_some();
+    let modal = confirmando || trocando.is_some() || demitindo || filtrando;
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -224,6 +226,12 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
                 nav.pedir_foco();
             }
             None => {}
+        }
+    }
+    if let Some(lista) = state.painel_de_filtros() {
+        if lista_jogadores::painel_de_filtros(ui, fonts, state, lista) == lista_jogadores::AcaoPainel::Fechar {
+            state.fechar_painel_de_filtros();
+            nav.pedir_foco();
         }
     }
     if state.demissao_pendente().is_some() {

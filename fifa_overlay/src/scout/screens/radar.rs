@@ -220,6 +220,7 @@ mod tests {
             estrelas_drible: None,
             pe_fraco: None,
             titular_elenco: None,
+            altura: None,
             falso_positivo: false,
         }
     }

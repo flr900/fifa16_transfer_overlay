@@ -479,6 +479,7 @@ pub fn reobservar(
         ritmo_defesa: Some(jogador.ritmo_defesa),
         estrelas_drible: Some(jogador.estrelas_drible),
         pe_fraco: Some(jogador.pe_fraco),
+        altura: Some(jogador.altura),
         titular_elenco: anterior.titular_elenco,
         falso_positivo: anterior.falso_positivo,
     };
@@ -534,6 +535,7 @@ pub fn revelar(missao: &Missao, pool: &PlayerPool, hoje: Date, jogador: &PlayerR
         ritmo_defesa: Some(jogador.ritmo_defesa),
         estrelas_drible: Some(jogador.estrelas_drible),
         pe_fraco: Some(jogador.pe_fraco),
+        altura: Some(jogador.altura),
         titular_elenco: None,
         falso_positivo: false,
     };
@@ -579,6 +581,7 @@ pub mod tests {
             ritmo_defesa: crate::save_repo::RitmoTrabalho::Medio,
             estrelas_drible: 3,
             pe_fraco: 3,
+            altura: 180,
         }
     }
 

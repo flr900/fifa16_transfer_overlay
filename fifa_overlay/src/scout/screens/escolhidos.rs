@@ -15,13 +15,15 @@
 use imgui::Ui;
 
 use super::componentes::{self, badge_frescor, card, desenhar_badge, desenhar_badge_texto, texto_em, EstiloBadge, EstiloBotao};
+use super::lista_jogadores;
 use super::relatorio::{formatar_faixa, silhueta, truncar};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data};
 use crate::save_repo::{nome_posicao, Date};
+use crate::scout::lista::{ItemLista, ListaId};
 use crate::scout::minifaces::Rosto;
 use crate::scout::quality::Frescor;
-use crate::scout::state::{EscolhidoNaLista, ResumoAcompanhamento, ScoutState, StatusNativo};
+use crate::scout::state::{Densidade, EscolhidoNaLista, ResumoAcompanhamento, ScoutState, StatusNativo};
 
 const ALTURA_CARD: f32 = 92.0;
 const LADO_ROSTO: f32 = 68.0;
@@ -128,12 +130,52 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         return acao;
     }
     let hoje = state.data_da_carreira();
-    for e in &escolhidos {
+    let itens: Vec<ItemLista<'_>> = escolhidos
+        .iter()
+        .map(|e| {
+            let mut item = ItemLista::novo(&e.jogador, situacao_curta(e));
+            // observação vencida: os atributos somem
+            item.detalhado = item.detalhado && e.frescor != Frescor::Vencido;
+            item
+        })
+        .collect();
+    lista_jogadores::barra(ui, fonts, state, ListaId::Escolhidos, &itens);
+    let visiveis = lista_jogadores::preparar(state, ListaId::Escolhidos, itens);
+    if visiveis.is_empty() {
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, lista_jogadores::MSG_NENHUM_NO_FILTRO));
+        return acao;
+    }
+    if state.modo_da_lista(ListaId::Escolhidos) == Densidade::Tabular {
+        if let Some(player_id) = lista_jogadores::tabela(ui, fonts, state, ListaId::Escolhidos, &visiveis) {
+            acao = Acao::AbrirFicha(player_id);
+        }
+        return acao;
+    }
+    for item in &visiveis {
+        let Some(e) = escolhidos.iter().find(|e| e.jogador.player_id == item.jogador.player_id) else {
+            continue;
+        };
         if card_escolhido(ui, fonts, state, e, hoje) {
             acao = Acao::AbrirFicha(e.escolhido.jogador.player_id);
         }
     }
     acao
+}
+
+/// A situação numa palavra ou duas, para a coluna da visão Tabular.
+pub fn situacao_curta(e: &EscolhidoNaLista) -> String {
+    if e.fora_do_filtro {
+        return "Fora do filtro".to_string();
+    }
+    match (e.acompanhado, e.dias_para_exato, e.frescor) {
+        (true, Some(0), _) => "Acompanhado · exato".to_string(),
+        (true, Some(d), _) => format!("Acompanhado · exato em ~{d} dias"),
+        (true, None, _) => "Acompanhado".to_string(),
+        (false, _, Frescor::Atualizado) => format!("Atualizado · ±{}", e.precisao),
+        (false, _, Frescor::Envelhecendo { extra }) => format!("Envelhecendo · +{extra}"),
+        (false, _, Frescor::Desatualizado { extra }) => format!("Desatualizado · +{extra}"),
+        (false, _, Frescor::Vencido) => "Vencido".to_string(),
+    }
 }
 
 /// Interruptor "Sincronizar com o FIFA", "Tentar de novo" e a situação.
@@ -271,6 +313,7 @@ mod tests {
             estrelas_drible: None,
             pe_fraco: None,
             titular_elenco: None,
+            altura: None,
             falso_positivo: false,
         }
     }
@@ -309,5 +352,9 @@ mod tests {
         let e = escolhido_em(&acompanhado, hoje, true);
         assert_eq!(texto_situacao(&e, Some(hoje)), "Acompanhado: ±3 agora, exato em ~30 dias de carreira.");
         assert!(!MSG_VAZIA.contains('!') && !MSG_REGRAS.contains('!'));
+        assert_eq!(situacao_curta(&recente), "Atualizado · ±3");
+        assert!(situacao_curta(&velho).starts_with("Desatualizado"));
+        assert_eq!(situacao_curta(&vencido), "Vencido");
+        assert_eq!(situacao_curta(&e), "Acompanhado · exato em ~30 dias");
     }
 }

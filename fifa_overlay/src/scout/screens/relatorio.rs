@@ -23,11 +23,13 @@ use imgui::Ui;
 use super::componentes::{
     self, badge_escolhido, badge_fit, badge_qualidade, badge_tier, card_com_largura, desenhar_badge_texto, texto_em, EstiloBotao,
 };
+use super::lista_jogadores;
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data};
 use crate::save_repo::{nome_posicao, Date};
+use crate::scout::lista::{ItemLista, ListaId};
 use crate::scout::minifaces::Rosto;
-use crate::scout::state::{meio_da_faixa, FaixaAtributo, JogadorEncontrado, PosicaoAlvo, Qualidade, RelatorioNaLista, ScoutState};
+use crate::scout::state::{meio_da_faixa, Densidade, FaixaAtributo, JogadorEncontrado, PosicaoAlvo, Qualidade, RelatorioNaLista, ScoutState};
 
 const LARGURA_CARD: f32 = 460.0;
 const ALTURA_CARD: f32 = 196.0;
@@ -311,32 +313,47 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     }
     let perfil = PerfilPedido::de(&item);
     let hoje = state.data_da_carreira();
-    match cards(ui, fonts, state, &r.jogadores, &perfil, hoje) {
+    // barra (visão, filtros, ordem, posição) e a lista, filtrada e ordenada
+    let itens: Vec<ItemLista<'_>> = r.jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
+    lista_jogadores::barra(ui, fonts, state, ListaId::RelatorioAberto, &itens);
+    let visiveis = lista_jogadores::preparar(state, ListaId::RelatorioAberto, itens);
+    if visiveis.is_empty() {
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, lista_jogadores::MSG_NENHUM_NO_FILTRO));
+        return acao;
+    }
+    match lista(ui, fonts, state, &visiveis, &perfil, hoje) {
         Some(player_id) if acao == Acao::Nenhuma => Acao::AbrirFicha(player_id),
         _ => acao,
     }
 }
 
-/// Grade de cards. Devolve o jogador cujo card foi ativado (abre a Ficha).
-fn cards(
+/// Os jogadores já filtrados e ordenados, na visão escolhida (Cards em
+/// grade, ou a tabela), dentro de uma janela que rola. Devolve o jogador
+/// ativado (abre a Ficha).
+fn lista(
     ui: &Ui,
     fonts: Option<&Fonts>,
-    state: &ScoutState,
-    jogadores: &[JogadorEncontrado],
+    state: &mut ScoutState,
+    visiveis: &[ItemLista<'_>],
     perfil: &PerfilPedido,
     hoje: Option<Date>,
 ) -> Option<u32> {
     let mut ativado = None;
+    let tabular = state.modo_da_lista(ListaId::RelatorioAberto) == Densidade::Tabular;
     ui.child_window("##cards_relatorio").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
         super::rolar_com_analogico(ui, state.rolagem());
+        if tabular {
+            ativado = lista_jogadores::tabela(ui, fonts, state, ListaId::RelatorioAberto, visiveis);
+            return;
+        }
         let disponivel = ui.content_region_avail()[0];
         let por_linha = (((disponivel + theme::ESPACO_3) / (LARGURA_CARD + theme::ESPACO_3)).floor() as usize).max(1);
-        for (indice, j) in ordenar(jogadores).into_iter().enumerate() {
+        for (indice, item) in visiveis.iter().enumerate() {
             if indice % por_linha != 0 {
                 ui.same_line_with_spacing(0.0, theme::ESPACO_3);
             }
-            if card_jogador(ui, fonts, state, j, perfil, hoje) {
-                ativado = Some(j.player_id);
+            if card_jogador(ui, fonts, state, item.jogador, perfil, hoje) {
+                ativado = Some(item.jogador.player_id);
             }
             if indice % por_linha == por_linha - 1 {
                 ui.dummy([0.0, theme::ESPACO_1]);
@@ -511,6 +528,7 @@ mod tests {
             estrelas_drible: None,
             pe_fraco: None,
             titular_elenco: None,
+            altura: None,
             falso_positivo: false,
         }
     }

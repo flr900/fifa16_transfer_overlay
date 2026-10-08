@@ -45,9 +45,10 @@ use crate::save_repo::{Date, SaveRepoError};
 pub use crate::save_repo::{Atributo, Confederacao, Funcao, Liga, Nacao, Pe, RitmoTrabalho};
 pub use super::quality::{Atalho, NivelEquipe, Perfil, PosicaoAlvo};
 
+use super::lista::{FiltrosLista, ListaId, Ordenacao, PrefsLista};
 use super::minifaces::{Minifaces, Rosto};
 pub use super::persistence::Densidade;
-use super::persistence::{self, EstadoPersistido};
+use super::persistence::{self, EstadoPersistido, UiPrefs};
 use super::quality;
 use super::search::{self, CareerSnapshot, CareerSource, SaveRepoSource};
 use super::Aba;
@@ -1167,6 +1168,9 @@ pub struct JogadorEncontrado {
     pub estrelas_drible: Option<u8>,
     #[serde(default)]
     pub pe_fraco: Option<u8>,
+    /// Altura em cm (2026-10-08; `None` em Relatórios de antes).
+    #[serde(default)]
+    pub altura: Option<u8>,
     /// Overall do titular do elenco na posição com que ele foi comparado
     /// (2026-10-03).
     #[serde(default)]
@@ -1732,6 +1736,11 @@ pub struct ScoutState {
     demissao_pendente: Option<Uuid>,
     /// O jogador apertou Y neste frame (o menu de Opções da tela em foco).
     opcoes_neste_frame: bool,
+    /// Filtros e ordenação de cada lista de jogadores (só enquanto o Scout
+    /// está carregado; a visão vai para o arquivo da carreira).
+    prefs_listas: HashMap<ListaId, PrefsLista>,
+    /// O painel de filtros (Y) aberto, e de qual lista.
+    painel_de_filtros: Option<ListaId>,
     /// Filtro de continente da tela "Contratar Olheiro" (`None` = todos).
     filtro_continente: Option<Confederacao>,
     /// Pixels a rolar neste frame pelo analógico direito (positivo = para
@@ -1830,6 +1839,8 @@ impl ScoutState {
             troca_de_aba_pendente: None,
             demissao_pendente: None,
             opcoes_neste_frame: false,
+            prefs_listas: HashMap::new(),
+            painel_de_filtros: None,
             filtro_continente: None,
             rolagem: 0.0,
             detalhes_da_missao: false,
@@ -1908,6 +1919,7 @@ impl ScoutState {
         self.vendo_arquivados = false;
         self.troca_de_aba_pendente = None;
         self.demissao_pendente = None;
+        self.painel_de_filtros = None;
     }
 
     // -----------------------------------------------------------------
@@ -3397,6 +3409,72 @@ impl ScoutState {
     /// foco (ou os filtros da lista). Vale só no frame do aperto.
     pub fn opcoes_pedidas(&self) -> bool {
         self.opcoes_neste_frame
+    }
+
+    // -----------------------------------------------------------------
+    // Listas de jogadores: visão, filtros e ordenação (2026-10-08)
+    // -----------------------------------------------------------------
+
+    /// A visão da lista: a salva na carreira (Cards ou Tabular).
+    pub fn modo_da_lista(&self, id: ListaId) -> Densidade {
+        let padrao = UiPrefs::default();
+        let escolher = |p: &UiPrefs| match id {
+            ListaId::Escolhidos => p.modo_escolhidos,
+            ListaId::Relatorios => p.modo_relatorios,
+            ListaId::Base => p.modo_base,
+            ListaId::RelatorioAberto => p.modo_relatorio_aberto,
+        };
+        self.estado_ativo().map_or_else(|| escolher(&padrao), |e| e.ler(|d| escolher(&d.ui_prefs)))
+    }
+
+    pub fn definir_modo_da_lista(&mut self, id: ListaId, modo: Densidade) {
+        let Some(estado) = self.estado_ativo() else {
+            return;
+        };
+        if self.modo_da_lista(id) == modo {
+            return;
+        }
+        if let Err(err) = estado.mutar(|d| match id {
+            ListaId::Escolhidos => d.ui_prefs.modo_escolhidos = modo,
+            ListaId::Relatorios => d.ui_prefs.modo_relatorios = modo,
+            ListaId::Base => d.ui_prefs.modo_base = modo,
+            ListaId::RelatorioAberto => d.ui_prefs.modo_relatorio_aberto = modo,
+        }) {
+            tracing::warn!("[scout::state] Visão da lista não foi salva: {err:?}");
+        }
+    }
+
+    pub fn filtros_da_lista(&self, id: ListaId) -> FiltrosLista {
+        self.prefs_listas.get(&id).map(|p| p.filtros.clone()).unwrap_or_default()
+    }
+
+    /// Muda os filtros da lista (o grupo de posição e o painel do Y).
+    pub fn mutar_filtros_da_lista(&mut self, id: ListaId, mudar: impl FnOnce(&mut FiltrosLista)) {
+        let modo = self.modo_da_lista(id);
+        let prefs = self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo));
+        mudar(&mut prefs.filtros);
+    }
+
+    pub fn ordenacao_da_lista(&self, id: ListaId) -> Ordenacao {
+        self.prefs_listas.get(&id).map(|p| p.ordenacao).unwrap_or_default()
+    }
+
+    pub fn definir_ordenacao_da_lista(&mut self, id: ListaId, ordenacao: Ordenacao) {
+        let modo = self.modo_da_lista(id);
+        self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo)).ordenacao = ordenacao;
+    }
+
+    /// O painel de filtros (Y) aberto, e de qual lista.
+    pub fn painel_de_filtros(&self) -> Option<ListaId> {
+        self.painel_de_filtros
+    }
+
+    pub fn abrir_painel_de_filtros(&mut self, id: ListaId) {
+        self.painel_de_filtros = Some(id);
+    }
+
+    pub fn fechar_painel_de_filtros(&mut self) {
+        self.painel_de_filtros = None;
     }
 
     pub fn definir_opcoes(&mut self, pedidas: bool) {
@@ -5329,6 +5407,40 @@ mod tests {
         assert!(st.olheiros_contratados()[0].em_missao);
         // demitir um que já saiu não faz nada
         assert!(!st.confirmar_demissao());
+    }
+
+    #[test]
+    fn each_player_list_remembers_its_view_filters_and_order() {
+        use crate::scout::lista::{Coluna, GrupoPosicao, ListaId, Ordenacao};
+        let pasta = PastaTemporaria::nova();
+        let o = olheiro(Especializacao::Generalista, Tier::Junior);
+        let (mut st, _busca, _) = estado_com_datas(&pasta, &[20260801], vec![], &o);
+        st.ao_abrir_painel();
+        // padrões: Escolhidos em Cards, a Base em Tabular
+        assert_eq!(st.modo_da_lista(ListaId::Escolhidos), Densidade::Cards);
+        assert_eq!(st.modo_da_lista(ListaId::Base), Densidade::Tabular);
+        st.definir_modo_da_lista(ListaId::Escolhidos, Densidade::Tabular);
+        st.mutar_filtros_da_lista(ListaId::Escolhidos, |f| {
+            f.grupo = GrupoPosicao::Meias;
+            f.idade.max = 23;
+        });
+        st.definir_ordenacao_da_lista(ListaId::Escolhidos, Ordenacao { coluna: Coluna::Valor, decrescente: true });
+        // cada lista com a sua
+        assert_eq!(st.modo_da_lista(ListaId::Relatorios), Densidade::Cards);
+        assert_eq!(st.filtros_da_lista(ListaId::Relatorios).grupo, GrupoPosicao::Todos);
+        assert_eq!(st.filtros_da_lista(ListaId::Escolhidos).grupo, GrupoPosicao::Meias);
+        assert_eq!(st.filtros_da_lista(ListaId::Escolhidos).ativos(), 1);
+        assert_eq!(st.ordenacao_da_lista(ListaId::Relatorios), Ordenacao::default());
+        // a visão vai para o arquivo da carreira; os filtros, não
+        let (mut de_novo, _b, _) = estado_com_datas(&pasta, &[20260801], vec![], &o);
+        de_novo.ao_abrir_painel();
+        assert_eq!(de_novo.modo_da_lista(ListaId::Escolhidos), Densidade::Tabular);
+        assert_eq!(de_novo.filtros_da_lista(ListaId::Escolhidos).grupo, GrupoPosicao::Todos);
+        // o painel de filtros abre por lista e fecha com o painel
+        st.abrir_painel_de_filtros(ListaId::Base);
+        assert_eq!(st.painel_de_filtros(), Some(ListaId::Base));
+        st.ao_fechar_painel();
+        assert_eq!(st.painel_de_filtros(), None);
     }
 
     #[test]

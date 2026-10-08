@@ -112,6 +112,12 @@ pub struct UiPrefs {
     pub densidade: Densidade,
     /// Visão da aba Olheiros (2026-10-03); Cards por padrão.
     pub densidade_olheiros: Densidade,
+    /// Visão de cada lista de jogadores (2026-10-08): Cards, ou Tabular para
+    /// ordenar. Só a Base do Scout, que cresce sem parar, abre em Tabular.
+    pub modo_escolhidos: Densidade,
+    pub modo_relatorios: Densidade,
+    pub modo_base: Densidade,
+    pub modo_relatorio_aberto: Densidade,
     /// Épico 7: "Sincronizar com o FIFA". Ligado por padrão (decisão de
     /// 2026-10-06); só vai para o arquivo quando desligado.
     #[serde(skip_serializing_if = "e_verdadeiro")]
@@ -128,6 +134,10 @@ impl Default for UiPrefs {
             aba_ativa: Aba::Olheiros,
             densidade: Densidade::Tabular,
             densidade_olheiros: Densidade::Cards,
+            modo_escolhidos: Densidade::Cards,
+            modo_relatorios: Densidade::Cards,
+            modo_base: Densidade::Tabular,
+            modo_relatorio_aberto: Densidade::Cards,
             sincronizar_com_o_jogo: true,
         }
     }
@@ -416,7 +426,15 @@ pub(crate) mod tests {
                 "escolhidos": [],
                 "ofertas_contratadas": [],
                 "mercado_do_mes": null,
-                "ui_prefs": { "aba_ativa": "olheiros", "densidade": "tabular", "densidade_olheiros": "cards" }
+                "ui_prefs": {
+                    "aba_ativa": "olheiros",
+                    "densidade": "tabular",
+                    "densidade_olheiros": "cards",
+                    "modo_escolhidos": "cards",
+                    "modo_relatorios": "cards",
+                    "modo_base": "tabular",
+                    "modo_relatorio_aberto": "cards"
+                }
             })
         );
     }

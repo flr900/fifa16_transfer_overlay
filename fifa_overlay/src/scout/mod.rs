@@ -22,6 +22,7 @@
 //! (`bloqueia_controle`, aplicado em `crate::gamepad`): sem isso o B ou o
 //! START que fechou o painel chegaria ao FIFA ao ser solto.
 
+pub mod lista;
 pub mod minifaces;
 pub mod nomes;
 pub mod persistence;
@@ -343,6 +344,12 @@ impl Scout {
                     self.state.definir_troca_de_aba_pendente(None);
                     self.nav.pedir_foco();
                 }
+            } else if self.state.painel_de_filtros().is_some() {
+                // painel de filtros (Y) aberto: B fecha; A é dos botões
+                if comandos.voltar {
+                    self.state.fechar_painel_de_filtros();
+                    self.nav.pedir_foco();
+                }
             } else if self.state.demissao_pendente().is_some() {
                 // aviso "Demitir Olheiro?" aberto: B cancela; A é dos botões
                 if comandos.voltar {
@@ -457,6 +464,7 @@ pub fn pedir_troca_de_aba(nav: &mut Navigation, state: &mut ScoutState, aba: Aba
 /// Missão, Relatório e Ficha).
 pub fn trocar_aba_agora(nav: &mut Navigation, state: &mut ScoutState, aba: Aba) {
     state.definir_troca_de_aba_pendente(None);
+    state.fechar_painel_de_filtros();
     state.cancelar_contratacao();
     state.cancelar_nova_missao();
     state.fechar_relatorio();
