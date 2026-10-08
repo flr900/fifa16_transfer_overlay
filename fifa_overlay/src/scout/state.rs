@@ -3183,8 +3183,14 @@ impl ScoutState {
         });
         // o conhecimento do jogo sobre eles: se algum nível mudou (um olheiro
         // do FIFA observou, ou a Central subiu o dela), o mapeamento roda
-        let niveis: std::collections::HashMap<u32, mapeamento::Conhecimento> =
+        let mut niveis: std::collections::HashMap<u32, mapeamento::Conhecimento> =
             conhecimento_do_jogo().into_iter().filter(|(id, _)| na_central.contains(id)).collect();
+        // na lista do jogo sem registro de conhecimento: o jogo o mostra aberto
+        for (id, conhecimento) in &lista {
+            if conhecimento.is_none() && na_central.contains(id) {
+                niveis.insert(*id, (mapeamento::SEM_REGISTRO, 0));
+            }
+        }
         let novidade = lista.iter().any(|(id, _)| !conhecidos.contains(id)) || niveis.iter().any(|(id, n)| self.niveis_vistos.get(id) != Some(n));
         if so_com_novidade && !novidade {
             return;

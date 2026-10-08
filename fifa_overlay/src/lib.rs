@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v18 — Nível 144 abre o jogador";
+const BUILD_TAG: &str = "7.6-v19 — Lista do FIFA sem registro abre; último passo avançado";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.

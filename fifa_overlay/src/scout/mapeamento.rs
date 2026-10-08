@@ -33,12 +33,20 @@ use crate::save_repo::{Atributo, Date, PlayerPool};
 const NIVEL_COMPLETO: i32 = 198;
 /// A partir daqui o jogo mostra valor, salário e estimativas melhores.
 const NIVEL_REVELADO: i32 = 140;
+/// O último passo antes de abrir: pesquisa avançada, a 2–3 dias de completar.
+const PRECISAO_ULTIMO_PASSO: u8 = 2;
+const ATRIBUTOS_ULTIMO_PASSO: usize = 26;
 /// Precisão (±) e atributos de quem o jogo mal conhece.
 const PRECISAO_DESCONHECIDO: u8 = 20;
 const ATRIBUTOS_DESCONHECIDO: usize = 6;
 
 /// O que o jogo sabe de um jogador: `(nível 0–198, campo "a")`.
 pub type Conhecimento = (i32, i32);
+
+/// "Nível" de quem está na lista do jogo e não tem registro de conhecimento:
+/// o jogo o mostra aberto (conferido pelo Felipe nos 18 da lista nessa
+/// situação, Saliba entre eles).
+pub const SEM_REGISTRO: i32 = -1;
 
 /// A partir deste nível o jogo mostra o jogador aberto (Overall, Potencial,
 /// atributos e contrato). O Felipe confirmou no Mbappé e no Camarda (178) e
@@ -59,13 +67,14 @@ pub fn atributos_abertos(conhecimento: Conhecimento) -> bool {
     conhecimento.0 >= NIVEL_ABERTO || campo_aberto(conhecimento)
 }
 
-/// O que a Central mostra de um jogador pelo que o jogo sabe dele (ou nada,
-/// sem registro): como `revelacao_do_nivel`, mas com o jogador aberto no jogo
-/// (Overall, Potencial e todos os atributos à mostra) ele vem exato e completo.
+/// O que a Central mostra de um jogador da lista do jogo pelo que o jogo sabe
+/// dele: sem registro de conhecimento ou aberto no jogo (Overall, Potencial e
+/// todos os atributos à mostra) ele vem exato e completo; senão, pelo nível.
 pub fn revelacao(conhecimento: Option<Conhecimento>) -> (u8, usize) {
     match conhecimento {
+        None => (0, Atributo::TODOS.len()),
         Some(c) if atributos_abertos(c) => (0, Atributo::TODOS.len()),
-        _ => revelacao_do_nivel(conhecimento.map(|c| c.0)),
+        Some(c) => revelacao_do_nivel(Some(c.0)),
     }
 }
 
@@ -75,6 +84,9 @@ pub fn revelacao(conhecimento: Option<Conhecimento>) -> (u8, usize) {
 pub fn revelacao_do_nivel(nivel: Option<i32>) -> (u8, usize) {
     match nivel {
         Some(n) if n >= NIVEL_COMPLETO => (0, Atributo::TODOS.len()),
+        // o último passo antes de abrir (140–143): transferência e salário
+        // revelados e a pesquisa nos últimos atributos, a poucos dias de completar
+        Some(n) if (NIVEL_REVELADO..NIVEL_ABERTO).contains(&n) => (PRECISAO_ULTIMO_PASSO, ATRIBUTOS_ULTIMO_PASSO),
         Some(n) if n >= NIVEL_REVELADO => {
             let precisao = u8::try_from((NIVEL_COMPLETO - n + 3) / 4).unwrap_or(PRECISAO_DESCONHECIDO);
             (precisao.max(1), if n >= 170 { 24 } else { 14 })
@@ -152,7 +164,8 @@ pub fn montar(
                 campo_aberto: campo_aberto(conhecimento),
                 precisao,
                 jogador: search::fotografar(raw, pool, hoje, precisao, atributos),
-                exato: atributos_abertos(conhecimento).then(|| search::fotografar(raw, pool, hoje, 0, todos)),
+                exato: (atributos_abertos(conhecimento) || conhecimento.0 == SEM_REGISTRO)
+                    .then(|| search::fotografar(raw, pool, hoje, 0, todos)),
             })
         })
         .collect();
@@ -258,12 +271,17 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
         if escolhido.is_none() && !mapeado && !nos_relatorios.contains(&id) {
             continue; // o jogo marca 198 até em quem o técnico nunca viu
         }
+        let so_do_jogo = escolhido == Some(true) || (escolhido.is_none() && mapeado_da_lista);
+        if sincronia.nivel == SEM_REGISTRO && !so_do_jogo {
+            continue; // a Central escreve o registro dos dela: sem registro, ainda não valeu
+        }
         // O nível que a Central escreve no jogo (198 − 4 × precisão) não pode
         // passar por "o jogo sabe": só vale como nível do jogo para quem veio
         // da lista dele e a Central nunca mexeu. Para os outros, só o campo
         // `a` aberto ou o nível máximo mostram o jogador aberto.
-        let so_do_jogo = escolhido == Some(true) || (escolhido.is_none() && mapeado_da_lista);
-        let aberto = sincronia.campo_aberto || sincronia.nivel >= NIVEL_COMPLETO || (so_do_jogo && sincronia.nivel >= NIVEL_ABERTO);
+        let aberto = sincronia.campo_aberto
+            || sincronia.nivel >= NIVEL_COMPLETO
+            || (so_do_jogo && (sincronia.nivel >= NIVEL_ABERTO || sincronia.nivel == SEM_REGISTRO));
         let mostra_contrato = aberto || so_do_jogo;
         let foto = match (&sincronia.exato, aberto) {
             (Some(exato), true) => exato.clone(),
@@ -291,7 +309,7 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
                     }
                 }
                 mudou = true;
-            } else if !aberto && e.importado && e.acompanhamento.is_none() && e.precisao < sincronia.precisao {
+            } else if !aberto && e.importado && e.acompanhamento.is_none() && e.precisao != sincronia.precisao {
                 // veio da lista do jogo, nenhum Generalista o acompanha e o jogo
                 // ainda não o mostra aberto: a Central mostra só o que o jogo mostra
                 let fit_alvo = e.jogador.fit_alvo;
@@ -304,7 +322,7 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
         // o registro da Base que veio da lista do jogo mostra o que o jogo mostra
         if !aberto && so_do_jogo {
             for x in dados.mapeados.iter_mut().filter(|x| x.jogador.player_id == id && x.motivo == MotivoMapeamento::ListaDoJogo) {
-                if x.jogador.overall.min == x.jogador.overall.max && sincronia.precisao > 0 {
+                if x.jogador.overall != sincronia.jogador.overall || x.jogador.atributos.len() != sincronia.jogador.atributos.len() {
                     x.jogador = JogadorEncontrado { visto_em: Some(hoje), ..sincronia.jogador.clone() };
                     mudou = true;
                 }
@@ -379,11 +397,13 @@ mod tests {
         assert_eq!(revelacao_do_nivel(Some(198)), (0, Atributo::TODOS.len()), "198 = tudo, exato");
         assert_eq!(revelacao_do_nivel(Some(170)), (7, 24));
         assert_eq!(revelacao_do_nivel(Some(158)), (10, 14));
-        assert_eq!(revelacao_do_nivel(Some(140)), (15, 14));
+        assert_eq!(revelacao_do_nivel(Some(140)), (PRECISAO_ULTIMO_PASSO, ATRIBUTOS_ULTIMO_PASSO), "o último passo antes de abrir");
+        assert_eq!(revelacao_do_nivel(Some(143)), (PRECISAO_ULTIMO_PASSO, ATRIBUTOS_ULTIMO_PASSO));
+        assert_eq!(revelacao_do_nivel(Some(150)), (12, 14));
         assert_eq!(revelacao_do_nivel(Some(60)), (PRECISAO_DESCONHECIDO, ATRIBUTOS_DESCONHECIDO));
         assert_eq!(revelacao_do_nivel(None), (PRECISAO_DESCONHECIDO, ATRIBUTOS_DESCONHECIDO), "sem registro: o básico");
         // o inverso de nivel_no_jogo: a precisão dá o nível de volta
-        for precisao in [2u8, 5, 10, 14] {
+        for precisao in [2u8, 5, 10] {
             let nivel = crate::scout::quality::nivel_no_jogo(precisao, false, false, 0);
             assert_eq!(revelacao_do_nivel(Some(nivel)).0, precisao);
         }
@@ -461,7 +481,8 @@ mod tests {
         // um Escolhido importado com o nível 178 (±5, 24 atributos), como o Mbappé
         let (precisao, atributos) = revelacao(Some((130, 0x100002)));
         assert_eq!((precisao, atributos), (PRECISAO_DESCONHECIDO, ATRIBUTOS_DESCONHECIDO), "abaixo do 140 e sem o campo aberto: o básico");
-        assert_eq!(revelacao(Some((140, 0x100002))), (15, 14), "140 (o Udogie): valor e salário, não o resto");
+        assert_eq!(revelacao(Some((140, 0x100002))), (PRECISAO_ULTIMO_PASSO, ATRIBUTOS_ULTIMO_PASSO), "140 (o Udogie): valor e salário e pesquisa avançada");
+        assert_eq!(revelacao(None), (0, Atributo::TODOS.len()), "na lista do jogo, sem registro: aberto");
         assert_eq!(revelacao(Some((144, 0x100002))), (0, Atributo::TODOS.len()), "144: aberto no jogo, exato e completo");
         assert_eq!(revelacao(Some((162, 0x100002))), (0, Atributo::TODOS.len()), "162: aberto no jogo, exato e completo");
         assert_eq!(revelacao(Some((178, 0x100002))), (0, Atributo::TODOS.len()), "178: aberto no jogo, exato e completo");
@@ -504,6 +525,33 @@ mod tests {
     }
 
     #[test]
+    fn a_game_shortlist_player_without_a_record_is_open_but_only_for_those_that_came_from_the_game_list() {
+        let mut j1 = jogador(42, 80, 85, 24);
+        j1.clube_id = Some(5);
+        let mut j2 = jogador(43, 80, 85, 24);
+        j2.clube_id = Some(5);
+        let p = pool(vec![j1, j2]);
+        let foto = |id: u32, precisao: u8, atributos: usize| {
+            let raw = p.jogadores.iter().find(|j| j.player_id == id).expect("jogador");
+            search::fotografar(raw, &p, HOJE, precisao, atributos)
+        };
+        let mut dados = ScoutStateFile::default();
+        // 42: veio da lista do jogo (como o Saliba), ficou em ±20; 43: um Olheiro da Central o achou
+        let mut saliba = escolhido(foto(42, 20, 6), 20);
+        saliba.importado = true;
+        dados.escolhidos.push(saliba);
+        dados.mapeados.push(JogadorMapeado { jogador: foto(42, 20, 6), desde: HOJE, motivo: MotivoMapeamento::ListaDoJogo });
+        dados.escolhidos.push(escolhido(foto(43, 20, 6), 20));
+        let sem: HashMap<u32, Conhecimento> = [(42, (SEM_REGISTRO, 0)), (43, (SEM_REGISTRO, 0))].into_iter().collect();
+        let r = aplicar(&mut dados, montar(&p, HOJE, &[], &sem, &HashSet::new()), HOJE);
+        assert!(r.mudou());
+        let por_id = |id: u32| dados.escolhidos.iter().find(|e| e.jogador.player_id == id).expect("escolhido");
+        assert_eq!(por_id(42).precisao, 0, "o Saliba abre");
+        assert_eq!(por_id(43).precisao, 20, "o que a Central achou espera o registro dela");
+        assert_eq!(dados.mapeados[0].jogador.overall.min, dados.mapeados[0].jogador.overall.max, "e na Base também");
+    }
+
+    #[test]
     fn a_player_the_game_does_not_show_open_goes_back_to_what_the_game_shows() {
         let mut j = jogador(41, 80, 85, 24);
         j.clube_id = Some(5);
@@ -522,7 +570,7 @@ mod tests {
         let r = aplicar(&mut dados, montar(&p, HOJE, &[], &no_140, &HashSet::new()), HOJE);
         assert!(r.mudou());
         let e = &dados.escolhidos[0];
-        assert_eq!((e.precisao, e.jogador.atributos.len()), (15, 14), "volta ao que o jogo mostra no 140");
+        assert_eq!((e.precisao, e.jogador.atributos.len()), (PRECISAO_ULTIMO_PASSO, ATRIBUTOS_ULTIMO_PASSO), "volta ao que o jogo mostra no 140");
         assert!(e.jogador.overall.min < e.jogador.overall.max, "Overall em faixa");
         assert!(dados.mapeados[0].jogador.overall.min < dados.mapeados[0].jogador.overall.max, "e o registro da Base também");
         assert!(!aplicar(&mut dados, montar(&p, HOJE, &[], &no_140, &HashSet::new()), HOJE).mudou(), "idempotente");
@@ -638,8 +686,8 @@ mod tests {
         let exato = &dados.escolhidos[0];
         assert!(exato.importado && !exato.no_jogo && exato.relatorio_id.is_none());
         assert_eq!((exato.precisao, exato.jogador.atributos.len()), (0, crate::scout::lista::ATRIBUTOS_DETALHADO), "198: tudo, exato");
-        let basico = &dados.escolhidos[1];
-        assert_eq!((basico.precisao, basico.jogador.atributos.len()), (PRECISAO_DESCONHECIDO, ATRIBUTOS_DESCONHECIDO));
+        let sem_registro = &dados.escolhidos[1];
+        assert_eq!((sem_registro.precisao, sem_registro.jogador.atributos.len()), (0, crate::scout::lista::ATRIBUTOS_DETALHADO), "sem registro na lista do jogo: aberto");
         assert_eq!(dados.mapeados.iter().map(|m| (m.jogador.player_id, m.motivo)).collect::<Vec<_>>(), vec![(12, MotivoMapeamento::ListaDoJogo), (13, MotivoMapeamento::ListaDoJogo)]);
         // de novo, com os dois já nos Escolhidos: nada muda
         let conhecidos: HashSet<u32> = [10, 11, 12, 13].into_iter().collect();
