@@ -4,7 +4,7 @@ baseline_commit: 7dfdcad
 
 # Story 2.10: Follow a partial Relatório and run continuous Missões
 
-Status: review
+Status: done
 
 ## Story
 

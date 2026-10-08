@@ -4,7 +4,7 @@ baseline_commit: 589a91e
 
 # Story 2.4: Run due Missões and generate Relatórios
 
-Status: review
+Status: done
 
 ## Story
 

@@ -4,7 +4,7 @@ baseline_commit: d110eca
 
 # Story 3.3: Filter a Missão by Jogador de Referência
 
-Status: review
+Status: done
 
 ## Story
 

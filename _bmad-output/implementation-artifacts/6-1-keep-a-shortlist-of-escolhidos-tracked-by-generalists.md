@@ -4,7 +4,7 @@ baseline_commit: 79252a3
 
 # Story 6.1: Keep a shortlist of Escolhidos tracked by Generalists
 
-Status: review
+Status: done
 
 ## Story
 

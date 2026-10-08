@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-09-30
-last_updated: 2026-10-04
+last_updated: 2026-10-08
 project: Central de Scout (FIFA 16 Companion)
 project_key: NOKEY
 tracking_system: file-system
@@ -58,45 +58,47 @@ development_status:
   1-7-start-with-the-game-and-preload-the-career: done
   epic-1-retrospective: optional
 
-  epic-2: in-progress
+  epic-2: done
   2-1-define-the-scouting-balance-table: done
   2-2-create-a-missao-with-an-olheiro-overall-potencial-range-and-modo-de-busca: done
-  2-3-follow-the-progress-of-active-missoes: review
-  2-4-run-due-missoes-and-generate-relatorios: review
-  2-5-read-a-relatorio-in-the-tabular-view: review
-  2-6-switch-between-tabular-and-cards-with-real-minifaces: review
-  2-7-archive-and-restore-relatorios: review
-  2-8-filter-a-missao-by-dominant-attribute: review
-  2-9-filter-a-missao-by-country-on-the-map: review
-  2-10-follow-a-partial-relatorio-and-run-continuous-missoes: review
+  2-3-follow-the-progress-of-active-missoes: done
+  2-4-run-due-missoes-and-generate-relatorios: done
+  2-5-read-a-relatorio-in-the-tabular-view: done
+  2-6-switch-between-tabular-and-cards-with-real-minifaces: done
+  2-7-archive-and-restore-relatorios: done
+  2-8-filter-a-missao-by-dominant-attribute: done
+  2-9-filter-a-missao-by-country-on-the-map: done
+  2-10-follow-a-partial-relatorio-and-run-continuous-missoes: done
   epic-2-retrospective: optional
 
-  epic-3: in-progress
-  3-1-open-a-players-ficha-with-the-radar-de-atributos: review
-  3-2-compare-a-found-player-with-a-squad-player: review
-  3-3-filter-a-missao-by-jogador-de-referencia: review
-  3-4-filter-a-missao-by-fit-posicional: review
-  3-5-see-fit-posicional-in-the-relatorio: review
-  3-6-post-test-adjustments-leagues-olheiro-first-and-new-filters: review
+  epic-3: done
+  3-1-open-a-players-ficha-with-the-radar-de-atributos: done
+  3-2-compare-a-found-player-with-a-squad-player: done
+  3-3-filter-a-missao-by-jogador-de-referencia: done
+  3-4-filter-a-missao-by-fit-posicional: done
+  3-5-see-fit-posicional-in-the-relatorio: done
+  3-6-post-test-adjustments-leagues-olheiro-first-and-new-filters: done
   epic-3-retrospective: optional
 
-  epic-4: in-progress
-  4-1-see-coverage-by-country-on-the-sonar-map: review
-  4-2-read-a-countrys-missao-counts: review
+  epic-4: done  # Sonar removido do main em 2026-10-08 (1c6d794); histórias mantidas como histórico
+  4-1-see-coverage-by-country-on-the-sonar-map: done
+  4-2-read-a-countrys-missao-counts: done
   epic-4-retrospective: optional
 
-  epic-5: in-progress
-  5-1-olheiros-with-identity-stars-markets-and-a-monthly-market: review
+  epic-5: done
+  5-1-olheiros-with-identity-stars-markets-and-a-monthly-market: done
   epic-5-retrospective: optional
 
-  epic-6: in-progress
-  6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists: review
+  epic-6: done
+  6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists: done
   epic-6-retrospective: optional
 
   epic-7: in-progress
-  7-1-locate-the-native-shortlist-and-knowledge-vectors: review
-  7-2-add-and-remove-escolhidos-in-the-native-shortlist: review
-  7-3-sync-the-knowledge-level-with-the-game: review
-  7-4-sync-switch-notices-and-retry: review
-  7-6-exact-transfer-value-from-the-game: review
+  7-1-locate-the-native-shortlist-and-knowledge-vectors: done
+  7-2-add-and-remove-escolhidos-in-the-native-shortlist: done
+  7-3-sync-the-knowledge-level-with-the-game: done
+  7-4-sync-switch-notices-and-retry: done
+  7-5-calibrate-knowledge-level-and-a-field: done  # sem arquivo de história; feita em 2026-10-07/08 (acc8e60, 9cb7adc, 6d8abf5, 303e653, 58ec1c7, b92baf6)
+  7-6-exact-transfer-value-from-the-game: done
+  7-7-native-email: backlog  # opcional; alternativa barata: mostrar o e-mail só no overlay
   epic-7-retrospective: optional

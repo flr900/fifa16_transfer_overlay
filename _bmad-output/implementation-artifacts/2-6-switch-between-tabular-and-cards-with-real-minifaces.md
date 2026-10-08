@@ -4,7 +4,7 @@ baseline_commit: c5f6b2e
 
 # Story 2.6: Switch between Tabular and Cards with real minifaces
 
-Status: review
+Status: done
 
 ## Story
 

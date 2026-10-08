@@ -4,7 +4,7 @@ baseline_commit: a42c446
 
 # Story 2.8: Filter a Missão by dominant attribute
 
-Status: review
+Status: done
 
 ## Story
 

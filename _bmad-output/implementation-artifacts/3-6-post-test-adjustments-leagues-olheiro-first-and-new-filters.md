@@ -4,7 +4,7 @@ baseline_commit: b7a199d
 
 # Story 3.6: Post-test adjustments — leagues, Olheiro first, new filters
 
-Status: review
+Status: done
 
 ## Story
 

@@ -4,7 +4,7 @@ baseline_commit: 9ab2b7c
 
 # Story 2.3: Follow the progress of active Missões
 
-Status: review
+Status: done
 
 ## Story
 

@@ -115,6 +115,7 @@ The user adds Fit Posicional and Jogador de Referência filters to a Missão, se
 ### Epic 4: See your scouting coverage on the Sonar
 The user opens the Sonar tab and sees which countries have an active Missão, a completed one, or have never been scanned, and can click a country for its counts.
 **FRs covered:** FR11
+**Status (2026-10-08):** superseded — the Sonar tab, its map and the coverage module were removed from `main` (commit `1c6d794`); the fifth tab is now the Base do Scout. Stories 4.1 and 4.2 are kept as history.
 
 ### Epic 5: Olheiros 2.0 — identity, stars, markets and a monthly market (post-v1)
 Each Olheiro has a name, a nationality, 0–5 star attributes and markets he knows; the hiring market changes every month with the club's attractiveness; Missões outside his market or focus are penalised until he adapts; the user picks a travel budget per Missão; low-quality reports contain false positives.
@@ -858,6 +859,8 @@ So that I can decide whether to scout it again.
 
 Implemented 2026-10-04 as one story: [`5-1-olheiros-with-identity-stars-markets-and-a-monthly-market.md`](../implementation-artifacts/5-1-olheiros-with-identity-stars-markets-and-a-monthly-market.md). Decisions for the open questions are recorded there and in `melhorias-futuras-olheiros.md`.
 
+**Amended (2026-10-08, commit `2fce404`):** the monthly market became a **weekly continental market** — 3–10 Olheiros per continent scaled by league relevance, ordered by rarity, ~40% with balanced profiles, with a continent filter on "Contratar Olheiro".
+
 ## Epic 6: Lista de Escolhidos
 
 Implemented 2026-10-04 as one story: [`6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists.md`](../implementation-artifacts/6-1-keep-a-shortlist-of-escolhidos-tracked-by-generalists.md).
@@ -866,8 +869,21 @@ Implemented 2026-10-04 as one story: [`6-1-keep-a-shortlist-of-escolhidos-tracke
 
 Felipe's request (2026-10-05/06), after the memory experiment in [`integracao-scout-nativo.md`](integracao-scout-nativo.md): when a player enters the Central's Escolhidos (transfer value defined), add him to the game's native shortlist with the intermediate knowledge level (`b = 140`: value and wage shown by the game); when the Missão really finishes, raise him to complete (`b = 198`). The Central shows the game's exact transfer value (read from the focused-player row) when it has harvested one, and an estimate otherwise. Amended NFR1 above.
 
-Stories: 7.1 locate the native shortlist and knowledge vectors (read-only) — [`7-1-locate-the-native-shortlist-and-knowledge-vectors.md`](../implementation-artifacts/7-1-locate-the-native-shortlist-and-knowledge-vectors.md); 7.2 native shortlist add/remove; 7.3 knowledge level (Quality → `b`) on Escolhido/Missão end; 7.4 setting, banner and failure handling; 7.5 calibrate `b` and `a`; 7.6 exact transfer value harvested from the game; 7.7 native e-mail (optional).
+Stories: 7.1 locate the native shortlist and knowledge vectors (read-only) — [`7-1-locate-the-native-shortlist-and-knowledge-vectors.md`](../implementation-artifacts/7-1-locate-the-native-shortlist-and-knowledge-vectors.md); 7.2 native shortlist add/remove; 7.3 knowledge level (Quality → `b`) on Escolhido/Missão end; 7.4 setting, banner and failure handling; 7.5 calibrate `b` and `a` — **done** (no story file; delivered 2026-10-07/08 in `acc8e60`, `9cb7adc`, `6d8abf5`, `303e653`, `58ec1c7`, `b92baf6`); 7.6 exact transfer value harvested from the game; 7.7 native e-mail (optional, **backlog**).
 
 ## Future improvements (post-v1)
 
 Became Epic 5 on 2026-10-04. Original note — ideas raised by Felipe after Story 1.4 (2026-10-01): custom names and nationality for each Olheiro; 0–5 star attributes (Caçador de Jovens / Medalhões / Tático / Generalista as attributes, plus Rede de contatos); market specialities with temporary penalties outside them (speed down to −2 stars, quality down to −1, in 0.5 steps; about 6 months to adapt to a new market and 6–12 months to a new scope); offered Olheiros driven by club popularity, titles and rarity; a user-chosen budget range per Missão; Qualidade including false positives. Details and open questions: [`melhorias-futuras-olheiros.md`](melhorias-futuras-olheiros.md).
+
+## Delivered outside the story flow (2026-10-05 to 2026-10-08)
+
+Built in sessions driven by Felipe's tests, without a story file. Listed here so the epics do not hide them; the commit log has the detail.
+
+- **Base do Scout** tab (replaces the Sonar slot): Relatórios by player, ex-club players ("Ex-jogador do clube") and the game's native shortlist imported; new Missões consult the Base first.
+- **Configurações** screen (Select), Olheiro carousel, Relatórios by Olheiro, Y "Opções" window, shared player lists (position groups, Y filters, Tabular view).
+- **Weekly continental Olheiro market**, nation flags (`countryflags/*.big`), **Demitir** (with confirmation, blocked during a Missão), compact Nova Missão.
+- **Continuous Missão**: 12-month contract, automatic renewal, rescission fine.
+- **Gamepad**: L2/R2 change the position group; D-pad ← → picks a column and X sorts the Tabular table, keeping the focus position.
+- **Knowledge sync**: levels sync only for players the Central knows; players opened in the game arrive exact (level 178+ or open field); contract shown from level 140.
+- **Installer** (Inno Setup, `installer/`) with a version history, and `recarregar_dev.ps1` waiting for every loaded copy to unload.
+- **Sharper text**: FreeType with the auto-hinter (build `7.6-v24`, PR #22).

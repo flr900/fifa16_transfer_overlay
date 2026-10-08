@@ -4,7 +4,7 @@ baseline_commit: 03019a7
 
 # Story 2.7: Archive and restore Relatórios
 
-Status: review
+Status: done
 
 ## Story
 

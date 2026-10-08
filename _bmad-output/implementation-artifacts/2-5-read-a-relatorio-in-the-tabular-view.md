@@ -4,7 +4,7 @@ baseline_commit: 81ba285
 
 # Story 2.5: Read a Relatório in the Tabular view
 
-Status: review
+Status: done
 
 ## Story
 
