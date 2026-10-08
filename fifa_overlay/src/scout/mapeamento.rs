@@ -49,19 +49,14 @@ pub fn atributos_abertos(conhecimento: Conhecimento) -> bool {
 }
 
 /// O que a Central mostra de um jogador pelo que o jogo sabe dele (ou nada,
-/// sem registro): como `revelacao_do_nivel`, mas com todos os atributos se o
-/// jogo os mostra abertos.
+/// sem registro): como `revelacao_do_nivel`, mas com o jogador aberto no jogo
+/// (Overall, Potencial e todos os atributos à mostra) ele vem exato e completo.
 pub fn revelacao(conhecimento: Option<Conhecimento>) -> (u8, usize) {
-    let (precisao, atributos) = revelacao_do_nivel(conhecimento.map(|c| c.0));
     match conhecimento {
-        Some(c) if atributos_abertos(c) => (precisao.min(PRECISAO_ABERTOS), Atributo::TODOS.len()),
-        _ => (precisao, atributos),
+        Some(c) if atributos_abertos(c) => (0, Atributo::TODOS.len()),
+        _ => revelacao_do_nivel(conhecimento.map(|c| c.0)),
     }
 }
-
-/// A pior precisão (±) com que a Central mostra um jogador que o jogo tem de
-/// atributos abertos: o jogo o mostra completo, ainda que sem o exato.
-const PRECISAO_ABERTOS: u8 = 8;
 
 /// O que a Central mostra de um jogador pelo nível de conhecimento que o jogo
 /// tem dele: `(precisão ±, quantos atributos)`. É o inverso de
@@ -251,7 +246,7 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
         // FIFA observou antes, ou depois)
         if let Some(e) = dados.escolhidos.iter_mut().find(|e| e.jogador.player_id == id) {
             let esperado = super::quality::nivel_no_jogo(e.precisao, false, false, 0);
-            if sincronia.nivel > esperado {
+            if sincronia.nivel > esperado || (sincronia.abertos && e.precisao > sincronia.precisao) {
                 // mantém o que a Missão de origem pediu (Fit, referência)
                 let fit_alvo = e.jogador.fit_alvo;
                 e.jogador = JogadorEncontrado { fit_alvo, ..sincronia.jogador.clone() };
@@ -276,7 +271,7 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
             // completo = tudo o que se observa nele (goleiro tem menos
             // atributos) e, no nível máximo, exato
             let todos = sincronia.jogador.atributos.len();
-            let exato = sincronia.nivel >= NIVEL_COMPLETO;
+            let exato = sincronia.nivel >= NIVEL_COMPLETO || sincronia.abertos;
             let ja_completo = |j: &JogadorEncontrado| j.atributos.len() >= todos && (!exato || j.overall.min == j.overall.max);
             let relatorio_completo = dados.relatorios.iter().flat_map(|r| r.jogadores.iter()).any(|j| j.player_id == id && ja_completo(j));
             let mut registro = sincronia.jogador;
@@ -407,16 +402,17 @@ mod tests {
         // um Escolhido importado com o nível 178 (±5, 24 atributos), como o Mbappé
         let (precisao, atributos) = revelacao(Some((178, 0x100002)));
         assert_eq!((precisao, atributos), (5, 24));
+        assert_eq!(revelacao(Some((178, 0x10FFFF))), (0, Atributo::TODOS.len()), "aberto no jogo: exato e completo");
         dados.escolhidos.push(escolhido(search::fotografar(raw, &p, HOJE, precisao, atributos), precisao));
-        let antes = dados.escolhidos[0].jogador.atributos.clone();
-        // o jogo mostra os atributos todos abertos (a = 0x10FFFF), no mesmo nível
+        // o jogo mostra o jogador aberto (a = 0x10FFFF), no mesmo nível
         let abertos: HashMap<u32, Conhecimento> = [(40, (178, 0x10FFFF))].into_iter().collect();
         let r = aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE);
         assert!(r.mudou());
         let e = &dados.escolhidos[0];
         assert_eq!(e.jogador.atributos.len(), crate::scout::lista::ATRIBUTOS_DETALHADO, "agora tem todos");
-        assert_eq!(&e.jogador.atributos[..antes.len()], &antes[..], "o que já tinha continua igual");
-        assert_eq!(e.precisao, 5, "a precisão não piora nem melhora");
+        assert_eq!(e.precisao, 0, "Overall, Potencial e atributos exatos, como o jogo mostra");
+        assert_eq!((e.jogador.overall.min, e.jogador.overall.max), (80, 80));
+        assert_eq!((e.jogador.potencial.min, e.jogador.potencial.max), (85, 85));
         // a Base também o tem completo
         assert!(dados.mapeados.iter().any(|m| m.jogador.player_id == 40 && m.jogador.atributos.len() == e.jogador.atributos.len()));
         assert!(!aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE).mudou(), "idempotente");
