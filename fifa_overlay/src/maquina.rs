@@ -12,7 +12,7 @@
 //!    vtable sobrescrita pela do seu tipo logo depois de construída, então a vtable
 //!    não serve de prova; os nomes dos vizinhos (empréstimo e negociação de
 //!    contrato) servem;
-//! 2. **observa**: com o gravador ligado, lê os primeiros 0x400 bytes do objeto a cada
+//! 2. **observa**: com o gravador ligado, lê os primeiros 0x2000 bytes do objeto a cada
 //!    frame e registra no log (`[maquina]`) o que muda, com o nome da ação quando um
 //!    valor aponta para um token.
 //!
@@ -44,12 +44,13 @@ const INICIO_DAS_ACOES: usize = 0x98;
 const FIM_DAS_ACOES: usize = 0x1400;
 /// Quanto do objeto se despeja ao achá-lo, e quanto se observa por frame.
 const TAMANHO_DO_DESPEJO: usize = 0x2000;
-const TAMANHO_OBSERVADO: usize = 0x400;
+/// O objeto tem 204 Actions (constantes) de `+0x28` a `+0x1348`; os campos de estado vêm depois.
+const TAMANHO_OBSERVADO: usize = 0x2000;
 const TAMANHO_DO_BLOCO: usize = 8 * 1024 * 1024;
 const MAX_ACHADOS: usize = 64;
 /// Um campo que muda mais que isto no log é ruído (contador de frames).
 const MAX_REGISTROS_POR_CAMPO: u32 = 40;
-const MAX_LINHAS_POR_QUADRO: usize = 30;
+const MAX_LINHAS_POR_QUADRO: usize = 40;
 const INTERVALO_CHECAGEM: Duration = Duration::from_secs(1);
 
 /// Posições (múltiplas de 8) de `valor` num bloco de bytes.
@@ -244,8 +245,12 @@ impl Maquina {
                 Err(e) => tracing::warn!("[maquina] Não gravou o objeto: {e}"),
             }
         }
-        // o estado de partida: campos não nulos dos primeiros 0x100 bytes
-        for (i, c) in self.anterior.chunks_exact(8).enumerate().take(0x100 / 8) {
+        // o estado de partida: o cabeçalho e a região logo depois das Actions (onde ficam os campos de estado)
+        for (i, c) in self.anterior.chunks_exact(8).enumerate() {
+            let desloc = i * 8;
+            if !(desloc < 0x28 || (0x1340..0x1420).contains(&desloc)) {
+                continue;
+            }
             let v = u64::from_le_bytes(<[u8; 8]>::try_from(c).unwrap_or([0; 8]));
             if v != 0 {
                 tracing::info!("[maquina] inicial +0x{:X}: 0x{v:X}{}", i * 8, descrever(v, endereco, self.base_exe, self.tamanho_imagem, nome_da_acao));
