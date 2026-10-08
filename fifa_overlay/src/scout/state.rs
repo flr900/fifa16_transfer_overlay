@@ -3195,6 +3195,18 @@ impl ScoutState {
         }
         let fonte = Arc::clone(&self.fonte);
         self.niveis_vistos = niveis.clone();
+        {
+            // para calibrar o que o jogo mostra: id:nível:campo a / precisão na Central
+            let precisoes: std::collections::HashMap<u32, u8> =
+                estado.ler(|d| d.escolhidos.iter().map(|e| (e.jogador.player_id, e.precisao)).collect());
+            let mut linhas: Vec<String> = niveis
+                .iter()
+                .filter(|(id, _)| precisoes.contains_key(id))
+                .map(|(id, (n, a))| format!("{id}:{n}:{a:X}/{}", precisoes.get(id).copied().unwrap_or(0)))
+                .collect();
+            linhas.sort();
+            tracing::info!("[scout::state] Conhecimento do jogo dos Escolhidos (id:nível:a/precisão): {}", linhas.join(" "));
+        }
         self.mapeamento_pendente = self.tarefa_mapeamento.start(move || {
             let pool = fonte.read_players_for_mapping()?;
             Ok((id_save, hoje, mapeamento::montar(&pool, hoje, &lista, &niveis, &conhecidos)))
