@@ -2215,10 +2215,9 @@ pub struct ScoutState {
     /// O foco do controle esteve numa linha da tabela no frame anterior (só
     /// então ← / → e X valem para a tabela).
     linha_da_tabela_focada: bool,
-    /// A linha da tabela que o foco acompanha depois de uma reordenação
-    /// (a identidade dela) e se a lista ainda tem de rolar até lá.
-    chave_seguida: Option<u64>,
-    rolar_para_seguida: bool,
+    /// A posição (o índice da linha) que o foco mantém depois de uma
+    /// reordenação da tabela: a lista muda, o foco fica no mesmo lugar.
+    linha_mantida: Option<usize>,
     /// Filtros e ordenação de cada lista de jogadores (só enquanto o Scout
     /// está carregado; a visão vai para o arquivo da carreira).
     prefs_listas: HashMap<ListaId, PrefsLista>,
@@ -2351,8 +2350,7 @@ impl ScoutState {
             passo_de_coluna: 0,
             ordenar_pedido: false,
             linha_da_tabela_focada: false,
-            chave_seguida: None,
-            rolar_para_seguida: false,
+            linha_mantida: None,
             prefs_listas: HashMap::new(),
             painel_de_filtros: None,
             opcoes_do_olheiro: None,
@@ -4307,24 +4305,28 @@ impl ScoutState {
         self.prefs_listas.entry(id).or_insert_with(|| PrefsLista::nova(modo)).cursor = Some(coluna);
     }
 
-    /// Depois de ordenar, o foco vai para a linha `chave`, onde ela estiver.
-    pub fn seguir_chave_na_tabela(&mut self, chave: u64) {
-        self.chave_seguida = Some(chave);
-        self.rolar_para_seguida = true;
+    /// Depois de ordenar, o foco continua na linha de posição `indice` (o
+    /// jogador dessa posição mudou, o lugar do foco não).
+    pub fn manter_linha_na_tabela(&mut self, indice: usize) {
+        self.linha_mantida = Some(indice);
     }
 
-    pub fn chave_seguida_na_tabela(&self) -> Option<u64> {
-        self.chave_seguida
+    /// Consome o pedido: `true` = a linha `indice` recebe o foco.
+    pub fn tomar_linha_mantida(&mut self, indice: usize) -> bool {
+        if self.linha_mantida == Some(indice) {
+            self.linha_mantida = None;
+            return true;
+        }
+        false
     }
 
-    pub fn parar_de_seguir_chave(&mut self) {
-        self.chave_seguida = None;
-        self.rolar_para_seguida = false;
+    /// Há uma posição esperando o foco (a tabela ainda não a desenhou).
+    pub fn linha_mantida_pendente(&self) -> bool {
+        self.linha_mantida.is_some()
     }
 
-    /// Consome o pedido de rolar até a linha seguida (uma vez só).
-    pub fn tomar_rolagem_para_seguida(&mut self) -> bool {
-        std::mem::take(&mut self.rolar_para_seguida)
+    pub fn largar_linha_mantida(&mut self) {
+        self.linha_mantida = None;
     }
 
     pub fn definir_linha_da_tabela_focada(&mut self, focada: bool) {

@@ -199,7 +199,6 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     let hoje = state.data_da_carreira();
     let todas = colunas(id);
     let cursor = state.coluna_do_cursor(id);
-    let topo_da_tabela = ui.cursor_pos()[1];
     // com o foco numa linha, ← / → andam pelas colunas e o X ordena: sem subir ao cabeçalho
     let cursor_visivel = state.linha_da_tabela_focada();
 
@@ -234,17 +233,7 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     // linhas: só as visíveis (a Base pode ter milhares)
     let mut foco = state.tomar_foco_no_principal();
     let mut linha_focada = false;
-    let mut chave_focada = None;
-    // a linha que o foco acompanha depois de ordenar: rola até ela (uma vez)
-    let seguida = state.chave_seguida_na_tabela().and_then(|c| itens.iter().position(|i| i.chave == c).map(|p| (c, p)));
-    match seguida {
-        Some((_, posicao)) if state.tomar_rolagem_para_seguida() => {
-            let alvo = topo_da_tabela + ALTURA_LINHA * (posicao as f32 + 1.0) - ui.window_size()[1] * 0.4;
-            ui.set_scroll_y(alvo.max(0.0));
-        }
-        None => state.parar_de_seguir_chave(),
-        _ => {}
-    }
+    let mut indice_focado = None;
     let clipper = imgui::ListClipper::new(i32::try_from(itens.len()).unwrap_or(i32::MAX)).items_height(ALTURA_LINHA).begin(ui);
     for indice in clipper.iter() {
         let Some(item) = usize::try_from(indice).ok().and_then(|i| itens.get(i)) else {
@@ -252,12 +241,10 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
         };
         let _id = ui.push_id_usize(item.chave as usize);
         ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
-        if std::mem::take(&mut foco) || state.chave_seguida_na_tabela() == Some(item.chave) {
+        let mantida = usize::try_from(indice).is_ok_and(|i| state.tomar_linha_mantida(i));
+        if std::mem::take(&mut foco) || mantida {
             ui.table_set_column_index(0);
             componentes::focar_proximo_item();
-            if state.chave_seguida_na_tabela() == Some(item.chave) {
-                state.parar_de_seguir_chave();
-            }
         }
         if linha_selecionavel(ui) {
             ativado = Some(indice_do_item(itens, item));
@@ -265,7 +252,7 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
         let centro = componentes::centro_da_linha(ui);
         if componentes::focado_pelo_controle(ui) {
             linha_focada = true;
-            chave_focada = Some(item.chave);
+            indice_focado = usize::try_from(indice).ok();
         }
         for (i, coluna) in todas.iter().enumerate() {
             ui.table_set_column_index(i);
@@ -277,6 +264,8 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
     if let Some(ordem) = nova_ordem {
         state.definir_ordenacao_da_lista(id, ordem);
     }
+    // uma posição pedida que não foi desenhada (a lista encolheu) não fica esperando
+    state.largar_linha_mantida();
     // ← / → e X do controle, com o foco numa linha (o cursor aparece no cabeçalho)
     if linha_focada && state.linha_da_tabela_focada() {
         let mut coluna = cursor;
@@ -288,10 +277,10 @@ pub fn tabela(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, id: ListaI
         if state.ordenar_pedido() {
             state.definir_ordenacao_da_lista(id, state.ordenacao_da_lista(id).alternar(coluna));
             state.definir_coluna_do_cursor(id, coluna);
-            // a lista mudou de ordem: o foco acompanha a linha em que estava
-            // (ela vai para outro lugar, talvez fora da tela: a lista rola até lá)
-            if let Some(chave) = chave_focada {
-                state.seguir_chave_na_tabela(chave);
+            // a lista mudou de ordem: o foco fica na mesma posição da tabela
+            // (o jogador dessa posição é outro, o lugar do foco não muda)
+            if let Some(indice) = indice_focado {
+                state.manter_linha_na_tabela(indice);
             }
         }
     }
@@ -833,8 +822,11 @@ mod tests {
         for _ in 0..3 {
             mesa.quadro(&mut estado, &itens, None);
         }
-        // a linha em foco é a primeira; o X inverte a ordem e ela vai para o fim da lista
-        let seguido = preparar(&estado, ListaId::Base, itens.clone())[0].chave;
+        // o foco desce até a 4ª linha; o X inverte a ordem e o foco fica nessa mesma posição
+        for _ in 0..3 {
+            mesa.tocar(&mut estado, &itens, imgui::Key::GamepadDpadDown);
+        }
+        let posicao = 3;
         for volta in 0..3 {
             estado.definir_ordenar_pedido(true);
             mesa.quadro(&mut estado, &itens, None);
@@ -842,13 +834,11 @@ mod tests {
             for _ in 0..6 {
                 mesa.quadro(&mut estado, &itens, None);
             }
-            // o foco acompanha o mesmo jogador, onde ele foi parar (e a lista rolou até lá)
-            let posicao = preparar(&estado, ListaId::Base, itens.clone()).iter().position(|i| i.chave == seguido).expect("jogador");
             let mut ativado = None;
             for _ in 0..3 {
                 ativado = ativado.or(mesa.quadro(&mut estado, &itens, Some(imgui::Key::GamepadFaceDown)));
             }
-            assert_eq!(ativado, Some(posicao), "volta {volta}: o foco fica no mesmo jogador");
+            assert_eq!(ativado, Some(posicao), "volta {volta}: o foco fica na mesma posição da tabela");
             assert_eq!(mesa.barra, 0, "e não vai parar no botão da barra, no alto da tela");
             mesa.quadro(&mut estado, &itens, None);
         }
