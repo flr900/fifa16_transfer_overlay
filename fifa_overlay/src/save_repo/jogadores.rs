@@ -370,6 +370,8 @@ pub struct PlayerRaw {
     pub estrelas_drible: u8,
     /// Estrelas do pé fraco, 1–5 (`weakfootabilitytypecode`).
     pub pe_fraco: u8,
+    /// Altura em cm (`height`, 150–215).
+    pub altura: u8,
 }
 
 /// Pé preferido (`CZUM.preferredfoot`: 1 = direito, 2 = esquerdo). No JSON
@@ -931,6 +933,7 @@ fn ler_jogadores(dados: &[u8], nomes_estaticos: &HashMap<u32, String>) -> Result
                 ritmo_defesa: RitmoTrabalho::de_raw(inteiro(r, campos.ritmo_defesa, 0)),
                 estrelas_drible: como::<u8>(inteiro(r, campos.dribles, 0)).saturating_add(1),
                 pe_fraco: como(inteiro(r, campos.pe_fraco, 1)),
+                altura: como(inteiro(r, campos.altura, 150)),
             }
         })
         .collect();
@@ -955,6 +958,7 @@ struct CamposJogador<'a> {
     ritmo_defesa: &'a FieldDescriptor,
     dribles: &'a FieldDescriptor,
     pe_fraco: &'a FieldDescriptor,
+    altura: &'a FieldDescriptor,
     atributos: Vec<&'a FieldDescriptor>,
 }
 
@@ -977,6 +981,7 @@ impl<'a> CamposJogador<'a> {
             ritmo_defesa: czum.campo(b"boFm")?,
             dribles: czum.campo(b"BAPc")?,
             pe_fraco: czum.campo(b"aOBn")?,
+            altura: czum.campo(b"ypBQ")?,
             atributos: Atributo::TODOS.iter().map(|a| czum.campo(a.campo())).collect::<Result<_, _>>()?,
         })
     }
@@ -1002,6 +1007,15 @@ pub fn ler_miniface(player_id: u32) -> Option<crate::dds::Imagem> {
         .join(format!("p{player_id}.dds"));
     let dados = std::fs::read(caminho).ok()?;
     crate::dds::decodificar(&dados)
+}
+
+/// Bandeira de uma nação (`data/ui/artassets/countryflags/f_<id>.big`),
+/// como ícone RGBA. `None` se o arquivo não existe ou tem outro formato.
+/// Lê disco: chamar fora do thread de render.
+pub fn ler_bandeira(nacao_id: u32) -> Option<crate::dds::Imagem> {
+    let caminho = pasta_do_jogo().join("data").join("ui").join("artassets").join("countryflags").join(format!("f_{nacao_id}.big"));
+    let dados = std::fs::read(caminho).ok()?;
+    crate::dds::bandeira_do_big(&dados)
 }
 
 /// Lê jogadores de um `DATA` + banco estático em disco (testes e
@@ -1130,6 +1144,7 @@ mod tests {
             ritmo_defesa: RitmoTrabalho::Medio,
             estrelas_drible: 3,
             pe_fraco: 3,
+            altura: 180,
         };
         assert_eq!(p.idade(Date(20350720)), 34);
         assert_eq!(p.idade(Date(20350721)), 35);
@@ -1166,6 +1181,11 @@ mod tests {
         assert!(jogadores.iter().filter(|j| j.clube_id.is_some()).all(|j| (2000..=2100).contains(&j.contrato_ate)));
         let com_liga = jogadores.iter().filter(|j| j.liga_id.is_some()).count(); // inclui ligas fora do filtro
         assert!(com_liga > jogadores.len() / 2, "{com_liga}");
+        // altura: centímetros de verdade (150–215), média perto de 1,80 m
+        assert!(jogadores.iter().all(|j| (150..=215).contains(&j.altura)), "altura fora da faixa");
+        let media = jogadores.iter().map(|j| u64::from(j.altura)).sum::<u64>() / jogadores.len() as u64;
+        assert!((175..=185).contains(&media), "altura média {media}");
+        assert!((170..=186).contains(&mbappe.altura), "Mbappé: {}", mbappe.altura);
         // canhotos existem, mas são minoria
         let canhotos = jogadores.iter().filter(|j| j.pe == Pe::Esquerdo).count();
         assert!(canhotos > jogadores.len() / 10 && canhotos < jogadores.len() / 2, "{canhotos}");

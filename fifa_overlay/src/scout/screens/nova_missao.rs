@@ -8,6 +8,10 @@
 //! abre com os filtros ideais da Especialização dele; "Restaurar sugestão"
 //! volta a eles. B volta ao passo anterior.
 //!
+//! Desde 2026-10-05 a tela tem duas colunas: à esquerda o Olheiro com o
+//! que ele oferece (estrelas, mercados, o que vale para esta Missão); à
+//! direita os filtros. Os atalhos de filtro saíram por ora.
+//!
 //! A barra de abas e o cabeçalho continuam visíveis (é uma tela, não um
 //! modal). Confirmar debita o orçamento com as garantias da contratação
 //! (Story 1.5) e grava a Missão como `Pendente`; nenhuma busca roda agora
@@ -18,28 +22,32 @@
 //! Épico 3 — cada um abre um painel em tela cheia (o de referência é o
 //! seletor de elenco, AD-13).
 
-use imgui::{StyleColor, Ui};
+use imgui::{StyleColor, Ui, WindowFlags};
 
 use super::componentes::{self, badge_qualidade, EstiloBotao};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar, olheiros};
-use crate::scout::quality::{Investimento, TipoMissao};
+use crate::scout::quality::{Habilidade, Investimento, TipoMissao};
 use crate::scout::{ContextoSeletor, Satelite};
 use crate::scout::quality;
 use crate::scout::state::{
-    Atalho, Atributo, BloqueioMissao, FiltrosMissao, Limite, NivelEquipe, Perfil, Carga, CampoFaixa, ErroCompra, FaixaAtributo, FiltroPe, ModoBusca, PreviaMissao, RitmoTrabalho,
+    Atributo, BloqueioMissao, Especializacao, FiltrosMissao, Limite, NivelEquipe, Perfil, Carga, CampoFaixa, ErroCompra, FaixaAtributo, FiltroPe, ModoBusca, PreviaMissao, RitmoTrabalho,
     ScoutState,
 };
 
-const ALTURA_RODAPE: f32 = 176.0;
+const ALTURA_RODAPE: f32 = 194.0;
+/// O painel do Olheiro, à esquerda: um terço da tela, entre estes limites.
+const FRACAO_PAINEL_OLHEIRO: f32 = 0.30;
+const LARGURA_PAINEL_MIN: f32 = 250.0;
+const LARGURA_PAINEL_MAX: f32 = 340.0;
 const LARGURA_ROTULO: f32 = 170.0;
 const LARGURA_VALOR: f32 = 44.0;
-const LARGURA_MODO: f32 = 150.0;
-const LARGURA_VALOR_CAMPO: f32 = 320.0;
+const LARGURA_MODO: f32 = 130.0;
+const LARGURA_VALOR_CAMPO: f32 = 300.0;
 const LARGURA_RITMO: f32 = 120.0;
 const LARGURA_POSICAO: f32 = 64.0;
 const LARGURA_LIMITE: f32 = 190.0;
-const LARGURA_VERBA: f32 = 200.0;
+const LARGURA_VERBA: f32 = 180.0;
 
 pub const MSG_SEM_OLHEIRO: &str = "Nenhum Olheiro disponível.";
 
@@ -137,21 +145,36 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
         return Acao::Cancelou;
     };
 
+    com_fonte(ui, fonts.map(|f| f.heading), || ui.text(if previa.ajustando.is_some() { "Ajustar o perfil da pesquisa" } else { "Nova Missão" }));
+    ui.dummy([0.0, theme::ESPACO_2]);
+
     let mut campo = None;
     let altura_campos = (ui.content_region_avail()[1] - ALTURA_RODAPE).max(120.0);
+    let ajustando = previa.ajustando.is_some();
+    // Olheiro e stats à esquerda, filtros à direita (2026-10-05, pedido do
+    // Felipe: no formulário antigo não dava para ver o que o Olheiro oferece).
+    let largura_olheiro = (ui.content_region_avail()[0] * FRACAO_PAINEL_OLHEIRO).clamp(LARGURA_PAINEL_MIN, LARGURA_PAINEL_MAX);
+    {
+        let _fundo = ui.push_style_color(StyleColor::ChildBg, theme::BG_PANEL_RAISED);
+        ui.child_window("##olheiro_nova_missao")
+            .size([largura_olheiro, altura_campos])
+            .border(true)
+            // sem rolagem: o perfil cabe inteiro, e a tela nunca vira dois
+            // lugares para rolar (Felipe, 2026-10-05)
+            .flags(super::flags_conteudo() | WindowFlags::NO_SCROLLBAR | WindowFlags::NO_SCROLL_WITH_MOUSE)
+            .build(|| painel_olheiro(ui, fonts, state, &previa));
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
     let rolagem = state.rolagem();
     ui.child_window("##campos_nova_missao")
         .size([0.0, altura_campos])
         .border(false)
-        .flags(super::flags_conteudo())
+        .flags(super::flags_conteudo() | WindowFlags::HORIZONTAL_SCROLLBAR)
         .build(|| {
             super::rolar_com_analogico(ui, rolagem);
-            com_fonte(ui, fonts.map(|f| f.heading), || ui.text("Nova Missão"));
-            ui.dummy([0.0, theme::ESPACO_2]);
-            cabecalho_olheiro(ui, fonts, state, &previa);
-            ui.dummy([0.0, theme::ESPACO_1]);
-            campo_atalhos(ui, fonts, state);
             let f = &previa.rascunho.filtros;
+
+            restaurar_sugestao(ui, fonts, state, previa.rascunho.olheiro_id.is_some());
 
             secao(ui, fonts, "Onde");
             let geografia = match state.listar_ligas() {
@@ -159,12 +182,21 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 _ if f.tem_geografia() => "Lendo as ligas…".to_string(),
                 _ => "O mundo todo".to_string(),
             };
-            if campo_painel(ui, fonts, "Filtro geográfico", &geografia) {
+            if ajustando {
+                // ajustar o perfil não muda a região: mudar é rescindir o contrato
+                rotulo(ui, fonts, "Região");
+                com_fonte(ui, fonts.map(|f| f.body), || {
+                    ui.same_line_with_spacing(LARGURA_ROTULO, 0.0);
+                    ui.text(format!("{geografia}  (fixa no contrato)"));
+                });
+            } else if campo_painel(ui, fonts, "Filtro geográfico", &geografia) {
                 campo = Some(Satelite::SelecaoGeografica);
             }
 
             secao(ui, fonts, "Posição");
             campo_posicoes(ui, fonts, state, &f.posicoes);
+            ui.dummy([0.0, theme::ESPACO_1]);
+            campo_fit(ui, fonts, state, &previa);
 
             secao(ui, fonts, "Nível");
             campo_nivel(ui, fonts, state, f.nivel_elenco);
@@ -174,11 +206,15 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
             ui.dummy([0.0, theme::ESPACO_1]);
             campo_limite(ui, fonts, state, true, f.limite_salario, previa.teto_salario, previa.folha_disponivel);
             ui.dummy([0.0, theme::ESPACO_1]);
-            campo_faixa(ui, fonts, state, "Contrato", f.contrato, CampoFaixa::ContratoMin, CampoFaixa::ContratoMax, "anos restantes");
-            com_fonte(ui, fonts.map(|f| f.meta), || {
-                ui.set_cursor_pos([ui.cursor_pos()[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-                ui.text_colored(theme::TEXT_SECONDARY, texto_contrato(f.contrato));
-            });
+            if previa.tem(Habilidade::OlhoParaContratos) {
+                campo_faixa(ui, fonts, state, "Contrato", f.contrato, CampoFaixa::ContratoMin, CampoFaixa::ContratoMax, "anos restantes");
+                com_fonte(ui, fonts.map(|f| f.meta), || {
+                    ui.set_cursor_pos([ui.cursor_pos()[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+                    ui.text_colored(theme::TEXT_SECONDARY, texto_contrato(f.contrato));
+                });
+            } else {
+                linha_bloqueada(ui, fonts, "Contrato", Habilidade::OlhoParaContratos);
+            }
 
             secao(ui, fonts, "Busca");
             campo_busca(ui, fonts, state, previa.rascunho.modo, previa.rascunho.continua);
@@ -204,27 +240,39 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 divisor(ui);
                 campo_faixa(ui, fonts, state, "Overall", f.overall, CampoFaixa::OverallMin, CampoFaixa::OverallMax, "");
                 divisor(ui);
-                campo_faixa(ui, fonts, state, "Potencial", f.potencial, CampoFaixa::PotencialMin, CampoFaixa::PotencialMax, "");
-                divisor(ui);
-                if campo_painel(ui, fonts, "Atributos dominantes", &texto_atributos(&f.atributos_dominantes)) {
-                    campo = Some(Satelite::CampoAtributo);
+                if previa.tem(Habilidade::CacaAPromessas) {
+                    campo_faixa(ui, fonts, state, "Potencial", f.potencial, CampoFaixa::PotencialMin, CampoFaixa::PotencialMax, "");
+                } else {
+                    linha_bloqueada(ui, fonts, "Potencial", Habilidade::CacaAPromessas);
                 }
                 divisor(ui);
-                campo_ritmo(ui, fonts, state, "Ritmo no ataque", true, &f.ritmo_ataque);
-                divisor(ui);
-                campo_ritmo(ui, fonts, state, "Ritmo na defesa", false, &f.ritmo_defesa);
-                divisor(ui);
-                campo_faixa(ui, fonts, state, "Dribles", f.estrelas_drible, CampoFaixa::DribleMin, CampoFaixa::DribleMax, "estrelas");
-                divisor(ui);
-                campo_pe(ui, fonts, state, f.pe);
-                divisor(ui);
-                if campo_painel(ui, fonts, "Fit Posicional", &super::campo_fit::texto_fit(f.fit_posicional)) {
-                    campo = Some(Satelite::CampoFit);
+                if previa.tem(Habilidade::AtributosDominantes) {
+                    if campo_painel(ui, fonts, "Atributos dominantes", &texto_atributos(&f.atributos_dominantes)) {
+                        campo = Some(Satelite::CampoAtributo);
+                    }
+                } else {
+                    linha_bloqueada(ui, fonts, "Atributos dominantes", Habilidade::AtributosDominantes);
                 }
                 divisor(ui);
-                let referencia = f.referencia.as_ref().map_or("Nenhum", |r| r.nome.as_str());
-                if campo_painel(ui, fonts, "Jogador de Referência", referencia) {
-                    campo = Some(Satelite::SeletorElenco(ContextoSeletor::FiltroMissao));
+                if previa.tem(Habilidade::PerfilFisico) {
+                    campo_ritmo(ui, fonts, state, "Ritmo no ataque", true, &f.ritmo_ataque);
+                    divisor(ui);
+                    campo_ritmo(ui, fonts, state, "Ritmo na defesa", false, &f.ritmo_defesa);
+                    divisor(ui);
+                    campo_faixa(ui, fonts, state, "Dribles", f.estrelas_drible, CampoFaixa::DribleMin, CampoFaixa::DribleMax, "estrelas");
+                    divisor(ui);
+                    campo_pe(ui, fonts, state, f.pe);
+                } else {
+                    linha_bloqueada(ui, fonts, "Ritmos, dribles e pé", Habilidade::PerfilFisico);
+                }
+                divisor(ui);
+                if previa.tem(Habilidade::JogadorDeReferencia) {
+                    let referencia = f.referencia.as_ref().map_or("Nenhum", |r| r.nome.as_str());
+                    if campo_painel(ui, fonts, "Jogador de Referência", referencia) {
+                        campo = Some(Satelite::SeletorElenco(ContextoSeletor::FiltroMissao));
+                    }
+                } else {
+                    linha_bloqueada(ui, fonts, "Jogador de Referência", Habilidade::JogadorDeReferencia);
                 }
             }
             ui.dummy([0.0, theme::ESPACO_3]);
@@ -233,6 +281,55 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     match (rodape(ui, fonts, state, &previa), campo) {
         (Acao::Nenhuma, Some(satelite)) => Acao::AbrirCampo(satelite),
         (acao, _) => acao,
+    }
+}
+
+/// Linha de um filtro que o Olheiro escolhido não sabe pedir: o nome apagado
+/// e o que falta. Não é um item navegável: o controle pula direto para o
+/// próximo filtro.
+fn linha_bloqueada(ui: &Ui, fonts: Option<&Fonts>, nome: &str, habilidade: Habilidade) {
+    let inicio = ui.cursor_pos();
+    com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_DISABLED, nome));
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_DISABLED, texto_exige(habilidade)));
+}
+
+/// "Exige a habilidade Fit Posicional (Tático de 4,5★ ou mais): este
+/// Olheiro não tem."
+pub fn texto_exige(habilidade: Habilidade) -> String {
+    format!("Exige a habilidade {} ({}): este Olheiro não tem.", habilidade.nome(), habilidade.exige())
+}
+
+/// Fit Posicional (habilidade): inclui, nas posições pedidas, quem joga em
+/// outra posição mas tem fit para ela. Liga/desliga; vale com posições
+/// escolhidas.
+fn campo_fit(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
+    if !previa.tem(Habilidade::FitPosicional) {
+        linha_bloqueada(ui, fonts, "Fit Posicional", Habilidade::FitPosicional);
+        return;
+    }
+    let f = &previa.rascunho.filtros;
+    let _id = ui.push_id("fit_posicional");
+    let inicio = ui.cursor_pos();
+    rotulo(ui, fonts, "Fit Posicional");
+    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+    let ativo = !f.posicoes.is_empty();
+    let estilo = if f.fit_nas_posicoes && ativo { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+    if componentes::botao_com_largura(ui, fonts, "Incluir quem tem fit", estilo, ativo, Some(LARGURA_VALOR_CAMPO)) {
+        state.alternar_fit_nas_posicoes();
+    }
+    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
+    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto_fit(f)));
+}
+
+/// O que o Fit está fazendo, em uma linha.
+pub fn texto_fit(f: &FiltrosMissao) -> String {
+    if f.posicoes.is_empty() {
+        "Escolha as posições acima para usar o Fit.".to_string()
+    } else if f.fit_nas_posicoes {
+        "Busca também jogadores de outras posições que têm fit para elas.".to_string()
+    } else {
+        "Só quem joga nas posições escolhidas.".to_string()
     }
 }
 
@@ -293,44 +390,123 @@ fn divisor(ui: &Ui) {
     ui.dummy([0.0, theme::ESPACO_2]);
 }
 
-/// O Olheiro escolhido no passo 1 (não muda aqui; B volta para trocar) e
-/// "Restaurar sugestão", que devolve os filtros ideais dele.
-fn cabecalho_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
-    let inicio = ui.cursor_pos();
-    rotulo(ui, fonts, "Olheiro");
-    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
+/// "Restaurar sugestão": o primeiro item dos filtros, que devolve os filtros
+/// ideais do Olheiro escolhido. Com o foco do controle nele, rola até o topo
+/// (os títulos de seção não são itens; sem isso ficavam escondidos).
+fn restaurar_sugestao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, com_olheiro: bool) {
+    if componentes::botao(ui, fonts, "Restaurar sugestão", EstiloBotao::Secundario, com_olheiro) {
+        state.restaurar_filtros_ideais();
+    }
+    if componentes::focado_pelo_controle(ui) && ui.scroll_y() > 0.0 {
+        ui.set_scroll_y(0.0);
+    }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+    let y = ui.cursor_pos()[1];
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
+        ui.text_colored(theme::TEXT_SECONDARY, "Os filtros já vêm com o que combina com o foco do Olheiro.");
+    });
+}
+
+/// O painel da esquerda: o Olheiro escolhido no passo 1 (não muda aqui; B
+/// volta para trocar) e o que ele oferece — estrelas, o que vale para esta
+/// Missão, mercados com bandeira e o aviso de penalidade. Compacto e sem
+/// rolagem: o que não é essencial (descrição do foco, legendas) ficou fora.
+fn painel_olheiro(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, previa: &PreviaMissao) {
     let escolhido = previa
         .rascunho
         .olheiro_id
         .and_then(|id| previa.olheiros.iter().find(|c| c.olheiro.id == id))
         .map(|c| c.olheiro.clone());
-    match escolhido {
-        Some(o) => {
-            olheiros::nome_com_badge(ui, fonts, &o.nome_exibicao(), o.tier);
-            ui.same_line_with_spacing(0.0, theme::ESPACO_4);
-            if componentes::botao(ui, fonts, "Restaurar sugestão", EstiloBotao::Secundario, true) {
-                state.restaurar_filtros_ideais();
-            }
-            // Primeiro item da tela: com o foco do controle nele, rola até o
-            // topo (o título não é item; sem isso ele ficava escondido).
-            if componentes::focado_pelo_controle(ui) && ui.scroll_y() > 0.0 {
-                ui.set_scroll_y(0.0);
-            }
-            let foco = o.perfil().foco();
-            ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-            com_fonte(ui, fonts.map(|f| f.meta), || {
-                ui.text_colored(
-                    theme::TEXT_SECONDARY,
-                    format!("Foco {}: {} Os filtros abaixo já vêm com o que combina com ele.", foco.nome(), olheiros::descricao(foco)),
-                )
-            });
-            if let Some(aviso) = texto_penalidade(previa) {
-                ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-                com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::WARNING, aviso));
-            }
+    let Some(o) = escolhido else {
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_OLHEIRO));
+        return;
+    };
+    let perfil = o.perfil();
+    let foco = perfil.foco();
+
+    // bandeira, nome e nível; embaixo, nação e foco
+    olheiros::com_nacoes(state, |nacoes| {
+        if let Some(n) = &o.nacao {
+            let altura = com_fonte(ui, fonts.map(|f| f.heading), || ui.text_line_height());
+            let altura_bandeira = (altura * 0.72).round();
+            let pos = ui.cursor_screen_pos();
+            let w = componentes::bandeira(
+                &ui.get_window_draw_list(),
+                (nacoes.bandeira)(n.id),
+                [pos[0], pos[1] + (altura - altura_bandeira) * 0.5],
+                altura_bandeira,
+            );
+            ui.dummy([w, altura]);
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
         }
-        None => com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_SEM_OLHEIRO)),
+    });
+    olheiros::nome_com_badge(ui, fonts, &o.nome_exibicao(), o.tier);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let origem = o.nacao.as_ref().map_or("Sem nação", |n| n.nome.as_str());
+        ui.text_colored(theme::TEXT_SECONDARY, format!("{origem} · {}", foco.nome()));
+    });
+
+    divisor_do_painel(ui);
+    for e in Especializacao::TODAS {
+        let cor = if e == foco { theme::ACCENT_PRIMARY } else { theme::TEXT_SECONDARY };
+        linha_estrelas(ui, fonts, e.nome(), perfil.atributo(e), cor);
     }
+    linha_estrelas(ui, fonts, "Rede de contatos", perfil.rede, theme::FIELD_GREEN);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let _cor = ui.push_style_color(StyleColor::Text, theme::ACCENT_PRIMARY);
+        ui.text_wrapped(texto_vale_para_a_missao(previa.tipo, perfil.para_tipo(previa.tipo)));
+    });
+
+    divisor_do_painel(ui);
+    olheiros::com_nacoes(state, |nacoes| olheiros::origem_no_fluxo(ui, fonts, &o, nacoes, false, 4));
+
+    divisor_do_painel(ui);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let habilidades = o.habilidades_efetivas();
+        if habilidades.is_empty() {
+            ui.text_colored(theme::TEXT_DISABLED, "Sem habilidades: não aceita filtros avançados.");
+        } else {
+            let nomes = habilidades.iter().map(|h| h.nome()).collect::<Vec<_>>().join(", ");
+            let _cor = ui.push_style_color(StyleColor::Text, theme::ACCENT_PRIMARY);
+            ui.text_wrapped(format!("Habilidades: {nomes}"));
+        }
+    });
+
+    if let Some(aviso) = texto_penalidade(previa) {
+        divisor_do_painel(ui);
+        com_fonte(ui, fonts.map(|f| f.meta), || {
+            let _cor = ui.push_style_color(StyleColor::Text, theme::WARNING);
+            ui.text_wrapped(aviso);
+        });
+    }
+}
+
+/// Linha fina entre os blocos do painel do Olheiro.
+fn divisor_do_painel(ui: &Ui) {
+    ui.dummy([0.0, theme::ESPACO_1]);
+    let _c = ui.push_style_color(StyleColor::Separator, theme::BORDER_HAIRLINE_SUBTLE);
+    ui.separator();
+    ui.dummy([0.0, theme::ESPACO_1]);
+}
+
+/// "Para esta Missão (Jovens) vale 3,5 estrelas."
+pub fn texto_vale_para_a_missao(tipo: TipoMissao, estrelas: quality::Estrelas) -> String {
+    format!("Para esta Missão ({}) ele vale {} estrelas.", nome_tipo(tipo), estrelas.texto())
+}
+
+/// Uma linha do painel do Olheiro: o nome do atributo à esquerda e as
+/// estrelas encostadas à direita.
+fn linha_estrelas(ui: &Ui, fonts: Option<&Fonts>, nome: &str, estrelas: quality::Estrelas, cor: [f32; 4]) {
+    let altura = com_fonte(ui, fonts.map(|f| f.meta), || ui.text_line_height());
+    let pos = ui.cursor_screen_pos();
+    let largura = ui.content_region_avail()[0];
+    let dl = ui.get_window_draw_list();
+    componentes::texto_em(ui, fonts.map(|f| f.meta), &dl, pos, cor, nome);
+    let lado = (altura * 0.8).max(8.0);
+    let largura_estrelas = (lado + 2.0) * 5.0 - 2.0;
+    componentes::desenhar_estrelas(&dl, [pos[0] + largura - largura_estrelas, pos[1] + (altura - lado) * 0.5], estrelas, lado, cor);
+    ui.dummy([0.0, altura + theme::ESPACO_1]);
 }
 
 /// Linha de faixa: `[-] min [+]  até  [-] max [+]  unidade`. Segurar o
@@ -445,37 +621,6 @@ fn campo_pe(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, pe: Option<F
             )
         });
     }
-}
-
-/// Atalhos de filtro (2026-10-03): um clique monta uma busca comum
-/// (mantém a geografia e o teto). O tooltip diz o que cada um faz.
-fn campo_atalhos(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) {
-    // Escopo de ID próprio em cada linha: rótulos se repetem entre linhas
-    // ("Muda patamar" é atalho e nível; "Qualquer" é nível e pé) e, sem
-    // ele, o ImGui via os dois como o mesmo botão: o foco do controle
-    // pulava de linha e o atalho parava de responder (2026-10-03).
-    let _id = ui.push_id("atalhos");
-    let inicio = ui.cursor_pos();
-    rotulo(ui, fonts, "Atalhos");
-    ui.same_line_with_spacing(inicio[0] + LARGURA_ROTULO, 0.0);
-    let mut em_destaque = None;
-    for (indice, atalho) in Atalho::TODOS.into_iter().enumerate() {
-        if indice > 0 {
-            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
-        }
-        if componentes::botao(ui, fonts, atalho.nome(), EstiloBotao::Secundario, true) {
-            state.aplicar_atalho_da_missao(atalho);
-        }
-        if ui.is_item_hovered() || componentes::focado_pelo_controle(ui) {
-            em_destaque = Some(atalho);
-        }
-    }
-    // A explicação fica na linha de baixo (um tooltip no foco atrapalhava
-    // voltar com o controle para o topo).
-    let texto = em_destaque
-        .map_or("Um clique monta a busca; a geografia, as posições e o orçamento ficam como estão.", Atalho::descricao);
-    ui.set_cursor_pos([inicio[0] + LARGURA_ROTULO, ui.cursor_pos()[1]]);
-    com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, texto));
 }
 
 /// Nível em relação ao elenco: Qualquer / Muda patamar / Titular / Banco /
@@ -780,12 +925,26 @@ pub fn texto_penalidade(previa: &PreviaMissao) -> Option<String> {
 pub fn descricao_duracao(continua: bool) -> String {
     if continua {
         format!(
-            "O Olheiro fica na Missão até você encerrar. Cada bloco de {} dias de carreira é pago na confirmação; ao fim do bloco, você decide se renova.",
+            "Contrato de 12 meses com o Olheiro: pago uma vez, mais caro que a Missão de prazo fixo e bem mais barato que 12 pesquisas. Todo mês ele traz mais jogadores e, no fim, renova sozinho se houver verba. Mudar o Olheiro de localidade nos 12 primeiros meses (a carência) custa a multa dele; depois disso, não. Fica {} dias por pesquisa.",
             crate::scout::quality::DIAS_BLOCO_CONTINUO
         )
     } else {
         "O Relatório chega aos poucos e fica completo no prazo.".to_string()
     }
+}
+
+/// A linha do rodapé sobre o contrato anterior do Olheiro, se ele tem um
+/// que esta Missão encerra (2026-10-07): a multa, ou "sem multa".
+pub fn texto_rescisao(previa: &PreviaMissao) -> Option<String> {
+    previa.rescindindo?;
+    Some(match previa.multa {
+        Some(m) => format!(
+            "Multa de {}: ele deixa o contrato em curso (até {}) para outra localidade.",
+            formatar_milhar(m.valor),
+            formatar_data(m.ate)
+        ),
+        None => "O contrato anterior dele termina agora, sem multa (a localidade é a mesma, ou ele já passou da carência de 12 meses).".to_string(),
+    })
 }
 
 /// Rodapé fixo: resumo ao vivo, motivo do bloqueio e os botões.
@@ -816,16 +975,16 @@ pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
 
     let estimativa = previa.estimativa;
     let continua = previa.rascunho.continua;
-    let custo = estimativa.map_or("—".to_string(), |e| {
-        if continua {
-            format!("{} por bloco", formatar_milhar(e.custo))
-        } else {
-            formatar_milhar(e.custo)
+    let custo = estimativa.map_or("—".to_string(), |_| {
+        let base = if continua { format!("{} por 12 meses", formatar_milhar(previa.custo)) } else { formatar_milhar(previa.custo) };
+        match previa.multa {
+            Some(m) => format!("{base} + multa {}", formatar_milhar(m.valor)),
+            None => base,
         }
     });
-    let prazo = match (previa.duracao_dias(), previa.prazo()) {
-        (Some(dias), Some(data)) if continua => format!("blocos de {dias} dias (o 1º termina em {})", formatar_data(data)),
-        (Some(dias), Some(data)) => format!("~{dias} dias de carreira (pronta em {})", formatar_data(data)),
+    let prazo = match (previa.duracao_dias(), previa.prazo(), previa.fim_do_contrato()) {
+        (Some(_), Some(_), Some(fim)) if continua => format!("contrato até {}", formatar_data(fim)),
+        (Some(dias), Some(data), _) => format!("~{dias} dias de carreira (pronta em {})", formatar_data(data)),
         _ => "—".to_string(),
     };
 
@@ -855,13 +1014,18 @@ pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
             ui.text_colored(
                 theme::TEXT_SECONDARY,
                 format!(
-                    "Relatório: até {} jogadores{}, {} atributos por jogador, precisão de ±{}.",
+                    "Relatório: até {} jogadores{}, {} atributos por jogador, precisão de ±{}; mais os já mapeados na Base do Scout (0 a 4 dias, fora do limite).",
                     e.alvo_jogadores,
-                    if continua { " por bloco" } else { "" },
+                    if continua { " por mês" } else { "" },
                     e.atributos_revelados,
                     e.precisao_mais_menos
                 ),
             );
+        }
+        // sempre uma linha, para o rodapé não pular quando a multa aparece
+        match texto_rescisao(previa) {
+            Some(texto) => ui.text_colored(theme::WARNING, texto),
+            None => ui.dummy([0.0, ui.text_line_height()]),
         }
     });
 
@@ -877,7 +1041,7 @@ pub fn resumo(ui: &Ui, fonts: Option<&Fonts>, previa: &PreviaMissao) {
 }
 
 /// Altura reservada para o resumo no rodapé de um painel de campo.
-pub const ALTURA_RESUMO: f32 = 120.0;
+pub const ALTURA_RESUMO: f32 = 138.0;
 
 #[cfg(test)]
 mod tests {
@@ -894,6 +1058,7 @@ mod tests {
                 continua: false,
                 investimento: Investimento::Padrao,
                 erro: None,
+                ajustando: None,
             },
             olheiros: Vec::new(),
             tipo,
@@ -911,6 +1076,10 @@ mod tests {
             distancia_mercado: 0,
             fora_do_foco: false,
             custos_por_verba: Vec::new(),
+            custo: 0,
+            rescindindo: None,
+            multa: None,
+            ajustando: None,
         }
     }
 

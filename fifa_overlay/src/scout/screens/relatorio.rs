@@ -23,14 +23,18 @@ use imgui::Ui;
 use super::componentes::{
     self, badge_escolhido, badge_fit, badge_qualidade, badge_tier, card_com_largura, desenhar_badge_texto, texto_em, EstiloBotao,
 };
+use super::lista_jogadores;
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data};
 use crate::save_repo::{nome_posicao, Date};
+use crate::scout::lista::{ItemLista, ListaId};
 use crate::scout::minifaces::Rosto;
-use crate::scout::state::{meio_da_faixa, FaixaAtributo, JogadorEncontrado, PosicaoAlvo, Qualidade, RelatorioNaLista, ScoutState};
+use crate::scout::state::{meio_da_faixa, Densidade, FaixaAtributo, JogadorEncontrado, PosicaoAlvo, Qualidade, RelatorioNaLista, ScoutState};
 
-const LARGURA_CARD: f32 = 460.0;
+pub(super) const LARGURA_CARD: f32 = 460.0;
 const ALTURA_CARD: f32 = 196.0;
+/// A linha "Visto por…" a mais nos cards das listas por jogador.
+const ALTURA_ORIGEM: f32 = 22.0;
 const LADO_ROSTO: f32 = 112.0;
 /// Atributos mostrados em cada card (os primeiros que o Olheiro observou).
 const ATRIBUTOS_NO_CARD: usize = 3;
@@ -198,7 +202,8 @@ pub fn formatar_faixa(faixa: FaixaAtributo) -> String {
 }
 
 /// Jogadores do melhor para o pior pelo meio da faixa de Overall (empate:
-/// Potencial, depois nome).
+/// Potencial, depois nome). A lista na tela usa `scout::lista::ordenar`.
+#[cfg(test)]
 pub fn ordenar(jogadores: &[JogadorEncontrado]) -> Vec<&JogadorEncontrado> {
     let meio = |f: FaixaAtributo| u16::from(f.min) + u16::from(f.max);
     let mut lista: Vec<&JogadorEncontrado> = jogadores.iter().collect();
@@ -253,6 +258,8 @@ pub fn detalhe(item: &RelatorioNaLista) -> String {
         }
         if let Some(alvo) = m.filtros.fit_posicional {
             partes.push(format!("fit em {}", alvo.nome()));
+        } else if m.filtros.fit_nas_posicoes && !m.filtros.posicoes.is_empty() {
+            partes.push("com fit nas posições".to_string());
         }
         if let Some(r) = &m.filtros.referencia {
             partes.push(format!("parecidos com {}", r.nome));
@@ -263,6 +270,10 @@ pub fn detalhe(item: &RelatorioNaLista) -> String {
     }
     if let Some(data) = r.gerado_em {
         partes.push(format!("gerado em {}", formatar_data(data)));
+    }
+    let da_base = r.jogadores.iter().filter(|j| j.da_base).count();
+    if da_base > 0 {
+        partes.push(format!("{da_base} da Base do Scout"));
     }
     partes.push(if item.parcial {
         format!("parcial: {} de {} jogadores até agora", r.jogadores.len(), item.previstos)
@@ -311,32 +322,49 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     }
     let perfil = PerfilPedido::de(&item);
     let hoje = state.data_da_carreira();
-    match cards(ui, fonts, state, &r.jogadores, &perfil, hoje) {
+    // barra (visão, filtros, ordem, posição) e a lista, filtrada e ordenada
+    let itens: Vec<ItemLista<'_>> = r.jogadores.iter().map(|j| ItemLista::novo(j, String::new())).collect();
+    lista_jogadores::barra(ui, fonts, state, ListaId::RelatorioAberto, &itens, |_, _| false);
+    let visiveis = lista_jogadores::preparar(state, ListaId::RelatorioAberto, itens);
+    if visiveis.is_empty() {
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, lista_jogadores::MSG_NENHUM_NO_FILTRO));
+        return acao;
+    }
+    match lista(ui, fonts, state, &visiveis, &perfil, hoje) {
         Some(player_id) if acao == Acao::Nenhuma => Acao::AbrirFicha(player_id),
         _ => acao,
     }
 }
 
-/// Grade de cards. Devolve o jogador cujo card foi ativado (abre a Ficha).
-fn cards(
+/// Os jogadores já filtrados e ordenados, na visão escolhida (Cards em
+/// grade, ou a tabela), dentro de uma janela que rola. Devolve o jogador
+/// ativado (abre a Ficha).
+fn lista(
     ui: &Ui,
     fonts: Option<&Fonts>,
-    state: &ScoutState,
-    jogadores: &[JogadorEncontrado],
+    state: &mut ScoutState,
+    visiveis: &[ItemLista<'_>],
     perfil: &PerfilPedido,
     hoje: Option<Date>,
 ) -> Option<u32> {
     let mut ativado = None;
+    let tabular = state.modo_da_lista(ListaId::RelatorioAberto) == Densidade::Tabular;
     ui.child_window("##cards_relatorio").size([0.0, 0.0]).border(false).flags(super::flags_conteudo()).build(|| {
         super::rolar_com_analogico(ui, state.rolagem());
+        if tabular {
+            ativado = lista_jogadores::tabela(ui, fonts, state, ListaId::RelatorioAberto, visiveis)
+                .and_then(|i| visiveis.get(i))
+                .map(|item| item.jogador.player_id);
+            return;
+        }
         let disponivel = ui.content_region_avail()[0];
         let por_linha = (((disponivel + theme::ESPACO_3) / (LARGURA_CARD + theme::ESPACO_3)).floor() as usize).max(1);
-        for (indice, j) in ordenar(jogadores).into_iter().enumerate() {
+        for (indice, item) in visiveis.iter().enumerate() {
             if indice % por_linha != 0 {
                 ui.same_line_with_spacing(0.0, theme::ESPACO_3);
             }
-            if card_jogador(ui, fonts, state, j, perfil, hoje) {
-                ativado = Some(j.player_id);
+            if card_jogador(ui, fonts, state, &item.jogador.player_id.to_string(), item.jogador, perfil, hoje, None) {
+                ativado = Some(item.jogador.player_id);
             }
             if indice % por_linha == por_linha - 1 {
                 ui.dummy([0.0, theme::ESPACO_1]);
@@ -346,9 +374,22 @@ fn cards(
     ativado
 }
 
-/// Card de um jogador; `true` = ativado.
-fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorEncontrado, perfil: &PerfilPedido, hoje: Option<Date>) -> bool {
-    let c = card_com_largura(ui, &j.player_id.to_string(), LARGURA_CARD, ALTURA_CARD, theme::BORDER_HAIRLINE_SUBTLE);
+/// Card de um jogador; `true` = ativado. `id`: a identidade do card (o mesmo
+/// jogador pode estar em vários Relatórios); `origem`: a linha "Visto por…"
+/// das listas de Relatórios por jogador e da Base (o card fica mais alto).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn card_jogador(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    state: &ScoutState,
+    id: &str,
+    j: &JogadorEncontrado,
+    perfil: &PerfilPedido,
+    hoje: Option<Date>,
+    origem: Option<&str>,
+) -> bool {
+    let altura = ALTURA_CARD + if origem.is_some() { ALTURA_ORIGEM } else { 0.0 };
+    let c = card_com_largura(ui, id, LARGURA_CARD, altura, theme::BORDER_HAIRLINE_SUBTLE);
     let ativo = ui.is_item_hovered() || (ui.is_item_focused() && ui.io().nav_visible);
     // Rosto só para cards visíveis: a lista pode ser longa (carga preguiçosa).
     let visivel = ui.is_rect_visible(c.min, c.max);
@@ -370,24 +411,27 @@ fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorE
     let meta = fonts.map(|f| f.meta);
     let mono = fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body));
 
-    // Já na Lista de Escolhidos (Épico 6): badge ao lado do nome.
+    // Já na Lista de Escolhidos (Épico 6) e/ou vindo da Base do Scout
+    // (2026-10-08): badges ao lado do nome.
     let escolhido = state.esta_nos_escolhidos(j.player_id);
-    let largura_badge = if escolhido {
-        com_fonte(ui, fonts.map(|f| f.badge), || ui.calc_text_size(badge_escolhido().texto)[0]) + theme::ESPACO_2 * 3.0
-    } else {
-        0.0
-    };
+    let largura_do = |b: &componentes::EstiloBadge| com_fonte(ui, fonts.map(|f| f.badge), || ui.calc_text_size(b.texto)[0]) + theme::ESPACO_2 * 3.0;
+    let largura_badge = if escolhido { largura_do(&badge_escolhido()) } else { 0.0 } + if j.da_base { largura_do(&componentes::badge_base()) } else { 0.0 };
     let (nome, nome_cortado) = truncar(&j.nome, largura_texto - largura_badge, medir(fonts.map(|f| f.heading)));
     let [w_nome, h_nome] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, &nome);
+    let mut x_badge = x + w_nome + theme::ESPACO_2;
+    if j.da_base {
+        x_badge += componentes::desenhar_badge(ui, fonts, &dl, &componentes::badge_base(), [x_badge, y], h_nome)[0] + theme::ESPACO_2;
+    }
     if escolhido {
-        componentes::desenhar_badge(ui, fonts, &dl, &badge_escolhido(), [x + w_nome + theme::ESPACO_2, y], h_nome);
+        componentes::desenhar_badge(ui, fonts, &dl, &badge_escolhido(), [x_badge, y], h_nome);
     }
     y += h_nome;
 
     let clube = if j.clube.is_empty() { "Sem clube" } else { j.clube.as_str() };
     // Fit Posicional: badge extra na linha da posição nativa (Story 3.5).
-    let fit = perfil
-        .alvo
+    let fit = j
+        .fit_alvo
+        .or(perfil.alvo)
         .filter(|_| j.atributos_observados())
         .map(|alvo| format!("FIT {}", texto_fit(alvo, j.fit, j.variacao_overall, perfil.aproximado)));
     let largura_fit = fit.as_ref().map_or(0.0, |t| {
@@ -435,6 +479,11 @@ fn card_jogador(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, j: &JogadorE
         }
     } else {
         texto_em(ui, meta, &dl, [x_largo, y], theme::TEXT_DISABLED, MSG_EM_OBSERVACAO);
+    }
+    if let Some(origem) = origem {
+        let (linha, _) = truncar(&format!("Visto por {origem}"), largura_larga, medir(meta));
+        let h = com_fonte(ui, meta, || ui.text_line_height());
+        texto_em(ui, meta, &dl, [x_largo, c.max[1] - theme::ESPACO_2 - h], theme::ACCENT_PRIMARY, &linha);
     }
 
     if ativo && (nome_cortado || cortou2 || cortou3) {
@@ -505,12 +554,17 @@ mod tests {
             pe: None,
             similaridade: None,
             fit: None,
+            fit_alvo: None,
             variacao_overall: None,
             ritmo_ataque: None,
             ritmo_defesa: None,
             estrelas_drible: None,
             pe_fraco: None,
             titular_elenco: None,
+            altura: None,
+            da_base: false,
+            dias_de_curadoria: 0,
+            visto_em: None,
             falso_positivo: false,
         }
     }

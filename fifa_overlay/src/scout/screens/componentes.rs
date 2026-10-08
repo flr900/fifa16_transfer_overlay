@@ -13,6 +13,7 @@ use imgui::{DrawListMut, FontId, StyleColor, StyleVar, Ui};
 
 use super::theme::{self, Fonts};
 use super::{com_fonte, contorno_hover, ESPESSURA_FOCO};
+use crate::scout::minifaces::Rosto;
 use crate::scout::quality::{Estrelas, Frescor};
 use crate::scout::state::{Qualidade, Tier};
 
@@ -105,6 +106,17 @@ pub fn badge_tier(tier: Tier) -> EstiloBadge {
     }
 }
 
+/// O selo de uma habilidade de Olheiro (2026-10-08): contorno roxo, texto
+/// curto (FIT, REFERÊNCIA, ...).
+pub fn badge_habilidade(habilidade: crate::scout::quality::Habilidade) -> EstiloBadge {
+    EstiloBadge {
+        texto: habilidade.selo(),
+        contorno: theme::ACCENT_PRIMARY,
+        fundo: theme::ACCENT_PRIMARY_DIM,
+        cor_texto: theme::ACCENT_PRIMARY,
+    }
+}
+
 /// BAIXA / MÉDIA / ALTA na mesma escala de cores dos Tiers
 /// (DESIGN.md → quality-low/-medium/-high).
 pub fn badge_qualidade(qualidade: Qualidade) -> EstiloBadge {
@@ -140,6 +152,12 @@ pub fn badge_fit() -> EstiloBadge {
 /// "ESCOLHIDO" em verde-campo: o jogador está na Lista de Escolhidos.
 pub fn badge_escolhido() -> EstiloBadge {
     EstiloBadge { texto: "ESCOLHIDO", contorno: theme::FIELD_GREEN, fundo: theme::FIELD_GREEN_DIM, cor_texto: theme::FIELD_GREEN }
+}
+
+/// "BASE" em roxo: o jogador veio da Base do Scout (o clube já o tinha
+/// mapeado), não da pesquisa do Olheiro da Missão.
+pub fn badge_base() -> EstiloBadge {
+    EstiloBadge { texto: "BASE", contorno: theme::ACCENT_PRIMARY, fundo: theme::ACCENT_PRIMARY_DIM, cor_texto: theme::ACCENT_PRIMARY }
 }
 
 /// Estado de um Escolhido: ACOMPANHADO (roxo), ATUALIZADO (verde),
@@ -246,20 +264,21 @@ pub fn focado_pelo_controle(ui: &Ui) -> bool {
 }
 
 /// Seletor de dois ou mais botões (ex.: Tabular / Cards): o escolhido em
-/// roxo. Devolve o índice clicado — ou focado pelo controle — neste frame.
-pub fn alternador(ui: &Ui, fonts: Option<&Fonts>, opcoes: &[&str], escolhida: usize, largura: f32) -> Option<usize> {
-    let mut clicada = None;
+/// roxo. Só muda com o clique (ou o A em cima do botão): passar o foco por
+/// cima não escolhe nada (2026-10-08, pedido do Felipe para as telas de
+/// lista). Devolve o índice ativado neste frame.
+pub fn alternador_por_clique(ui: &Ui, fonts: Option<&Fonts>, opcoes: &[&str], escolhida: usize, largura: f32) -> Option<usize> {
+    let mut ativada = None;
     for (indice, rotulo) in opcoes.iter().enumerate() {
         if indice > 0 {
             ui.same_line_with_spacing(0.0, theme::ESPACO_1);
         }
         let estilo = if indice == escolhida { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
-        let clicou = botao_com_largura(ui, fonts, rotulo, estilo, true, Some(largura));
-        if (clicou || focado_pelo_controle(ui)) && indice != escolhida {
-            clicada = Some(indice);
+        if botao_com_largura(ui, fonts, rotulo, estilo, true, Some(largura)) && indice != escolhida {
+            ativada = Some(indice);
         }
     }
-    clicada
+    ativada
 }
 
 // ---------------------------------------------------------------------
@@ -331,6 +350,32 @@ pub fn rotulo_com_estrelas(
     let x = pos[0] + w + theme::ESPACO_1;
     let largura = desenhar_estrelas(dl, [x, pos[1] + (h - lado) * 0.5], estrelas, lado, cor);
     w + theme::ESPACO_1 + largura
+}
+
+// ---------------------------------------------------------------------
+// Bandeira de nação (2026-10-05)
+// ---------------------------------------------------------------------
+
+/// Largura ÷ altura da bandeira (o ícone do jogo é ~1,6 : 1).
+const PROPORCAO_BANDEIRA: f32 = 1.6;
+
+/// Largura de uma bandeira de `altura` px.
+pub fn largura_da_bandeira(altura: f32) -> f32 {
+    (altura * PROPORCAO_BANDEIRA).round()
+}
+
+/// A bandeira pelo draw list, com o canto de cima à esquerda em `pos`.
+/// Enquanto a imagem não chega (ou se o jogo não a tem), um retângulo
+/// neutro com a mesma borda marca o lugar. Devolve a largura ocupada.
+pub fn bandeira(dl: &DrawListMut<'_>, rosto: Rosto, pos: [f32; 2], altura: f32) -> f32 {
+    let largura = largura_da_bandeira(altura);
+    let max = [pos[0] + largura, pos[1] + altura];
+    match rosto {
+        Rosto::Pronto(textura) => dl.add_image_rounded(textura, pos, max, 2.0).build(),
+        Rosto::Carregando | Rosto::Ausente => dl.add_rect(pos, max, [1.0, 1.0, 1.0, 0.08]).filled(true).rounding(2.0).build(),
+    }
+    dl.add_rect(pos, max, theme::BORDER_HAIRLINE).rounding(2.0).build();
+    largura
 }
 
 /// Texto pelo draw list numa fonte do tema; devolve o tamanho.

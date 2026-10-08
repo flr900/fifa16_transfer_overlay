@@ -99,13 +99,26 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                     theme::TEXT_SECONDARY,
                     format!("Foco {} ({} estrelas) · {}", perfil.foco().nome(), perfil.principal().texto(), olheiros::descricao(perfil.foco())),
                 );
-                let nacao = |id: u16| state.nome_da_nacao(id);
-                ui.text_colored(theme::TEXT_SECONDARY, olheiros::texto_origem(o, &nacao));
             });
+            // nação e mercados, com bandeira
+            olheiros::com_nacoes(state, |nacoes| olheiros::origem_no_fluxo(ui, fonts, o, nacoes, true, 3));
             ui.dummy([0.0, theme::ESPACO_1]);
             let pos = ui.cursor_screen_pos();
             let largura = olheiros::estrelas_do_perfil(ui, fonts, &ui.get_window_draw_list(), pos, &perfil);
             ui.dummy([largura, ui.text_line_height()]);
+            ui.dummy([0.0, theme::ESPACO_1]);
+            // habilidades: o que ele destrava na busca
+            let habilidades = o.habilidades_efetivas();
+            com_fonte(ui, fonts.map(|f| f.meta), || {
+                if habilidades.is_empty() {
+                    ui.text_colored(theme::TEXT_DISABLED, "Sem habilidades");
+                }
+                for h in habilidades {
+                    ui.text_colored(theme::ACCENT_PRIMARY, format!("{} ", h.nome()));
+                    ui.same_line();
+                    ui.text_colored(theme::TEXT_SECONDARY, h.descricao());
+                }
+            });
             ui.dummy([0.0, theme::ESPACO_2]);
             // Nome (item 1): começa com o gerado; vazio volta a ele.
             com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, "Nome do Olheiro"));

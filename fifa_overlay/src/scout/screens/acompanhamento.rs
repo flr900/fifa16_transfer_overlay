@@ -105,7 +105,7 @@ mod tests {
 
     fn contratado(especializacao: Especializacao) -> OlheiroContratado {
         let olheiro = Olheiro { especializacao, tier: Tier::Experiente, ..Default::default() };
-        OlheiroContratado { olheiro, em_missao: false, acompanhando: false, missao: None, relatorio_atual: None, relatorios: 0 }
+        OlheiroContratado { olheiro, em_missao: false, acompanhando: false, missao: None, relatorio_atual: None, relatorios: 0, rescisao: None }
     }
 
     #[test]

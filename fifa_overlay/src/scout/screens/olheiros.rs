@@ -1,6 +1,6 @@
 //! Aba Olheiros: os Olheiros contratados, em Cards ou Tabular (escolha
 //! salva por carreira), e no fim da lista a entrada "Contratar Olheiro",
-//! que abre o mercado de Olheiros do mês numa tela própria
+//! que abre o mercado de Olheiros da semana numa tela própria
 //! (`render_contratacao`).
 //!
 //! Ativar um Olheiro contratado (clique ou A) leva direto ao que ele pode
@@ -10,7 +10,7 @@
 //! Escolhidos → a aba Escolhidos.
 //!
 //! Épico 5 (2026-10-04): cada Olheiro tem nome, nação, mercados e estrelas
-//! em cinco atributos; o mercado do mês muda com a atratividade do clube.
+//! em cinco atributos; o mercado da semana (com filtro por continente e bandeiras) muda com a atratividade do clube; "Demitir" tira um Olheiro da lista.
 //! Layout dos cards do `mockups/olheiros.html` (v2), com uma linha a mais
 //! para as estrelas. Rótulos sem maiúsculas (DESIGN.md: maiúsculas só nos
 //! badges) e valores sem símbolo de moeda.
@@ -18,27 +18,29 @@
 //! Cada card é UM item navegável (Story 1.6). Os dados vêm de
 //! `scout::state` (AD-1); custos e estrelas, de `scout::quality`.
 
-use imgui::{DrawListMut, SelectableFlags, StyleColor, TableColumnFlags, TableColumnSetup, TableFlags, TableRowFlags, Ui};
+use imgui::{DrawListMut, SelectableFlags, StyleColor, TableColumnFlags, TableColumnSetup, TableFlags, TableRowFlags, Ui, WindowFlags};
 use uuid::Uuid;
 
 use super::componentes::{self, badge_tier, desenhar_badge, rotulo_com_estrelas, EstiloBotao};
+use super::olheiro_card::{self, Rodape};
 use super::theme::{self, Fonts};
 use super::{com_fonte, formatar_data, formatar_milhar};
+use crate::save_repo::Confederacao;
+use crate::scout::minifaces::Rosto;
 use crate::scout::quality::{self, Mercado};
-use crate::scout::state::{Carga, Densidade, Especializacao, OfertaOlheiro, Olheiro, OlheiroContratado, ScoutState, Tier};
+use crate::scout::state::{Carga, Densidade, Especializacao, OfertaOlheiro, Olheiro, OlheiroContratado, ScoutState, StatusMissao, Tier};
 
-const ALTURA_CARD: f32 = 96.0;
-const LADO_AVATAR: f32 = 44.0;
-const LARGURA_BOTAO: f32 = 132.0;
-const RAIO_DOT: f32 = 4.0;
+/// Largura de cada botão do filtro de continente.
+const LARGURA_FILTRO: f32 = 150.0;
 const ALTURA_LINHA: f32 = 34.0;
 const LARGURA_ALTERNADOR: f32 = 110.0;
 
 pub const MSG_NENHUM_CONTRATADO: &str = "Nenhum Olheiro contratado ainda.";
 pub const ROTULO_CONTRATAR: &str = "Contratar Olheiro";
-const DETALHE_CONTRATAR: &str = "O mercado do mês: cada Olheiro com nome, nação, mercados e estrelas.";
+const DETALHE_CONTRATAR: &str = "O mercado da semana: cada Olheiro com nome, nação, mercados e estrelas.";
 pub const MSG_LENDO_MERCADO: &str = "Lendo o clube e o mercado de Olheiros…";
-pub const MSG_MERCADO_VAZIO: &str = "Você já contratou todos os Olheiros deste mês. O mercado renova no mês que vem.";
+pub const MSG_FILTRO_VAZIO: &str = "Nenhum Olheiro com mercado nesse continente esta semana. O mercado renova toda semana.";
+pub const MSG_MERCADO_VAZIO: &str = "Você já contratou todos os Olheiros desta semana. O mercado renova na semana que vem.";
 
 /// O que o jogador fez na aba neste frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +50,9 @@ pub enum Acao {
     AbrirContratacao,
     /// Ativou um Olheiro contratado (ver `ScoutState::destino_do_olheiro`).
     Ativar(Uuid),
+    /// Y (ou o botão direito) num Olheiro contratado: as Opções dele
+    /// (cancelar a pesquisa, ajustar o perfil, mudar de região, demitir).
+    Opcoes(Uuid),
 }
 
 /// O que o jogador fez no mercado neste frame.
@@ -110,6 +115,9 @@ pub fn texto_status(contratado: &OlheiroContratado) -> &'static str {
 /// ou, livre, o convite.
 pub fn texto_missao(contratado: &OlheiroContratado) -> String {
     match &contratado.missao {
+        Some(m) if m.continua && m.tem_contrato() => {
+            format!("Missão contínua {} · contrato até {}", super::nova_missao::nome_tipo(m.tipo), formatar_data(m.fim_do_contrato()))
+        }
         Some(m) if m.continua => {
             format!("Missão contínua {} · bloco até {}", super::nova_missao::nome_tipo(m.tipo), formatar_data(m.prazo_estimado))
         }
@@ -140,58 +148,238 @@ pub fn nome_mercado(mercado: Mercado, nacao: &dyn Fn(u16) -> Option<String>) -> 
     }
 }
 
-/// "Brasil · mercados: Brasil, América do Sul" (Olheiro de antes do Épico
-/// 5: "conhece todos os mercados").
-pub fn texto_origem(olheiro: &Olheiro, nacao: &dyn Fn(u16) -> Option<String>) -> String {
-    let mercados = if olheiro.mercados.is_empty() {
-        "sem mercado de origem (contratado antes das estrelas)".to_string()
-    } else {
-        let nomes: Vec<String> = olheiro.mercados.iter().map(|&m| nome_mercado(m, nacao)).collect();
-        format!("mercados: {}", nomes.join(", "))
-    };
-    match &olheiro.nacao {
-        Some(n) => format!("{} · {mercados}", n.nome),
-        None => mercados,
+/// Nome e bandeira das nações, como as telas de Olheiro os pedem ao estado.
+pub struct Nacoes<'a> {
+    pub nome: &'a dyn Fn(u16) -> Option<String>,
+    pub bandeira: &'a dyn Fn(u16) -> Rosto,
+}
+
+/// Monta o `Nacoes` do estado e roda `f` com ele.
+pub fn com_nacoes<R>(state: &ScoutState, f: impl FnOnce(&Nacoes<'_>) -> R) -> R {
+    let nome = |id: u16| state.nome_da_nacao(id);
+    let bandeira = |id: u16| state.bandeira(id);
+    f(&Nacoes { nome: &nome, bandeira: &bandeira })
+}
+
+/// Um item da linha de origem: uma bandeira (opcional) e um texto.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chip {
+    pub bandeira: Option<Rosto>,
+    pub texto: String,
+    pub cor: [f32; 4],
+}
+
+/// A origem do Olheiro em itens: a nação (com bandeira) e os mercados dele
+/// (país com bandeira; continente em roxo). `com_nacao`: começar pela nação.
+pub fn chips_do_olheiro(olheiro: &Olheiro, nacoes: &Nacoes<'_>, com_nacao: bool) -> Vec<Chip> {
+    let mut chips = Vec::new();
+    if let (true, Some(n)) = (com_nacao, &olheiro.nacao) {
+        chips.push(Chip { bandeira: Some((nacoes.bandeira)(n.id)), texto: n.nome.clone(), cor: theme::TEXT_PRIMARY });
     }
+    if olheiro.mercados.is_empty() {
+        chips.push(Chip { bandeira: None, texto: "conhece todos os mercados".to_string(), cor: theme::TEXT_SECONDARY });
+        return chips;
+    }
+    chips.push(Chip { bandeira: None, texto: "Mercados:".to_string(), cor: theme::TEXT_SECONDARY });
+    for &m in &olheiro.mercados {
+        let chip = match m {
+            Mercado::Pais { id, .. } => Chip {
+                bandeira: Some((nacoes.bandeira)(id)),
+                texto: nome_mercado(m, nacoes.nome),
+                cor: theme::TEXT_PRIMARY,
+            },
+            Mercado::Continente(c) => Chip { bandeira: None, texto: format!("{} (todo o continente)", c.nome()), cor: theme::ACCENT_PRIMARY },
+        };
+        chips.push(chip);
+    }
+    chips
+}
+
+/// Desenha os itens a partir de `pos`, quebrando a linha em `largura_max`
+/// (no máximo `max_linhas`; o que não cabe some). Devolve [largura usada,
+/// altura usada].
+pub fn desenhar_chips(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    dl: &DrawListMut<'_>,
+    pos: [f32; 2],
+    largura_max: f32,
+    max_linhas: usize,
+    chips: &[Chip],
+) -> [f32; 2] {
+    let meta = fonts.map(|f| f.meta);
+    let altura = com_fonte(ui, meta, || ui.text_line_height());
+    let altura_bandeira = (altura - 2.0).max(10.0);
+    let (mut x, mut y, mut linha, mut maior) = (0.0f32, 0.0f32, 1usize, 0.0f32);
+    for chip in chips {
+        let largura_texto = com_fonte(ui, meta, || ui.calc_text_size(&chip.texto)[0]);
+        let largura_bandeira = chip.bandeira.map_or(0.0, |_| componentes::largura_da_bandeira(altura_bandeira) + theme::ESPACO_1);
+        let largura = largura_bandeira + largura_texto;
+        if x > 0.0 && x + largura > largura_max {
+            if linha >= max_linhas {
+                break;
+            }
+            linha += 1;
+            x = 0.0;
+            y += altura + theme::ESPACO_1;
+        }
+        if let Some(rosto) = chip.bandeira {
+            componentes::bandeira(dl, rosto, [pos[0] + x, pos[1] + y + (altura - altura_bandeira) * 0.5], altura_bandeira);
+        }
+        componentes::texto_em(ui, meta, dl, [pos[0] + x + largura_bandeira, pos[1] + y], chip.cor, &chip.texto);
+        x += largura + theme::ESPACO_3;
+        maior = maior.max(x - theme::ESPACO_3);
+    }
+    [maior, y + altura]
+}
+
+/// Os itens de origem no fluxo da tela (modal, painel): desenha e reserva o
+/// espaço.
+pub fn origem_no_fluxo(ui: &Ui, fonts: Option<&Fonts>, olheiro: &Olheiro, nacoes: &Nacoes<'_>, com_nacao: bool, max_linhas: usize) {
+    let largura = ui.content_region_avail()[0];
+    let pos = ui.cursor_screen_pos();
+    let usado = desenhar_chips(ui, fonts, &ui.get_window_draw_list(), pos, largura, max_linhas, &chips_do_olheiro(olheiro, nacoes, com_nacao));
+    ui.dummy([usado[0], usado[1]]);
+}
+
+/// Nome curto de um continente nos botões do filtro.
+pub fn nome_curto(continente: Confederacao) -> &'static str {
+    match continente {
+        Confederacao::AmericaDoSul => "Am. do Sul",
+        Confederacao::AmericaDoNorte => "Am. do Norte",
+        outro => outro.nome(),
+    }
+}
+
+/// O Olheiro tem algum mercado (país ou continente) neste continente?
+pub fn tem_mercado_em(olheiro: &Olheiro, continente: Confederacao) -> bool {
+    olheiro.mercados.iter().any(|m| m.continente() == continente)
 }
 
 /// Desenha a aba Olheiros.
 pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
     let densidade = state.densidade_olheiros();
     let atual = usize::from(densidade == Densidade::Tabular);
-    match componentes::alternador(ui, fonts, &["Cards", "Tabular"], atual, LARGURA_ALTERNADOR) {
+    match componentes::alternador_por_clique(ui, fonts, &["Cards", "Tabular"], atual, LARGURA_ALTERNADOR) {
         Some(0) => state.definir_densidade_olheiros(Densidade::Cards),
         Some(_) => state.definir_densidade_olheiros(Densidade::Tabular),
         None => {}
     }
+    ui.same_line_with_spacing(0.0, theme::ESPACO_4);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let y = ui.cursor_pos()[1];
+        ui.set_cursor_pos([ui.cursor_pos()[0], y + (theme::ALVO_MINIMO - ui.text_line_height()) * 0.5]);
+        ui.text_colored(theme::TEXT_SECONDARY, "Y (ou botão direito) abre as opções do Olheiro: pesquisa, perfil, demissão. ←/→ passam de um Olheiro para o outro.");
+    });
     ui.dummy([0.0, theme::ESPACO_2]);
     let contratados = state.olheiros_contratados();
     if contratados.is_empty() {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_NENHUM_CONTRATADO));
         ui.dummy([0.0, theme::ESPACO_1]);
     }
-    let nacao = |id: u16| state.nome_da_nacao(id);
-    match densidade {
-        Densidade::Cards => cards(ui, fonts, &contratados, &nacao),
-        Densidade::Tabular => tabela(ui, fonts, &contratados),
-    }
+    let regioes: std::collections::HashMap<Uuid, String> = contratados
+        .iter()
+        .filter_map(|c| c.missao.as_ref().map(|m| (c.olheiro.id, state.regiao_da_missao(&m.filtros))))
+        .collect();
+    let pediu_opcoes = state.opcoes_pedidas();
+    com_nacoes(state, |nacoes| match densidade {
+        Densidade::Cards => cards(ui, fonts, &contratados, nacoes, &regioes, pediu_opcoes),
+        Densidade::Tabular => tabela(ui, fonts, &contratados, pediu_opcoes),
+    })
 }
 
-fn cards(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], nacao: &dyn Fn(u16) -> Option<String>) -> Acao {
+/// O que cada Olheiro faz, em até duas linhas para o rodapé do card:
+/// a Missão (tipo, onde, contrato ou prazo), o acompanhamento dos Escolhidos
+/// ou o convite para encomendar uma Missão.
+pub fn texto_situacao(c: &OlheiroContratado, regiao: &str) -> Vec<String> {
+    if let Some(m) = &c.missao {
+        let natureza = if m.continua { "Missão contínua" } else { "Missão" };
+        let onde = if regiao.is_empty() { String::new() } else { format!(" · {regiao}") };
+        let prazo = if m.status == StatusMissao::EmExecucao {
+            "Gerando o Relatório…".to_string()
+        } else if m.tem_contrato() {
+            format!("Contrato até {}", formatar_data(m.fim_do_contrato()))
+        } else if m.continua {
+            format!("Bloco até {}", formatar_data(m.prazo_estimado))
+        } else {
+            format!("Pronta em {}", formatar_data(m.prazo_estimado))
+        };
+        return vec![format!("{natureza} {}{onde}", super::nova_missao::nome_tipo(m.tipo)), prazo];
+    }
+    if c.acompanhando {
+        return vec![
+            "Acompanha os Escolhidos".to_string(),
+            format!("Mantém até {} jogadores atualizados", c.olheiro.capacidade_acompanhamento()),
+        ];
+    }
+    vec!["Livre: A encomenda uma Missão".to_string(), texto_relatorios(c.relatorios)]
+}
+
+/// O carrossel de Olheiros (2026-10-08): uma fila de cards que ocupa a tela,
+/// do tamanho da área, com "Contratar Olheiro" como o primeiro e os
+/// contratados depois. ←/→ (ou a barra de rolagem) passam de um para o
+/// outro; Y no card em foco (ou o botão direito) pede as Opções dele.
+fn cards(
+    ui: &Ui,
+    fonts: Option<&Fonts>,
+    contratados: &[OlheiroContratado],
+    nacoes: &Nacoes<'_>,
+    regioes: &std::collections::HashMap<Uuid, String>,
+    pediu_opcoes: bool,
+) -> Acao {
     let mut acao = Acao::Nenhuma;
-    for (indice, c) in contratados.iter().enumerate() {
-        let lado = Lado::Status { status: texto_status(c), cor: cor_status(c), relatorios: c.relatorios };
-        let revelar = if indice == 0 { Revelar::Topo } else { Revelar::Nada };
-        let detalhe = if c.ocupado() { texto_missao(c) } else { texto_origem(&c.olheiro, nacao) };
-        if card(ui, fonts, &c.olheiro.id.to_string(), Some(&c.olheiro), &detalhe, &lado, revelar) {
-            acao = Acao::Ativar(c.olheiro.id);
-        }
-    }
-    let revelar = if contratados.is_empty() { Revelar::Topo } else { Revelar::Nada };
-    if card(ui, fonts, "contratar", None, DETALHE_CONTRATAR, &Lado::Novo, revelar) {
-        acao = Acao::AbrirContratacao;
-    }
+    let [largura_area, altura_area] = ui.content_region_avail();
+    let dim = dimensao_do_carrossel(largura_area, altura_area);
+    ui.child_window("##carrossel_olheiros")
+        .size([0.0, altura_area])
+        .border(false)
+        .flags(super::flags_conteudo() | WindowFlags::HORIZONTAL_SCROLLBAR)
+        .build(|| {
+            // a roda do mouse anda para os lados
+            let roda = ui.io().mouse_wheel;
+            if roda != 0.0 && ui.is_window_hovered() {
+                ui.set_scroll_x(ui.scroll_x() - roda * (dim.largura * 0.5));
+            }
+            let total = contratados.len() + 1;
+            for indice in 0..total {
+                if indice > 0 {
+                    ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+                }
+                let resultado = if indice == 0 {
+                    let r = olheiro_card::desenhar_novo(ui, fonts, "contratar", dim, ROTULO_CONTRATAR, DETALHE_CONTRATAR);
+                    if r.ativou {
+                        acao = Acao::AbrirContratacao;
+                    }
+                    r
+                } else {
+                    let c = &contratados[indice - 1];
+                    let regiao = regioes.get(&c.olheiro.id).map_or("", String::as_str);
+                    let rodape = Rodape::Situacao { status: texto_status(c), cor: cor_status(c), linhas: texto_situacao(c, regiao) };
+                    let r = olheiro_card::desenhar(ui, fonts, &c.olheiro.id.to_string(), dim, &c.olheiro, nacoes, &rodape);
+                    if r.ativou {
+                        acao = Acao::Ativar(c.olheiro.id);
+                    }
+                    if r.opcoes || (r.focado && pediu_opcoes) {
+                        acao = Acao::Opcoes(c.olheiro.id);
+                    }
+                    r
+                };
+                // o primeiro em foco: volta ao começo da fila
+                if resultado.focado && indice == 0 && ui.scroll_x() > 0.0 {
+                    ui.set_scroll_x(0.0);
+                }
+            }
+        });
     acao
+}
+
+/// O tamanho dos cards do carrossel: cerca de três por tela (nunca menos que
+/// o card do mercado) e a altura da área, descontada a barra de rolagem.
+pub fn dimensao_do_carrossel(largura_area: f32, altura_area: f32) -> olheiro_card::Dimensao {
+    const POR_TELA: f32 = 3.0;
+    let largura = ((largura_area + theme::ESPACO_3) / POR_TELA - theme::ESPACO_3).max(olheiro_card::LARGURA);
+    let altura = (altura_area - 24.0).max(olheiro_card::ALTURA);
+    olheiro_card::Dimensao { largura, altura }
 }
 
 /// Verde livre, dourado em Missão, roxo acompanhando.
@@ -206,7 +394,7 @@ fn cor_status(c: &OlheiroContratado) -> [f32; 4] {
 }
 
 /// Visão Tabular: uma linha por Olheiro e, por último, "Contratar Olheiro".
-fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> Acao {
+fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado], pediu_opcoes: bool) -> Acao {
     let mut acao = Acao::Nenhuma;
     let flags = TableFlags::ROW_BG | TableFlags::BORDERS_INNER_H | TableFlags::SIZING_FIXED_FIT | TableFlags::NO_SAVED_SETTINGS;
     let _c1 = ui.push_style_color(StyleColor::TableRowBg, theme::TRANSPARENTE);
@@ -237,8 +425,12 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> 
     for c in contratados {
         let _id = ui.push_id(c.olheiro.id.to_string());
         ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
-        if linha_selecionavel(ui) {
+        let (ativou, focada) = linha_selecionavel(ui);
+        if ativou {
             acao = Acao::Ativar(c.olheiro.id);
+        }
+        if focada && pediu_opcoes {
+            acao = Acao::Opcoes(c.olheiro.id);
         }
         texto_na_celula(ui, fonts.map(|f| f.body), &c.olheiro.nome_exibicao(), theme::TEXT_PRIMARY);
         ui.table_set_column_index(1);
@@ -256,7 +448,7 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> 
         texto_na_celula(ui, fonts.map(|f| f.meta), &texto_relatorios(c.relatorios), theme::TEXT_SECONDARY);
     }
     ui.table_next_row_with_height(TableRowFlags::empty(), ALTURA_LINHA);
-    if linha_selecionavel(ui) {
+    if linha_selecionavel(ui).0 {
         acao = Acao::AbrirContratacao;
     }
     texto_na_celula(ui, fonts.map(|f| f.heading), &format!("+ {ROTULO_CONTRATAR}"), theme::FIELD_GREEN);
@@ -267,7 +459,7 @@ fn tabela(ui: &Ui, fonts: Option<&Fonts>, contratados: &[OlheiroContratado]) -> 
 
 /// Linha inteira selecionável (mouse e controle), a partir da coluna 0;
 /// deixa o cursor na coluna 0 para o texto.
-fn linha_selecionavel(ui: &Ui) -> bool {
+fn linha_selecionavel(ui: &Ui) -> (bool, bool) {
     ui.table_set_column_index(0);
     let inicio = ui.cursor_pos();
     let _c = ui.push_style_color(StyleColor::Header, theme::ACCENT_PRIMARY_DIM);
@@ -277,8 +469,9 @@ fn linha_selecionavel(ui: &Ui) -> bool {
         .flags(SelectableFlags::SPAN_ALL_COLUMNS | SelectableFlags::ALLOW_ITEM_OVERLAP)
         .size([0.0, ALTURA_LINHA - 4.0])
         .build();
+    let focada = ui.is_item_focused() && ui.io().nav_visible;
     ui.set_cursor_pos(inicio);
-    ativou
+    (ativou, focada)
 }
 
 fn texto_na_celula(ui: &Ui, fonte: Option<imgui::FontId>, texto: &str, cor: [f32; 4]) {
@@ -306,9 +499,11 @@ pub fn texto_atratividade(atratividade: u8, clube: Option<&quality::PerfilClube>
     }
 }
 
-/// Tela "Contratar Olheiro": o mercado do mês, cada Olheiro com o custo;
-/// ativar um (com orçamento) abre a Confirmação de Contratação (Story 1.5).
-pub fn render_contratacao(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) -> AcaoContratacao {
+/// Tela "Contratar Olheiro": o mercado da semana, cada Olheiro com o custo,
+/// do mais raro ao mais comum, com uma linha de filtros por continente (um
+/// Olheiro aparece no continente de qualquer um dos mercados dele); ativar
+/// um (com orçamento) abre a Confirmação de Contratação (Story 1.5).
+pub fn render_contratacao(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> AcaoContratacao {
     let mut acao = AcaoContratacao::Nenhuma;
     if componentes::botao(ui, fonts, "Voltar", EstiloBotao::Secundario, true) {
         acao = AcaoContratacao::Voltar;
@@ -327,24 +522,83 @@ pub fn render_contratacao(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState) ->
         ui.text_colored(
             theme::TEXT_SECONDARY,
             format!(
-                "O mercado muda todo mês (próximo em {}): clubes mais atrativos veem mais Olheiros e mais Elites. O custo sai do orçamento de transferências, só depois da confirmação.",
+                "O mercado muda toda semana (próximo em {}): cada continente tem de 3 a 10 Olheiros, mais onde há mais ligas relevantes; clubes mais atrativos veem mais Elites. O custo sai do orçamento de transferências, só depois da confirmação.",
                 formatar_data(mercado.renova_em)
             ),
         );
     });
     ui.dummy([0.0, theme::ESPACO_2]);
+    let filtro = linha_de_filtros(ui, fonts, state, &mercado.ofertas);
+    ui.dummy([0.0, theme::ESPACO_2]);
+
+    let visiveis: Vec<&OfertaOlheiro> =
+        mercado.ofertas.iter().filter(|o| filtro.is_none_or(|c| tem_mercado_em(&o.olheiro, c))).collect();
     if mercado.ofertas.is_empty() {
         com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_MERCADO_VAZIO));
+    } else if visiveis.is_empty() {
+        com_fonte(ui, fonts.map(|f| f.body), || ui.text_colored(theme::TEXT_SECONDARY, MSG_FILTRO_VAZIO));
     }
-    let nacao = |id: u16| state.nome_da_nacao(id);
-    for (indice, oferta) in mercado.ofertas.iter().enumerate() {
-        let revelar = if indice == 0 { Revelar::Topo } else { Revelar::Nada };
-        let detalhe = format!("{} · {}", texto_origem(&oferta.olheiro, &nacao), descricao(oferta.olheiro.especializacao));
-        if card(ui, fonts, &oferta.id.to_string(), Some(&oferta.olheiro), &detalhe, &Lado::Contratar(oferta.clone()), revelar) {
-            acao = AcaoContratacao::Contratar(oferta.clone());
+    com_nacoes(state, |nacoes| {
+        let por_linha = olheiro_card::por_linha(ui.content_region_avail()[0]);
+        for (indice, oferta) in visiveis.iter().enumerate() {
+            if indice % por_linha != 0 {
+                ui.same_line_with_spacing(0.0, theme::ESPACO_3);
+            }
+            let r = olheiro_card::desenhar(ui, fonts, &oferta.id.to_string(), olheiro_card::Dimensao::PADRAO, &oferta.olheiro, nacoes, &Rodape::Oferta(oferta));
+            if r.ativou {
+                acao = AcaoContratacao::Contratar((*oferta).clone());
+            }
+            if indice % por_linha == por_linha - 1 {
+                ui.dummy([0.0, theme::ESPACO_1]);
+            }
+        }
+    });
+    acao
+}
+
+/// "Todos" e um botão por continente que tem Olheiros esta semana, com a
+/// quantidade (escolha única: foco = escolha). Devolve o filtro em vigor.
+fn linha_de_filtros(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, ofertas: &[OfertaOlheiro]) -> Option<Confederacao> {
+    let atual = state.filtro_continente();
+    let mut opcoes: Vec<(Option<Confederacao>, usize)> = vec![(None, ofertas.len())];
+    for c in Confederacao::TODAS {
+        let n = ofertas.iter().filter(|o| tem_mercado_em(&o.olheiro, c)).count();
+        if n > 0 && c != Confederacao::Outras {
+            opcoes.push((Some(c), n));
         }
     }
-    acao
+    // um filtro que sumiu da semana (sem Olheiros) volta para "Todos"
+    let atual = if opcoes.iter().any(|(c, _)| *c == atual) { atual } else { None };
+    let largura = ui.content_region_avail()[0];
+    let mut x = 0.0;
+    let mut escolhido = atual;
+    for (indice, (continente, n)) in opcoes.iter().enumerate() {
+        if indice > 0 {
+            if x + theme::ESPACO_2 + LARGURA_FILTRO <= largura {
+                ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+                x += theme::ESPACO_2;
+            } else {
+                x = 0.0;
+            }
+        }
+        let nome = continente.map_or("Todos", nome_curto);
+        // o id fica só no nome: a contagem muda ao contratar sem perder o foco
+        let rotulo = format!("{nome} · {n}##filtro_{nome}");
+        let estilo = if *continente == atual { EstiloBotao::Selecionado } else { EstiloBotao::Secundario };
+        let clicou = componentes::botao_com_largura(ui, fonts, &rotulo, estilo, true, Some(LARGURA_FILTRO));
+        x += LARGURA_FILTRO;
+        let focado = componentes::focado_pelo_controle(ui);
+        if focado && ui.scroll_y() > 0.0 {
+            ui.set_scroll_y(0.0);
+        }
+        if (clicou || focado) && *continente != atual {
+            escolhido = *continente;
+        }
+    }
+    if escolhido != state.filtro_continente() {
+        state.definir_filtro_continente(escolhido);
+    }
+    escolhido
 }
 
 /// Nome do Olheiro com o badge do Tier ao lado (também usado na
@@ -376,189 +630,6 @@ pub fn estrelas_do_perfil(ui: &Ui, fonts: Option<&Fonts>, dl: &DrawListMut<'_>, 
 pub fn texto_estrelas(perfil: &quality::PerfilOlheiro) -> String {
     let partes: Vec<String> = Especializacao::TODAS.iter().map(|&e| format!("{} {}", e.nome(), perfil.atributo(e).texto())).collect();
     format!("{} · Rede de contatos {} (estrelas de 0 a 5)", partes.join(" · "), perfil.rede.texto())
-}
-
-/// O que vai no lado direito do card.
-enum Lado {
-    Contratar(OfertaOlheiro),
-    Status { status: &'static str, cor: [f32; 4], relatorios: usize },
-    /// A entrada "Contratar Olheiro" no fim da lista.
-    Novo,
-}
-
-/// O que mostrar ACIMA do card quando ele recebe o foco do controle.
-#[derive(Clone, Copy, PartialEq)]
-enum Revelar {
-    /// Só o card (o ImGui já rola para ele).
-    Nada,
-    /// Primeiro card da tela: rola até o topo (título e estado vazio).
-    Topo,
-}
-
-/// Desenha um card como UM item navegável (o card inteiro): mouse e
-/// controle focam o card, e o ImGui rola para mostrá-lo por completo.
-/// `olheiro`: `None` na entrada "Contratar Olheiro". Devolve `true` se o
-/// card foi ativado (clique ou A) — numa oferta, só com orçamento
-/// suficiente. Tudo dentro do card é desenhado pelo draw list (nenhum
-/// outro item), para não haver dois alvos de foco sobrepostos.
-fn card(ui: &Ui, fonts: Option<&Fonts>, chave: &str, olheiro: Option<&Olheiro>, detalhe: &str, lado: &Lado, revelar: Revelar) -> bool {
-    let _id = ui.push_id(chave);
-    let largura = ui.content_region_avail()[0];
-    let min = ui.cursor_screen_pos();
-    let altura = if olheiro.is_some() { ALTURA_CARD } else { 72.0 };
-    let max = [min[0] + largura, min[1] + altura];
-
-    let ativou = ui.invisible_button("##card", [largura, altura]);
-    let hover = ui.is_item_hovered();
-    let focado = ui.is_item_focused() && ui.io().nav_visible;
-    if focado {
-        revelar_acima(ui, revelar);
-    }
-
-    let dl = ui.get_window_draw_list();
-    // Fundo e borda: hover e foco têm a MESMA borda roxa de 2 px (UX-DR19).
-    let (borda, espessura) = if hover || focado {
-        (theme::ACCENT_PRIMARY, super::ESPESSURA_FOCO)
-    } else if matches!(lado, Lado::Status { .. }) {
-        (theme::BORDER_HAIRLINE, 1.0)
-    } else {
-        (theme::BORDER_HAIRLINE_SUBTLE, 1.0)
-    };
-    dl.add_rect(min, max, theme::BG_PANEL_RAISED).filled(true).rounding(theme::RAIO_MD).build();
-    dl.add_rect(min, max, borda).rounding(theme::RAIO_MD).thickness(espessura).build();
-
-    // Avatar com a sigla do foco (ou "+").
-    let a_min = [min[0] + theme::ESPACO_4, min[1] + (altura - LADO_AVATAR) * 0.5];
-    let a_max = [a_min[0] + LADO_AVATAR, a_min[1] + LADO_AVATAR];
-    dl.add_rect(a_min, a_max, [1.0, 1.0, 1.0, 0.05]).filled(true).rounding(theme::RAIO_MD).build();
-    dl.add_rect(a_min, a_max, theme::BORDER_HAIRLINE).rounding(theme::RAIO_MD).build();
-    let (avatar, cor_avatar) = match olheiro {
-        Some(o) => (sigla(o.perfil().foco()), theme::ACCENT_PRIMARY),
-        None => ("+", theme::FIELD_GREEN),
-    };
-    texto_centralizado(ui, fonts.map(|f| f.heading), &dl, avatar, a_min, a_max, cor_avatar);
-
-    // Nome + badge; detalhe; estrelas.
-    let x_texto = a_max[0] + theme::ESPACO_3;
-    let y_nome = min[1] + theme::ESPACO_3;
-    let nome = olheiro.map_or_else(|| ROTULO_CONTRATAR.to_string(), Olheiro::nome_exibicao);
-    let [largura_nome, altura_nome] = com_fonte(ui, fonts.map(|f| f.heading), || {
-        dl.add_text([x_texto, y_nome], theme::TEXT_PRIMARY, &nome);
-        ui.calc_text_size(&nome)
-    });
-    if let Some(o) = olheiro {
-        let badge = desenhar_badge(ui, fonts, &dl, &badge_tier(o.tier), [x_texto + largura_nome + theme::ESPACO_2, y_nome], altura_nome);
-        // foco por extenso ao lado do badge
-        let x_foco = x_texto + largura_nome + theme::ESPACO_2 + badge[0] + theme::ESPACO_2;
-        com_fonte(ui, fonts.map(|f| f.meta), || {
-            let h = ui.text_line_height();
-            dl.add_text([x_foco, y_nome + (altura_nome - h) * 0.5], theme::TEXT_SECONDARY, o.perfil().foco().nome());
-        });
-    }
-    let y_detalhe = y_nome + altura_nome + theme::ESPACO_1;
-    let altura_detalhe = com_fonte(ui, fonts.map(|f| f.meta), || {
-        dl.add_text([x_texto, y_detalhe], theme::TEXT_SECONDARY, detalhe);
-        ui.text_line_height()
-    });
-    if let Some(o) = olheiro {
-        let perfil = o.perfil();
-        estrelas_do_perfil(ui, fonts, &dl, [x_texto, y_detalhe + altura_detalhe + theme::ESPACO_2], &perfil);
-        if hover || focado {
-            ui.tooltip_text(texto_estrelas(&perfil));
-        }
-    }
-
-    // Lado direito.
-    let direita = max[0] - theme::ESPACO_4;
-    match lado {
-        Lado::Contratar(oferta) => {
-            let b_min = [direita - LARGURA_BOTAO, min[1] + (altura - theme::ALVO_MINIMO) * 0.5];
-            let b_max = [direita, b_min[1] + theme::ALVO_MINIMO];
-            custo(ui, fonts, &dl, oferta, b_min[0] - theme::ESPACO_3, min[1]);
-            let habilitado = oferta.faltam.is_none();
-            let (fundo, texto) = if habilitado {
-                (theme::FIELD_GREEN, theme::BG_BASE)
-            } else {
-                (theme::BOTAO_DESABILITADO, theme::TEXT_DISABLED)
-            };
-            dl.add_rect(b_min, b_max, fundo).filled(true).rounding(theme::RAIO_PADRAO).build();
-            texto_centralizado(ui, fonts.map(|f| f.heading), &dl, "Contratar", b_min, b_max, texto);
-            if let (Some(faltam), true) = (oferta.faltam, hover) {
-                ui.tooltip_text(texto_faltam(faltam));
-            }
-            ativou && habilitado
-        }
-        Lado::Status { status: texto, cor, relatorios } => {
-            status(ui, fonts, &dl, texto, *cor, *relatorios, direita, min[1]);
-            ativou
-        }
-        Lado::Novo => ativou,
-    }
-}
-
-/// Com o foco do controle no primeiro card, rola até o topo (o alternador
-/// e o estado vazio, que ficam acima, não são o card). O ImGui sozinho só
-/// garante o próprio card visível.
-fn revelar_acima(ui: &Ui, revelar: Revelar) {
-    if revelar == Revelar::Topo && ui.scroll_y() > 0.0 {
-        ui.set_scroll_y(0.0);
-    }
-}
-
-/// Texto centralizado num retângulo (fonte opcional do tema).
-fn texto_centralizado(
-    ui: &Ui,
-    fonte: Option<imgui::FontId>,
-    dl: &DrawListMut<'_>,
-    texto: &str,
-    r_min: [f32; 2],
-    r_max: [f32; 2],
-    cor: [f32; 4],
-) {
-    com_fonte(ui, fonte, || {
-        let [w, h] = ui.calc_text_size(texto);
-        let pos = [r_min[0] + (r_max[0] - r_min[0] - w) * 0.5, r_min[1] + (r_max[1] - r_min[1] - h) * 0.5];
-        dl.add_text(pos, cor, texto);
-    });
-}
-
-/// "custo" + valor em fonte mono, alinhados à direita de `x_direita`; sem
-/// orçamento, a primeira linha diz quanto falta (vermelho + texto).
-fn custo(ui: &Ui, fonts: Option<&Fonts>, dl: &DrawListMut<'_>, oferta: &OfertaOlheiro, x_direita: f32, y_card: f32) {
-    let valor = formatar_milhar(oferta.custo);
-    let (rotulo, cor_rotulo) = match oferta.faltam {
-        Some(faltam) => (format!("faltam {}", formatar_milhar(faltam)), theme::DANGER),
-        None => ("custo".to_string(), theme::TEXT_SECONDARY),
-    };
-    let y_rotulo = y_card + theme::ESPACO_3;
-    let altura_rotulo = com_fonte(ui, fonts.map(|f| f.meta), || {
-        let [w, h] = ui.calc_text_size(&rotulo);
-        dl.add_text([x_direita - w, y_rotulo], cor_rotulo, &rotulo);
-        h
-    });
-    com_fonte(ui, fonts.and_then(|f| f.mono).or(fonts.map(|f| f.body)), || {
-        let w = ui.calc_text_size(&valor)[0];
-        dl.add_text([x_direita - w, y_rotulo + altura_rotulo + theme::ESPACO_1], theme::TEXT_PRIMARY, &valor);
-    });
-}
-
-/// Ponto + status (cor e texto); e quantos Relatórios ele já entregou,
-/// embaixo.
-#[allow(clippy::too_many_arguments)]
-fn status(ui: &Ui, fonts: Option<&Fonts>, dl: &DrawListMut<'_>, texto: &str, cor: [f32; 4], relatorios: usize, x_direita: f32, y_card: f32) {
-    let y = y_card + theme::ESPACO_3;
-    let h = com_fonte(ui, fonts.map(|f| f.body), || {
-        let [w, h] = ui.calc_text_size(texto);
-        dl.add_text([x_direita - w, y], cor, texto);
-        let centro = [x_direita - w - theme::ESPACO_2 - RAIO_DOT, y + h * 0.5];
-        dl.add_circle(centro, RAIO_DOT, cor).filled(true).build();
-        h
-    });
-    com_fonte(ui, fonts.map(|f| f.meta), || {
-        let texto = texto_relatorios(relatorios);
-        let w = ui.calc_text_size(&texto)[0];
-        dl.add_text([x_direita - w, y + h + theme::ESPACO_1], theme::TEXT_SECONDARY, &texto);
-    });
 }
 
 #[cfg(test)]
@@ -593,7 +664,7 @@ mod tests {
     }
 
     fn contratado(olheiro: Olheiro) -> OlheiroContratado {
-        OlheiroContratado { olheiro, em_missao: false, acompanhando: false, missao: None, relatorio_atual: None, relatorios: 2 }
+        OlheiroContratado { olheiro, em_missao: false, acompanhando: false, missao: None, relatorio_atual: None, relatorios: 2, rescisao: None }
     }
 
     #[test]
@@ -613,16 +684,48 @@ mod tests {
     }
 
     #[test]
-    fn origin_line_names_the_nation_and_the_markets() {
+    fn an_olheiro_belongs_to_every_continent_where_he_has_a_market() {
+        let olheiro = Olheiro {
+            mercados: vec![
+                Mercado::Pais { id: 54, continente: Confederacao::AmericaDoSul },
+                Mercado::Pais { id: 155, continente: Confederacao::Asia },
+                Mercado::Continente(Confederacao::Africa),
+            ],
+            ..Default::default()
+        };
+        assert!(tem_mercado_em(&olheiro, Confederacao::AmericaDoSul));
+        assert!(tem_mercado_em(&olheiro, Confederacao::Asia), "um país do continente basta");
+        assert!(tem_mercado_em(&olheiro, Confederacao::Africa), "o continente inteiro também");
+        assert!(!tem_mercado_em(&olheiro, Confederacao::Europa));
+        assert!(!tem_mercado_em(&Olheiro::default(), Confederacao::Europa));
+        for c in Confederacao::TODAS {
+            assert!(nome_curto(c).chars().count() <= 14, "{}", nome_curto(c));
+        }
+    }
+
+    #[test]
+    fn the_origin_chips_carry_the_flags_of_the_nation_and_the_country_markets() {
         let olheiro = Olheiro {
             nacao: Some(NacaoOlheiro { id: 54, nome: "Brasil".to_string(), continente: Confederacao::AmericaDoSul }),
             mercados: vec![Mercado::Pais { id: 54, continente: Confederacao::AmericaDoSul }, Mercado::Continente(Confederacao::AmericaDoSul)],
             ..Default::default()
         };
-        let nacao = |id: u16| (id == 54).then(|| "Brasil".to_string());
-        assert_eq!(texto_origem(&olheiro, &nacao), "Brasil · mercados: Brasil, América do Sul");
-        let antigo = Olheiro::default();
-        assert!(texto_origem(&antigo, &nacao).contains("antes das estrelas"));
+        let nome = |id: u16| (id == 54).then(|| "Brasil".to_string());
+        let bandeira = |_: u16| Rosto::Ausente;
+        let nacoes = Nacoes { nome: &nome, bandeira: &bandeira };
+        let chips = chips_do_olheiro(&olheiro, &nacoes, true);
+        let textos: Vec<&str> = chips.iter().map(|c| c.texto.as_str()).collect();
+        assert_eq!(textos, ["Brasil", "Mercados:", "Brasil", "América do Sul (todo o continente)"]);
+        assert!(chips[0].bandeira.is_some() && chips[2].bandeira.is_some(), "país: com bandeira");
+        assert!(chips[1].bandeira.is_none() && chips[3].bandeira.is_none(), "rótulo e continente: sem");
+        assert_eq!(chips_do_olheiro(&olheiro, &nacoes, false).len(), 3, "sem a nação");
+        let antigo = chips_do_olheiro(&Olheiro::default(), &nacoes, true);
+        assert_eq!(antigo.len(), 1);
+        assert!(antigo[0].texto.contains("todos os mercados"));
+    }
+
+    #[test]
+    fn the_attractiveness_and_stars_texts_read_naturally() {
         let clube = quality::PerfilClube {
             prestigio_nacional: 20,
             prestigio_internacional: 20,

@@ -45,7 +45,7 @@ use crate::fifa_db::{self, TableDescriptor};
 use crate::memscan::{self, Region};
 
 pub use jogadores::{
-    funcao_da_posicao, ler_miniface, nome_posicao, read_all_players, read_nations, read_squad_players, Atributo, Confederacao,
+    funcao_da_posicao, ler_bandeira, ler_miniface, nome_posicao, read_all_players, read_nations, read_squad_players, Atributo, Confederacao,
     Funcao, Liga, Nacao, Pe, PlayerPool, PlayerRaw, RitmoTrabalho, read_leagues, read_club_profile, DadosDoClube,
 };
 

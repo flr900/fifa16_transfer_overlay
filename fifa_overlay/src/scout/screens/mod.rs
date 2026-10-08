@@ -7,14 +7,18 @@
 
 mod acompanhamento;
 pub mod aviso;
+mod base_scout;
 mod componentes;
 mod confirmacao_contratacao;
+mod demissao;
 mod escolher_olheiro;
 mod missoes;
 mod campo_atributo;
-mod campo_fit;
-mod cartograma;
 mod escolhidos;
+mod configuracoes;
+mod lista_jogadores;
+mod olheiro_card;
+mod opcoes_olheiro;
 mod ficha_jogador;
 mod nova_missao;
 mod olheiros;
@@ -23,7 +27,6 @@ mod relatorio;
 mod relatorios;
 mod selecao_geografica;
 mod seletor_elenco;
-mod sonar;
 pub mod theme;
 
 use imgui::{Condition, FontId, StyleColor, StyleVar, Ui, WindowFlags};
@@ -82,7 +85,18 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
     }
     // LB/RB (ou clique numa aba) com a Nova Missão aberta: aviso por cima.
     let trocando = state.troca_de_aba_pendente();
-    let modal = confirmando || trocando.is_some();
+    // o Olheiro do aviso de demissão pode ter sumido (ou entrado em Missão)
+    let demitindo = state.demissao_pendente().is_some();
+    if !demitindo {
+        state.cancelar_demissao();
+    }
+    let filtrando = state.painel_de_filtros().is_some();
+    let com_opcoes = state.opcoes_do_olheiro().is_some();
+    if !com_opcoes {
+        state.fechar_opcoes_do_olheiro();
+    }
+    let configurando = state.configuracoes_abertas();
+    let modal = confirmando || trocando.is_some() || demitindo || filtrando || com_opcoes || configurando;
     let mut pedido = None;
 
     ui.window("Central de Scout##painel")
@@ -179,6 +193,23 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
             nav.push(satelite);
         }
         Some(Pedido::FecharCampo) => nav.pop(),
+        Some(Pedido::OpcoesDoOlheiro(id)) => state.abrir_opcoes_do_olheiro(id),
+        Some(Pedido::AbrirJogadorDoRelatorio(relatorio, player_id)) => {
+            state.abrir_relatorio(relatorio);
+            if state.relatorio_aberto().is_some() {
+                nav.push(Satelite::Relatorio);
+                state.abrir_ficha(player_id);
+                if state.ficha_aberta().is_some() {
+                    nav.push(Satelite::FichaJogador);
+                }
+            }
+        }
+        Some(Pedido::AbrirFichaDaBase(player_id)) => {
+            state.abrir_ficha_da_base(player_id);
+            if state.ficha_aberta().is_some() {
+                nav.push(Satelite::FichaJogador);
+            }
+        }
         Some(Pedido::AbrirRelatorio(id)) => {
             state.abrir_relatorio(id);
             if state.relatorio_aberto().is_some() {
@@ -219,6 +250,53 @@ pub fn render_painel(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state
                 nav.pedir_foco();
             }
             None => {}
+        }
+    }
+    if state.configuracoes_abertas() && configuracoes::render(ui, fonts, state) == configuracoes::Acao::Fechar {
+        state.fechar_configuracoes();
+        nav.pedir_foco();
+    }
+    if state.opcoes_do_olheiro().is_some() {
+        match opcoes_olheiro::render(ui, fonts, state) {
+            opcoes_olheiro::Acao::Nenhuma => {}
+            opcoes_olheiro::Acao::Fechar => {
+                state.fechar_opcoes_do_olheiro();
+                nav.pedir_foco();
+            }
+            opcoes_olheiro::Acao::NovaMissao(id) | opcoes_olheiro::Acao::MudarRegiao(id) => {
+                state.fechar_opcoes_do_olheiro();
+                state.abrir_nova_missao(id);
+                if state.tem_nova_missao() {
+                    nav.push(Satelite::NovaMissao);
+                }
+            }
+            opcoes_olheiro::Acao::AjustarPerfil(id) => {
+                state.fechar_opcoes_do_olheiro();
+                state.abrir_ajuste_de_perfil(id);
+                if state.tem_nova_missao() {
+                    nav.push(Satelite::NovaMissao);
+                }
+            }
+            opcoes_olheiro::Acao::Demitir(id) => {
+                state.fechar_opcoes_do_olheiro();
+                state.pedir_demissao(id);
+            }
+        }
+    }
+    if let Some(lista) = state.painel_de_filtros() {
+        if lista_jogadores::painel_de_filtros(ui, fonts, state, lista) == lista_jogadores::AcaoPainel::Fechar {
+            state.fechar_painel_de_filtros();
+            nav.pedir_foco();
+        }
+    }
+    if state.demissao_pendente().is_some() {
+        match demissao::render(ui, fonts, state) {
+            demissao::Acao::Nenhuma => {}
+            demissao::Acao::Demitiu => nav.pedir_foco(),
+            demissao::Acao::Cancelou => {
+                state.cancelar_demissao();
+                nav.pedir_foco();
+            }
         }
     }
     if confirmando {
@@ -395,6 +473,20 @@ fn botoes_das_abas(ui: &Ui, fonts: Option<&Fonts>, nav: &mut Navigation, state: 
             }
         }
     });
+    // Configurações à direita (o controle abre com o Select)
+    let rotulo = "Configurações · Select";
+    let largura = com_fonte(ui, fonts.map(|f| f.meta), || ui.calc_text_size(rotulo)[0]) + theme::ESPACO_4 * 2.0;
+    let direita = ui.cursor_start_pos()[0] + ui.content_region_avail()[0];
+    ui.same_line_with_pos(direita - largura);
+    com_fonte(ui, fonts.map(|f| f.meta), || {
+        let _c1 = ui.push_style_color(StyleColor::Button, theme::TRANSPARENTE);
+        let _c2 = ui.push_style_color(StyleColor::ButtonHovered, theme::ACCENT_PRIMARY_DIM);
+        let _c3 = ui.push_style_color(StyleColor::Text, theme::TEXT_SECONDARY);
+        let _raio = ui.push_style_var(StyleVar::FrameRounding(theme::RAIO_MD));
+        if ui.button_with_size(format!("{rotulo}##configuracoes"), [largura, theme::ALVO_MINIMO + theme::ESPACO_1]) {
+            state.abrir_configuracoes();
+        }
+    });
 }
 
 /// Área de conteúdo: um child window por aba, para cada aba guardar o
@@ -429,6 +521,14 @@ enum Pedido {
     /// Escolheu (ou voltou) no painel de campo ou no seletor: volta à tela
     /// de baixo.
     FecharCampo,
+    /// As Opções (Y) de um Olheiro contratado.
+    OpcoesDoOlheiro(uuid::Uuid),
+    /// Abre o Relatório de origem de um jogador e, por cima, a Ficha dele
+    /// (aba Relatórios por jogador, Base do Scout).
+    AbrirJogadorDoRelatorio(uuid::Uuid, u32),
+    /// Ficha de um jogador da Base do Scout sem Relatório (ex-jogador do
+    /// clube, lista do jogo).
+    AbrirFichaDaBase(u32),
 }
 
 fn conteudo(ui: &Ui, fonts: Option<&Fonts>, aba: Aba, tela: ScoutScreen, state: &mut ScoutState, focar: bool) -> Option<Pedido> {
@@ -512,11 +612,6 @@ fn conteudo_da_tela(
                 *pedido = Some(Pedido::FecharCampo);
             }
         }
-        CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::CampoFit) => {
-            if campo_fit::render(ui, fonts, state, focar) {
-                *pedido = Some(Pedido::FecharCampo);
-            }
-        }
         CarreiraStatus::Pronta(_) if tela == ScoutScreen::Satelite(Satelite::Relatorio) => match relatorio::render(ui, fonts, state) {
             relatorio::Acao::Voltar => *pedido = Some(Pedido::FecharRelatorio),
             relatorio::Acao::AbrirFicha(player_id) => *pedido = Some(Pedido::AbrirFicha(player_id)),
@@ -550,25 +645,35 @@ fn conteudo_da_tela(
                 *pedido = match olheiros::render(ui, fonts, state) {
                     olheiros::Acao::AbrirContratacao => Some(Pedido::AbrirContratacao),
                     olheiros::Acao::Ativar(id) => Some(Pedido::AtivarOlheiro(id)),
+                    olheiros::Acao::Opcoes(id) => Some(Pedido::OpcoesDoOlheiro(id)),
                     olheiros::Acao::Nenhuma => None,
                 };
             }
             Aba::Missoes => match missoes::render(ui, fonts, state, true) {
                 missoes::Acao::NovaMissao => *pedido = Some(Pedido::EscolherOlheiro),
                 missoes::Acao::AbrirRelatorio(id) => *pedido = Some(Pedido::AbrirRelatorio(id)),
+                missoes::Acao::Opcoes(olheiro) => *pedido = Some(Pedido::OpcoesDoOlheiro(olheiro)),
                 missoes::Acao::Nenhuma => {}
             },
-            Aba::Relatorios => {
-                if let Some(id) = relatorios::render(ui, fonts, state) {
-                    *pedido = Some(Pedido::AbrirRelatorio(id));
-                }
-            }
+            Aba::Relatorios => match relatorios::render(ui, fonts, state) {
+                relatorios::Acao::AbrirRelatorio(id) => *pedido = Some(Pedido::AbrirRelatorio(id)),
+                relatorios::Acao::Nenhuma => {}
+            },
             Aba::Escolhidos => match escolhidos::render(ui, fonts, state) {
                 escolhidos::Acao::GerenciarAcompanhamento => *pedido = Some(Pedido::AbrirCampo(Satelite::AcompanhamentoOlheiros)),
                 escolhidos::Acao::AbrirFicha(player_id) => *pedido = Some(Pedido::AbrirFichaDeEscolhido(player_id)),
                 escolhidos::Acao::Nenhuma => {}
             },
-            Aba::Sonar => sonar::render(ui, fonts, state),
+            Aba::Base => {
+                if let Some((relatorio, player_id)) = base_scout::render(ui, fonts, state) {
+                    // sem Relatório (ex-jogador do clube, lista do jogo): só a Ficha
+                    *pedido = Some(if relatorio.is_nil() {
+                        Pedido::AbrirFichaDaBase(player_id)
+                    } else {
+                        Pedido::AbrirJogadorDoRelatorio(relatorio, player_id)
+                    });
+                }
+            }
         },
     }
 }

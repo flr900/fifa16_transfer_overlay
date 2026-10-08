@@ -214,12 +214,17 @@ mod tests {
             pe: None,
             similaridade: None,
             fit: None,
+            fit_alvo: None,
             variacao_overall: None,
             ritmo_ataque: None,
             ritmo_defesa: None,
             estrelas_drible: None,
             pe_fraco: None,
             titular_elenco: None,
+            altura: None,
+            da_base: false,
+            dias_de_curadoria: 0,
+            visto_em: None,
             falso_positivo: false,
         }
     }

@@ -53,13 +53,12 @@ pub const GRUPOS: [(&str, &[Atributo]); 7] = [
 ];
 
 /// Explicação no topo do painel.
-pub fn explicacao() -> String {
+pub fn explicacao(maximo: usize) -> String {
+    let tres = if maximo >= 3 { format!("; três: top {}", quality::top_para(3)) } else { String::new() };
     format!(
-        "Escolha até {}. O Olheiro só traz jogadores que têm todos eles entre os maiores atributos (um: top {}; dois: top {}; três: top {}) e os observa primeiro. A Missão vira Tática.",
-        quality::MAX_DOMINANTES,
+        "Escolha até {maximo}. O Olheiro só traz jogadores que têm todos eles entre os maiores atributos (um: top {}; dois: top {}{tres}) e os observa primeiro. A Missão vira Tática.",
         quality::top_para(1),
         quality::top_para(2),
-        quality::top_para(3)
     )
 }
 
@@ -78,7 +77,8 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, focar: boo
         return true;
     };
     let atuais = previa.rascunho.filtros.atributos_dominantes.clone();
-    let cheio = atuais.len() >= quality::MAX_DOMINANTES;
+    let maximo = state.max_dominantes();
+    let cheio = atuais.len() >= maximo;
     let mut voltar = false;
     let mut escolha: Option<Escolha> = None;
 
@@ -91,7 +91,7 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState, focar: boo
         }
         ui.same_line_with_spacing(0.0, theme::ESPACO_4);
         com_fonte(ui, fonts.map(|f| f.heading), || ui.text("Atributos dominantes"));
-        com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, explicacao()));
+        com_fonte(ui, fonts.map(|f| f.meta), || ui.text_colored(theme::TEXT_SECONDARY, explicacao(maximo)));
         ui.dummy([0.0, theme::ESPACO_2]);
         if focar && atuais.is_empty() {
             unsafe { imgui::sys::igSetKeyboardFocusHere(0) };

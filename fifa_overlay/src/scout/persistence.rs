@@ -27,13 +27,14 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::state::{Escolhido, Missao, Olheiro, Relatorio};
+use super::state::{Escolhido, JogadorEncontrado, JogadorMapeado, Missao, Olheiro, Relatorio};
 use super::Aba;
 
 /// Versão do formato do arquivo. Um arquivo com versão MAIOR foi gravado
@@ -76,6 +77,21 @@ pub struct ScoutStateFile {
     /// `(período, atratividade)`.
     #[serde(default)]
     pub mercado_do_mes: Option<(u32, u8)>,
+    /// O elenco do clube na última leitura, uma foto exata de cada jogador
+    /// (2026-10-08). Quem sair dele vira um registro da Base do Scout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elenco: Vec<JogadorEncontrado>,
+    /// O clube (`teamid`) a que `elenco` se refere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elenco_clube: Option<i64>,
+    /// Jogadores da Base do Scout que não vieram de um Relatório: ex-jogadores
+    /// do clube e os da lista de escolhidos do jogo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mapeados: Vec<JogadorMapeado>,
+    /// Jogadores que o técnico tirou dos Escolhidos: a lista do jogo não os
+    /// traz de volta.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub importacao_ignorada: Vec<u32>,
     /// Preferência de UI inválida (ex. aba que não existe mais) não pode
     /// custar os Olheiros: só esta seção volta ao padrão.
     #[serde(default, deserialize_with = "ou_padrao")]
@@ -94,6 +110,10 @@ impl Default for ScoutStateFile {
             nivel_original: std::collections::BTreeMap::new(),
             valores_do_jogo: std::collections::BTreeMap::new(),
             mercado_do_mes: None,
+            elenco: Vec::new(),
+            elenco_clube: None,
+            mapeados: Vec::new(),
+            importacao_ignorada: Vec::new(),
             ui_prefs: UiPrefs::default(),
         }
     }
@@ -112,6 +132,14 @@ pub struct UiPrefs {
     pub densidade: Densidade,
     /// Visão da aba Olheiros (2026-10-03); Cards por padrão.
     pub densidade_olheiros: Densidade,
+    /// Visão de cada lista de jogadores (2026-10-08): Cards, ou Tabular para
+    /// ordenar. Só a Base do Scout, que cresce sem parar, abre em Tabular.
+    pub modo_escolhidos: Densidade,
+    pub modo_base: Densidade,
+    pub modo_relatorio_aberto: Densidade,
+    /// A aba Relatórios: um card por Relatório (padrão) ou agrupados por
+    /// Olheiro (2026-10-08).
+    pub visao_relatorios: VisaoRelatorios,
     /// Épico 7: "Sincronizar com o FIFA". Ligado por padrão (decisão de
     /// 2026-10-06); só vai para o arquivo quando desligado.
     #[serde(skip_serializing_if = "e_verdadeiro")]
@@ -128,6 +156,10 @@ impl Default for UiPrefs {
             aba_ativa: Aba::Olheiros,
             densidade: Densidade::Tabular,
             densidade_olheiros: Densidade::Cards,
+            modo_escolhidos: Densidade::Cards,
+            modo_base: Densidade::Tabular,
+            modo_relatorio_aberto: Densidade::Cards,
+            visao_relatorios: VisaoRelatorios::PorRelatorio,
             sincronizar_com_o_jogo: true,
         }
     }
@@ -140,6 +172,18 @@ pub enum Densidade {
     #[default]
     Tabular,
     Cards,
+}
+
+/// A aba Relatórios: a lista dos Relatórios ou os Relatórios de cada
+/// Olheiro. No JSON: `"por_relatorio"` / `"por_olheiro"` (o `"por_jogador"`
+/// de antes, que virou a aba Base do Scout, volta ao padrão).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisaoRelatorios {
+    #[default]
+    #[serde(alias = "por_jogador")]
+    PorRelatorio,
+    PorOlheiro,
 }
 
 /// Desserializa `T`; se o valor não servir, usa `T::default()` e avisa.
@@ -177,9 +221,21 @@ pub struct EstadoPersistido {
     dados: Arc<Mutex<ScoutStateFile>>,
     /// `None` = somente leitura (ver `ErroPersistencia::SomenteLeitura`).
     caminho: Option<PathBuf>,
+    /// Sobe a cada mutação gravada: quem guarda algo derivado dos dados
+    /// (a Base do Scout) sabe quando refazer.
+    geracao: Arc<AtomicU64>,
 }
 
 impl EstadoPersistido {
+    fn montar(dados: ScoutStateFile, caminho: Option<PathBuf>) -> Self {
+        EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho, geracao: Arc::new(AtomicU64::new(0)) }
+    }
+
+    /// Quantas mutações já foram gravadas neste estado (só cresce).
+    pub fn geracao(&self) -> u64 {
+        self.geracao.load(Ordering::Relaxed)
+    }
+
     /// Carrega (ou cria) o arquivo de `id_save` em `diretorio`. Nunca
     /// falha: no pior caso devolve um estado vazio somente leitura.
     pub fn carregar(diretorio: Option<&Path>, id_save: &str) -> Self {
@@ -232,7 +288,7 @@ impl EstadoPersistido {
                     VERSAO_FORMATO
                 );
                 dados.versao = VERSAO_FORMATO;
-                EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: Some(caminho) }
+                EstadoPersistido::montar(dados, Some(caminho))
             }
             Ok(dados) if dados.versao > VERSAO_FORMATO => {
                 tracing::warn!(
@@ -251,7 +307,7 @@ impl EstadoPersistido {
                     dados.missoes.len(),
                     dados.relatorios.len()
                 );
-                EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: Some(caminho) }
+                EstadoPersistido::montar(dados, Some(caminho))
             }
             Err(err) => {
                 tracing::warn!("[scout::persistence] Arquivo de estado corrompido ({err}): {}", caminho.display());
@@ -272,7 +328,7 @@ impl EstadoPersistido {
     }
 
     fn somente_leitura(dados: ScoutStateFile) -> Self {
-        EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: None }
+        EstadoPersistido::montar(dados, None)
     }
 
     /// Estado vazio já gravado em disco (o arquivo existe a partir do
@@ -282,7 +338,7 @@ impl EstadoPersistido {
         if let Err(err) = gravar(&caminho, &dados) {
             tracing::warn!("[scout::persistence] Falha ao criar {}: {err:?}", caminho.display());
         }
-        EstadoPersistido { dados: Arc::new(Mutex::new(dados)), caminho: Some(caminho) }
+        EstadoPersistido::montar(dados, Some(caminho))
     }
 
     /// Aceita mutações (há um arquivo em disco por trás).
@@ -311,6 +367,7 @@ impl EstadoPersistido {
         let resultado = f(&mut novo);
         gravar(caminho, &novo)?;
         *guarda = novo;
+        self.geracao.fetch_add(1, Ordering::Relaxed);
         Ok(resultado)
     }
 }
@@ -416,22 +473,38 @@ pub(crate) mod tests {
                 "escolhidos": [],
                 "ofertas_contratadas": [],
                 "mercado_do_mes": null,
-                "ui_prefs": { "aba_ativa": "olheiros", "densidade": "tabular", "densidade_olheiros": "cards" }
+                "ui_prefs": {
+                    "aba_ativa": "olheiros",
+                    "densidade": "tabular",
+                    "densidade_olheiros": "cards",
+                    "modo_escolhidos": "cards",
+                    "modo_base": "tabular",
+                    "modo_relatorio_aberto": "cards",
+                    "visao_relatorios": "por_relatorio"
+                }
             })
         );
+    }
+
+    #[test]
+    fn the_old_per_player_view_of_the_reports_tab_falls_back_to_the_report_list() {
+        let antigo: UiPrefs = serde_json::from_str(r#"{"visao_relatorios":"por_jogador","modo_relatorios":"cards"}"#).expect("lê");
+        assert_eq!(antigo.visao_relatorios, VisaoRelatorios::PorRelatorio);
+        let novo: UiPrefs = serde_json::from_str(r#"{"visao_relatorios":"por_olheiro"}"#).expect("lê");
+        assert_eq!(novo.visao_relatorios, VisaoRelatorios::PorOlheiro);
     }
 
     #[test]
     fn mutation_writes_the_whole_file_and_survives_a_reload() {
         let pasta = PastaTemporaria::nova();
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        estado.mutar(|d| d.ui_prefs.aba_ativa = Aba::Sonar).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(json_do_arquivo(&pasta, ID_A)["ui_prefs"]["aba_ativa"], "sonar");
+        estado.mutar(|d| d.ui_prefs.aba_ativa = Aba::Base).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(json_do_arquivo(&pasta, ID_A)["ui_prefs"]["aba_ativa"], "base");
         assert_eq!(pasta.arquivos(), [format!("{ID_A}.json")], "sem .tmp sobrando");
 
         // "reiniciar o jogo": novo carregamento do mesmo arquivo
         let recarregado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        assert_eq!(recarregado.ler(|d| d.ui_prefs.aba_ativa), Aba::Sonar);
+        assert_eq!(recarregado.ler(|d| d.ui_prefs.aba_ativa), Aba::Base);
     }
 
     #[test]
@@ -559,13 +632,13 @@ pub(crate) mod tests {
     #[test]
     fn newer_format_is_read_but_never_overwritten() {
         let pasta = PastaTemporaria::nova();
-        let conteudo = r#"{"versao": 3, "ui_prefs": {"aba_ativa": "sonar"}, "campo_novo": 1}"#;
+        let conteudo = r#"{"versao": 3, "ui_prefs": {"aba_ativa": "base"}, "campo_novo": 1}"#;
         let _ = fs::write(pasta.0.join(format!("{ID_A}.json")), conteudo);
 
         let estado = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
-        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Sonar);
+        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Base);
         assert_eq!(estado.mutar(|d| d.ui_prefs.aba_ativa = Aba::Missoes), Err(ErroPersistencia::SomenteLeitura));
-        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Sonar, "memória não mudou");
+        assert_eq!(estado.ler(|d| d.ui_prefs.aba_ativa), Aba::Base, "memória não mudou");
         assert_eq!(fs::read_to_string(pasta.0.join(format!("{ID_A}.json"))).unwrap_or_default(), conteudo);
     }
 
@@ -574,10 +647,10 @@ pub(crate) mod tests {
         let pasta = PastaTemporaria::nova();
         let a = EstadoPersistido::carregar(Some(&pasta.0), ID_A);
         let b = EstadoPersistido::carregar(Some(&pasta.0), ID_B);
-        a.mutar(|d| d.ui_prefs.aba_ativa = Aba::Sonar).unwrap_or_else(|e| panic!("{e:?}"));
+        a.mutar(|d| d.ui_prefs.aba_ativa = Aba::Base).unwrap_or_else(|e| panic!("{e:?}"));
         b.mutar(|d| d.ui_prefs.aba_ativa = Aba::Relatorios).unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert_eq!(json_do_arquivo(&pasta, ID_A)["ui_prefs"]["aba_ativa"], "sonar");
+        assert_eq!(json_do_arquivo(&pasta, ID_A)["ui_prefs"]["aba_ativa"], "base");
         assert_eq!(json_do_arquivo(&pasta, ID_B)["ui_prefs"]["aba_ativa"], "relatorios");
     }
 

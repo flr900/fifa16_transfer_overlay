@@ -85,6 +85,67 @@ fn blocos(
     Some(Imagem { largura, altura, rgba })
 }
 
+// ---------------------------------------------------------------------
+// Bandeiras (2026-10-05)
+// ---------------------------------------------------------------------
+//
+// `data/ui/artassets/countryflags/f_<nationid>.big` (o `nationid` é o do
+// save): um contêiner `BIGF` da EA com cabeçalho de tamanho variável e, nos
+// últimos 64 KB, uma textura DXT5 de 256×256 sem mipmaps. A bandeira ocupa
+// um retângulo no canto, com brilho e sombra em volta (o resto é lixo do
+// atlas). Recortamos o miolo e reduzimos na CPU para um ícone pequeno, que
+// não treme ao ser desenhado menor ainda na tela.
+
+const LADO_TEXTURA_BANDEIRA: usize = 256;
+const BYTES_TEXTURA_BANDEIRA: usize = LADO_TEXTURA_BANDEIRA * LADO_TEXTURA_BANDEIRA;
+/// O miolo da bandeira dentro da textura: (x, y, largura, altura).
+const RECORTE_BANDEIRA: (usize, usize, usize, usize) = (4, 64, 202, 128);
+/// Tamanho do ícone entregue à tela.
+pub const LARGURA_BANDEIRA: u32 = 48;
+pub const ALTURA_BANDEIRA: u32 = 30;
+
+/// A bandeira de um arquivo `f_<id>.big`, como ícone `LARGURA_BANDEIRA` ×
+/// `ALTURA_BANDEIRA`. `None` se não é um `BIGF` com a textura esperada.
+pub fn bandeira_do_big(dados: &[u8]) -> Option<Imagem> {
+    if dados.get(..4)? != b"BIGF" || dados.len() < BYTES_TEXTURA_BANDEIRA + 16 {
+        return None;
+    }
+    let textura = dados.get(dados.len() - BYTES_TEXTURA_BANDEIRA..)?;
+    let lado = LADO_TEXTURA_BANDEIRA as u32;
+    let inteira = blocos(textura, lado, lado, 16, bloco_dxt5)?;
+    let (rx, ry, rl, ra) = RECORTE_BANDEIRA;
+    let mut recorte = Vec::with_capacity(rl * ra * 4);
+    for y in ry..ry + ra {
+        let inicio = (y * LADO_TEXTURA_BANDEIRA + rx) * 4;
+        recorte.extend_from_slice(inteira.rgba.get(inicio..inicio + rl * 4)?);
+    }
+    Some(reduzir(&Imagem { largura: rl as u32, altura: ra as u32, rgba: recorte }, LARGURA_BANDEIRA, ALTURA_BANDEIRA))
+}
+
+/// Reduz por média de caixa (cada pixel novo é a média dos que cobre).
+fn reduzir(origem: &Imagem, largura: u32, altura: u32) -> Imagem {
+    let (ow, oh) = (origem.largura as usize, origem.altura as usize);
+    let (w, h) = (largura as usize, altura as usize);
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for j in 0..h {
+        let (y0, y1) = (j * oh / h, ((j + 1) * oh / h).max(j * oh / h + 1).min(oh));
+        for i in 0..w {
+            let (x0, x1) = (i * ow / w, ((i + 1) * ow / w).max(i * ow / w + 1).min(ow));
+            let mut soma = [0u32; 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    for (c, s) in soma.iter_mut().enumerate() {
+                        *s += u32::from(origem.rgba[(y * ow + x) * 4 + c]);
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            rgba.extend(soma.iter().map(|s| (s / n.max(1)) as u8));
+        }
+    }
+    Imagem { largura, altura, rgba }
+}
+
 fn rgb565(valor: u16) -> [u8; 3] {
     let r = ((valor >> 11) & 0x1f) as u32;
     let g = ((valor >> 5) & 0x3f) as u32;
@@ -195,6 +256,36 @@ mod tests {
         assert_eq!(decodificar(&cabecalho(4, 4, b"DXT5")), None, "sem dados");
         assert_eq!(decodificar(&cabecalho(0, 4, b"DXT5")), None);
         assert_eq!(decodificar(&cabecalho(100_000, 4, b"DXT5")), None);
+    }
+
+    #[test]
+    fn a_flag_file_is_cropped_and_shrunk_to_an_icon() {
+        // BIGF + cabeçalho qualquer + textura DXT5 toda vermelha e opaca
+        let mut d = b"BIGF".to_vec();
+        d.extend_from_slice(&[0u8; 300]);
+        for _ in 0..BYTES_TEXTURA_BANDEIRA / 16 {
+            d.extend_from_slice(&[255, 255, 0, 0, 0, 0, 0, 0, 0x00, 0xF8, 0x00, 0x00, 0, 0, 0, 0]);
+        }
+        let img = bandeira_do_big(&d).expect("bandeira");
+        assert_eq!((img.largura, img.altura), (LARGURA_BANDEIRA, ALTURA_BANDEIRA));
+        assert!(img.rgba.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 255]));
+        assert_eq!(bandeira_do_big(b"BIG4 outro formato"), None);
+        let mut curto = b"BIGF".to_vec();
+        curto.extend_from_slice(&[0u8; 1000]);
+        assert_eq!(bandeira_do_big(&curto), None, "sem a textura inteira");
+    }
+
+    #[test]
+    fn a_real_flag_from_the_game_decodes() {
+        let caminho = crate::save_repo::jogadores::pasta_do_jogo().join("data/ui/artassets/countryflags/f_54.big");
+        let Ok(dados) = std::fs::read(&caminho) else {
+            eprintln!("bandeiras do FIFA 16 não instaladas; teste pulado");
+            return;
+        };
+        let img = bandeira_do_big(&dados).expect("bandeira do Brasil");
+        // o Brasil é verde por fora: perto do canto de cima à esquerda é verde
+        let canto = &img.rgba[(3 * LARGURA_BANDEIRA as usize + 3) * 4..][..4];
+        assert!(canto[1] > canto[0] && canto[1] > canto[2] && canto[3] == 255, "{canto:?}");
     }
 
     #[test]
