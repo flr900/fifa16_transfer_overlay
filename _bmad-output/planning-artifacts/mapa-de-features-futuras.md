@@ -20,6 +20,8 @@
 
 ## 2. Branches com trabalho fora do `main`
 
+> **Resolvido em 2026-10-08:** `nitidez-fontes` foi mesclada no `main` (PR #22, build `7.6-v24`) e `relatorio-ficha` foi descartada (fica a Ficha atual do `main`). Falta só remover a branch antiga `claude/nitidez-fontes` e o worktree `agent-ae03c6952f847100f`. A tabela abaixo é o registro do que havia.
+
 | Branch | Conteúdo | Observação |
 |---|---|---|
 | `claude/nitidez-fontes` | Texto mais nítido com autohinting do FreeType (build `2.2-v5`) | Não entrou no `main`; o `theme.rs` ainda cita o FreeType como "próximo passo". |
@@ -41,6 +43,8 @@ Lista anterior ao Scout; parte está obsoleta.
 
 ## 4. Documentação defasada
 
+> **Resolvido em 2026-10-08:** `sprint-status.yaml`, `epics.md` e PRD foram atualizados (histórias em `done`, 7.5 registrada, 7.7 em backlog, Sonar removido, mercado semanal, demissão, seção "Delivered outside the story flow"). O texto abaixo é o diagnóstico original.
+
 - **`sprint-status.yaml`**: ~25 histórias em `review` que nunca foram para `done`; 7-5 e 7-7 ausentes; retrospectivas `optional`.
 - **No `main`, mas sem registro no BMAD**: Base do Scout, tela de Configurações, carrossel de Olheiros, bandeiras, mercado semanal, renovação automática de contrato com multa de rescisão, instalador, ordenação de tabela por gamepad.
 - **Contradizem o `main`**:
@@ -50,6 +54,6 @@ Lista anterior ao Scout; parte está obsoleta.
 
 ## 5. Ordem sugerida
 
-1. **Fechar a contabilidade**: formalizar a 7.5, mover as histórias de `review` para `done`, atualizar `epics.md` e PRD.
-2. **Decidir as branches**: `nitidez-fontes` (mesclar?) e `relatorio-ficha` (Ficha/Tabular: portar ou descartar?).
+1. ~~**Fechar a contabilidade**~~ (feito em 2026-10-08): formalizar a 7.5, mover as histórias de `review` para `done`, atualizar `epics.md` e PRD.
+2. ~~**Decidir as branches**~~ (feito em 2026-10-08): `nitidez-fontes` (mesclar?) e `relatorio-ficha` (Ficha/Tabular: portar ou descartar?).
 3. **Escolher a próxima feature de produto**: núcleo de olheiros detalhistas (v2), limite de slots ou e-mail nativo.
