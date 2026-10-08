@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v20 — Ordenar a tabela com D-pad e X";
+const BUILD_TAG: &str = "7.6-v21 — Foco na primeira linha depois de ordenar";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.
