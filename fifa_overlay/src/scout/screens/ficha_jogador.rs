@@ -123,6 +123,13 @@ pub fn render(ui: &Ui, fonts: Option<&Fonts>, state: &mut ScoutState) -> Acao {
                 state.alternar_prioridade_escolhido(pid);
             }
             ui.same_line_with_spacing(0.0, theme::ESPACO_2);
+            // Aprofundar agora: só com um Generalista designado e enquanto faltar revelar algo
+            let aprofundando = e.escolhido.aprofundando_ativo();
+            let rotulo = if aprofundando { "Aprofundando##aprofundar" } else { "Aprofundar agora##aprofundar" };
+            if componentes::botao(ui, fonts, rotulo, EstiloBotao::Secundario, !aprofundando && state.pode_aprofundar(pid)) {
+                state.pedir_aprofundamento(pid);
+            }
+            ui.same_line_with_spacing(0.0, theme::ESPACO_2);
             if componentes::botao(ui, fonts, "Remover dos Escolhidos", EstiloBotao::Secundario, true) && state.remover_escolhido(pid) {
                 acao = Acao::RemoveuEscolhido;
             }

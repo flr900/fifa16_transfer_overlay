@@ -256,6 +256,7 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
             relatorio_id: None,
             no_jogo: false,
             importado: true,
+            aprofundando: None,
         });
         resumo.importados += 1;
     }
@@ -464,6 +465,7 @@ mod tests {
             relatorio_id: None,
             no_jogo: false,
             importado: false,
+            aprofundando: None,
         }
     }
 

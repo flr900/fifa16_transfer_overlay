@@ -90,10 +90,11 @@ pub fn texto_situacao(e: &EscolhidoNaLista, hoje: Option<Date>) -> String {
         1 => format!("observado em {}, há 1 mês", formatar_data(observado)),
         n => format!("observado em {}, há {n} meses", formatar_data(observado)),
     };
+    let prefixo = if e.escolhido.aprofundando_ativo() { "Aprofundando" } else { "Acompanhado" };
     match (e.acompanhado, e.dias_para_exato, e.frescor) {
         (true, Some(0), _) => "Acompanhado: valores exatos.".to_string(),
-        (true, Some(d), _) => format!("Acompanhado: ±{} agora, exato em ~{d} dias de carreira.", e.precisao),
-        (true, None, _) => "Acompanhado: a primeira observação sai na próxima abertura do painel.".to_string(),
+        (true, Some(d), _) => format!("{prefixo}: ±{} agora, exato em ~{d} dias de carreira.", e.precisao),
+        (true, None, _) => format!("{prefixo}: a primeira observação sai na próxima abertura do painel."),
         (false, _, Frescor::Atualizado) => format!("{quando}: precisão de ±{}.", e.precisao),
         (false, _, Frescor::Envelhecendo { extra }) => format!("{quando}: faixas {extra} pontos mais largas (±{}).", e.precisao),
         (false, _, Frescor::Desatualizado { extra }) => {
@@ -168,10 +169,11 @@ pub fn situacao_curta(e: &EscolhidoNaLista) -> String {
     if e.fora_do_filtro {
         return "Fora do filtro".to_string();
     }
+    let prefixo = if e.escolhido.aprofundando_ativo() { "Aprofundando" } else { "Acompanhado" };
     match (e.acompanhado, e.dias_para_exato, e.frescor) {
         (true, Some(0), _) => "Acompanhado · exato".to_string(),
-        (true, Some(d), _) => format!("Acompanhado · exato em ~{d} dias"),
-        (true, None, _) => "Acompanhado".to_string(),
+        (true, Some(d), _) => format!("{prefixo} · exato em ~{d} dias"),
+        (true, None, _) => prefixo.to_string(),
         (false, _, Frescor::Atualizado) => format!("Atualizado · ±{}", e.precisao),
         (false, _, Frescor::Envelhecendo { extra }) => format!("Envelhecendo · +{extra}"),
         (false, _, Frescor::Desatualizado { extra }) => format!("Desatualizado · +{extra}"),
@@ -179,6 +181,10 @@ pub fn situacao_curta(e: &EscolhidoNaLista) -> String {
     }
 }
 
+
+fn badge_aprofundando() -> EstiloBadge {
+    EstiloBadge { texto: "APROFUNDANDO", contorno: theme::ACCENT_PRIMARY, fundo: theme::TRANSPARENTE, cor_texto: theme::ACCENT_PRIMARY }
+}
 
 fn badge_prioridade() -> EstiloBadge {
     EstiloBadge { texto: "PRIORIDADE", contorno: theme::TIER_ELITE, fundo: theme::TRANSPARENTE, cor_texto: theme::TIER_ELITE }
@@ -205,6 +211,9 @@ fn card_escolhido(ui: &Ui, fonts: Option<&Fonts>, state: &ScoutState, e: &Escolh
     let [w_nome, h_nome] = texto_em(ui, fonts.map(|f| f.heading), &dl, [x, y], theme::TEXT_PRIMARY, &j.nome);
     let mut bx = x + w_nome + theme::ESPACO_2;
     bx += desenhar_badge(ui, fonts, &dl, &badge_frescor(e.frescor, e.acompanhado), [bx, y], h_nome)[0] + theme::ESPACO_2;
+    if e.escolhido.aprofundando_ativo() {
+        bx += desenhar_badge(ui, fonts, &dl, &badge_aprofundando(), [bx, y], h_nome)[0] + theme::ESPACO_2;
+    }
     if e.escolhido.prioridade {
         bx += desenhar_badge(ui, fonts, &dl, &badge_prioridade(), [bx, y], h_nome)[0] + theme::ESPACO_2;
     }
@@ -317,6 +326,7 @@ mod tests {
             relatorio_id: None,
             no_jogo: false,
             importado: false,
+            aprofundando: None,
         }
     }
 
@@ -343,5 +353,17 @@ mod tests {
         assert!(situacao_curta(&velho).starts_with("Desatualizado"));
         assert_eq!(situacao_curta(&vencido), "Vencido");
         assert_eq!(situacao_curta(&e), "Acompanhado · exato em ~30 dias");
+    }
+
+    #[test]
+    fn a_deep_dive_says_so_in_both_the_long_and_the_short_situation() {
+        let hoje = Date(20360301);
+        let mut aprofundado = escolhido(20360301);
+        aprofundado.aprofundando = Some(crate::scout::state::Aprofundamento { desde: Date(20360301), percentual: 40 });
+        aprofundado.acompanhamento =
+            Some(Acompanhamento { inicio: Date(20360301), precisao_inicial: 3, atributos_iniciais: 28, dias_para_exato: 12, dias: 0 });
+        let e = escolhido_em(&aprofundado, hoje, true);
+        assert_eq!(texto_situacao(&e, Some(hoje)), "Aprofundando: ±3 agora, exato em ~12 dias de carreira.");
+        assert_eq!(situacao_curta(&e), "Aprofundando · exato em ~12 dias");
     }
 }

@@ -912,6 +912,34 @@ pub fn precisao_acompanhada(inicial: u8, dias: u32, total: u32) -> u8 {
     u8::try_from(restante.div_ceil(total.max(1))).unwrap_or(inicial)
 }
 
+/// Menor prazo de um aprofundamento, em dias de carreira.
+pub const DIAS_MINIMOS_APROFUNDAMENTO: u32 = 3;
+
+/// Aprofundar agora (2026-10-08): o Generalista dedica-se a um Escolhido e
+/// o acompanhamento anda mais depressa. Quanto do prazo normal sobra, em %:
+/// `65 − 5 × meias` (2,5★ → 40%; 4,5★ → 20%; 5★ → 15%).
+pub fn percentual_aprofundamento(generalista: Estrelas) -> u8 {
+    u8::try_from(65u32.saturating_sub(5 * u32::from(generalista.meias()))).unwrap_or(65)
+}
+
+/// Dias até o valor exato num aprofundamento: o prazo normal
+/// (`dias_para_exato`) reduzido ao `percentual`, nunca menos que
+/// `DIAS_MINIMOS_APROFUNDAMENTO` nem mais que o prazo normal.
+pub fn dias_para_aprofundar(normal: u32, percentual: u8) -> u32 {
+    (normal * u32::from(percentual)).div_ceil(100).max(DIAS_MINIMOS_APROFUNDAMENTO).min(normal)
+}
+
+/// O que o aprofundamento custa: uma taxa fixa mais o que ainda falta
+/// revelar (cada ponto de imprecisão e cada atributo não observado).
+/// Ordem de grandeza: ~30 mil para quem já é Qualidade Alta, ~160 mil para
+/// um de Qualidade Baixa (uma Missão Rápida custa 70 mil). Arredondado a 10 mil.
+pub fn custo_aprofundamento(precisao: u8, faltam: usize) -> i32 {
+    let faltam = i64::try_from(faltam).unwrap_or(i64::MAX / 4);
+    let bruto = 20_000 + 5_000 * i64::from(precisao) + 3_000 * faltam;
+    let arredondado = (bruto + ARREDONDAMENTO_CUSTO / 2) / ARREDONDAMENTO_CUSTO * ARREDONDAMENTO_CUSTO;
+    i32::try_from(arredondado).unwrap_or(i32::MAX)
+}
+
 /// Atributos observados depois de `dias` de acompanhamento.
 pub fn atributos_acompanhados(iniciais: usize, total_atributos: usize, dias: u32, total: u32) -> usize {
     if dias >= total {
@@ -3396,5 +3424,34 @@ mod tests {
         assert!(quase_no_nivel(NivelEquipe::MudaPatamar, 72, 72, 71));
         assert!(!quase_no_nivel(NivelEquipe::MudaPatamar, 68, 68, 71));
         assert!(quase_no_nivel(NivelEquipe::Titular, 75, 75, 71), "um pouco acima do nível titular");
+    }
+
+    #[test]
+    fn a_deep_dive_is_faster_with_a_better_generalist_and_never_slower_than_normal() {
+        assert_eq!(percentual_aprofundamento(Estrelas(5)), 40, "2,5★");
+        assert_eq!(percentual_aprofundamento(Estrelas(9)), 20, "4,5★");
+        assert_eq!(percentual_aprofundamento(Estrelas(10)), 15, "5★");
+        // um de Qualidade Baixa (25 dias) cai para ~10 com 2,5★ e ~4 com 5★
+        assert_eq!(dias_para_aprofundar(25, percentual_aprofundamento(Estrelas(5))), 10);
+        assert_eq!(dias_para_aprofundar(25, percentual_aprofundamento(Estrelas(10))), 4);
+        // o piso é de 3 dias e nunca passa do prazo normal
+        assert_eq!(dias_para_aprofundar(5, percentual_aprofundamento(Estrelas(10))), 3);
+        assert_eq!(dias_para_aprofundar(2, 100), 2);
+        for meias in 0..=10 {
+            for normal in 5..=60 {
+                let dias = dias_para_aprofundar(normal, percentual_aprofundamento(Estrelas(meias)));
+                assert!((DIAS_MINIMOS_APROFUNDAMENTO..=normal).contains(&dias), "{meias} meias, {normal} dias → {dias}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_deep_dive_cost_grows_with_what_is_left_to_reveal_and_stays_below_a_full_search() {
+        assert_eq!(custo_aprofundamento(1, 0), 30_000, "quase pronto: só a taxa e 1 ponto");
+        let baixa = custo_aprofundamento(14, 22);
+        assert_eq!(baixa, 160_000);
+        assert!(baixa > custo_aprofundamento(7, 10) && custo_aprofundamento(7, 10) > custo_aprofundamento(1, 0));
+        assert!(baixa < 180_000, "menos que uma Missão Completa");
+        assert_eq!(custo_aprofundamento(0, 0) % 10_000, 0);
     }
 }
