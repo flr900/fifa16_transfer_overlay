@@ -124,11 +124,14 @@ pub struct Resumo {
     /// Escolhidos que subiram para o nível do jogo e jogadores que ficaram
     /// completos na Base.
     pub completados: usize,
+    /// Registros "Relatório do jogo" de quem a Central não conhece, tirados
+    /// da Base (a v11 os trazia de todo jogador com conhecimento máximo).
+    pub limpos: usize,
 }
 
 impl Resumo {
     pub fn mudou(&self) -> bool {
-        self.sairam + self.importados + self.completados > 0
+        self.sairam + self.importados + self.completados + self.limpos > 0
     }
 }
 
@@ -136,6 +139,20 @@ impl Resumo {
 /// os da lista do jogo entram nos Escolhidos e na Base. Idempotente.
 pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo {
     let mut resumo = Resumo::default();
+
+    // ---- limpeza: "Relatório do jogo" só vale para quem a Central conhece
+    // (um Relatório dos Olheiros ou os Escolhidos); a v11 trazia todo
+    // jogador que o jogo marca com conhecimento máximo, vistos ou não
+    let conhecidos_da_central: HashSet<u32> = dados
+        .relatorios
+        .iter()
+        .flat_map(|r| r.jogadores.iter().chain(r.da_base.iter()))
+        .map(|j| j.player_id)
+        .chain(dados.escolhidos.iter().map(|e| e.jogador.player_id))
+        .collect();
+    let antes = dados.mapeados.len();
+    dados.mapeados.retain(|x| x.motivo != MotivoMapeamento::RelatorioDoJogo || conhecidos_da_central.contains(&x.jogador.player_id));
+    resumo.limpos = antes - dados.mapeados.len();
 
     // ---- o elenco: uma leitura vazia é leitura ruim, não "todo mundo saiu"
     if !m.elenco.is_empty() {
@@ -331,6 +348,41 @@ mod tests {
 
     fn niveis(pares: &[(u32, i32)]) -> HashMap<u32, i32> {
         pares.iter().copied().collect()
+    }
+
+    #[test]
+    fn game_report_records_of_players_the_central_never_saw_are_cleaned_up() {
+        let mut jogadores: Vec<_> = Vec::new();
+        for id in 30..=33 {
+            let mut j = jogador(id, 70, 74, 18);
+            j.clube_id = Some(5);
+            jogadores.push(j);
+        }
+        let p = pool(jogadores);
+        let foto = |id: u32| {
+            let raw = p.jogadores.iter().find(|j| j.player_id == id).expect("jogador");
+            search::fotografar(raw, &p, HOJE, 0, 33)
+        };
+        let mapeado = |id: u32, motivo| JogadorMapeado { jogador: foto(id), desde: HOJE, motivo };
+        let mut dados = ScoutStateFile::default();
+        // 30: ninguém da Central o viu (lixo da v11); 31: está num Relatório; 32: é Escolhido;
+        // 33: ex-jogador do clube (outro motivo: não é tocado)
+        dados.mapeados = vec![
+            mapeado(30, MotivoMapeamento::RelatorioDoJogo),
+            mapeado(31, MotivoMapeamento::RelatorioDoJogo),
+            mapeado(32, MotivoMapeamento::RelatorioDoJogo),
+            mapeado(33, MotivoMapeamento::ExClube),
+        ];
+        let mut relatorio = crate::scout::state::Relatorio::de_teste(uuid::Uuid::new_v4());
+        relatorio.jogadores = vec![foto(31)];
+        dados.relatorios.push(relatorio);
+        dados.escolhidos.push(escolhido(foto(32), 0));
+        let vazio = Mapeamento { clube: 241, elenco: Vec::new(), da_lista: Vec::new(), sincronia: Vec::new() };
+        let r = aplicar(&mut dados, vazio.clone(), HOJE);
+        assert_eq!(r.limpos, 1);
+        let ids: Vec<u32> = dados.mapeados.iter().map(|m| m.jogador.player_id).collect();
+        assert_eq!(ids, vec![31, 32, 33]);
+        assert!(!aplicar(&mut dados, vazio, HOJE).mudou(), "limpar de novo não muda nada");
     }
 
     #[test]
