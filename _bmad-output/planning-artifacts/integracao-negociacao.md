@@ -196,6 +196,29 @@ Falta (próximas fases): escolher a opção do menu (contrato, compra, emprésti
 `RB` na tela de compra), acelerar a busca (hoje ~1,2 s por linha), entrar na lista
 a partir do hub, e gerenciar negociações.
 
+## Caminho direto: etapa de leitura (build 7.6-v32, 2026-10-08)
+
+O roteiro de botões funciona, mas leva ~3 s por linha da lista do jogo (minutos
+no pior caso). A alternativa é **disparar o evento que abre a tela** (por exemplo
+`EnterTransferOfferActionPopup`) sem apertar botões. Isso exige achar, no código do
+jogo, a função que despacha esses eventos e o que ela recebe. Plano em etapas,
+**a primeira só de leitura**:
+
+1. **Despejar a imagem** do `fifa16.exe` da memória (o executável tem packer; em
+   memória o código já está desempacotado). `despejo.rs`: com o arquivo
+   `%TEMP%ifa_despejar_imagem.pedido`, o overlay grava `%TEMP%ifa16_imagem.bin`
+   (deslocamento = RVA) e `fifa16_imagem.json`. Só leitura, thread própria, em blocos.
+2. **Analisar offline** (`fifa_process_identifier/analisar_imagem.py`, sem dependências):
+   `secoes` (o código está desembaralhado?), `strings`, `xrefs` (quem faz
+   `lea reg,[rip+x]` para a string do evento), `chamadores` (quem chama a função).
+   Testado em `python314.dll`.
+3. Só se a análise mostrar uma função clara: **gancho passivo** que registra os
+   argumentos enquanto o Felipe faz o fluxo à mão (como o gravador faz com os botões).
+4. Por último, chamar a função a partir da Central.
+
+Incógnitas: se o código da imagem despejada está desembaralhado; se o evento recebe
+só o nome ou também o contexto do jogador selecionado.
+
 ## Fora do escopo por ora
 
 O limite de slots de Olheiros foi adiado a pedido do Felipe (2026-10-08): o
