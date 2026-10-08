@@ -37,15 +37,23 @@ const NIVEL_REVELADO: i32 = 140;
 const PRECISAO_DESCONHECIDO: u8 = 20;
 const ATRIBUTOS_DESCONHECIDO: usize = 6;
 
-/// O que o jogo sabe de um jogador: `(nível 0–198, campo "a")`. Os 16 bits de
-/// baixo do campo `a` dizem quais grupos de atributos o jogo mostra; com todos
-/// ligados (`0xFFFF`) o jogador está com os atributos abertos na tela do jogo,
-/// mesmo com o nível abaixo de 198 (visto no Mbappé: nível 178, `a` = 0x10FFFF).
+/// O que o jogo sabe de um jogador: `(nível 0–198, campo "a")`.
 pub type Conhecimento = (i32, i32);
 
-/// Os atributos estão todos abertos no jogo?
-pub fn atributos_abertos(conhecimento: Conhecimento) -> bool {
+/// A partir deste nível o jogo mostra o jogador aberto (Overall, Potencial e
+/// atributos), como o Felipe confirmou no Mbappé e no Camarda, os dois no 178
+/// (com `a` = 0x10FFFF e 0x100002).
+const NIVEL_ABERTO: i32 = 178;
+
+/// O campo `a` tem os 16 bits de baixo todos ligados (visto no Mbappé, que o
+/// tem em 0x10FFFF)? Só o jogo mexe nele: a Central nunca o altera.
+pub fn campo_aberto(conhecimento: Conhecimento) -> bool {
     conhecimento.1 & 0xFFFF == 0xFFFF
+}
+
+/// O jogador está aberto na tela do jogo? Pelo nível, ou pelo campo `a`.
+pub fn atributos_abertos(conhecimento: Conhecimento) -> bool {
+    conhecimento.0 >= NIVEL_ABERTO || campo_aberto(conhecimento)
 }
 
 /// O que a Central mostra de um jogador pelo que o jogo sabe dele (ou nada,
@@ -92,11 +100,15 @@ pub struct Mapeamento {
 pub struct Sincronia {
     /// Nível de conhecimento do jogo (0–198).
     pub nivel: i32,
-    /// O jogo mostra todos os atributos dele (`atributos_abertos`).
-    pub abertos: bool,
-    /// A precisão (±) que o jogo dá (`revelacao`).
+    /// O campo `a` dele está aberto (`campo_aberto`).
+    pub campo_aberto: bool,
+    /// A precisão (±) que o nível dá (`revelacao_do_nivel`).
     pub precisao: u8,
+    /// A foto na precisão do nível.
     pub jogador: JogadorEncontrado,
+    /// A foto exata e completa, se o jogo pode estar mostrando o jogador
+    /// aberto (nível a partir do 178, ou o campo `a` aberto).
+    pub exato: Option<JogadorEncontrado>,
 }
 
 /// Lê o elenco e a lista do jogo no `pool`. `lista`: `(jogador, nível de
@@ -131,12 +143,13 @@ pub fn montar(
         .iter()
         .filter_map(|(&id, &conhecimento)| {
             let raw = pool.jogadores.iter().find(|j| j.player_id == id && !do_clube(j))?;
-            let (precisao, atributos) = revelacao(Some(conhecimento));
+            let (precisao, atributos) = revelacao_do_nivel(Some(conhecimento.0));
             Some(Sincronia {
                 nivel: conhecimento.0,
-                abertos: atributos_abertos(conhecimento),
+                campo_aberto: campo_aberto(conhecimento),
                 precisao,
                 jogador: search::fotografar(raw, pool, hoje, precisao, atributos),
+                exato: atributos_abertos(conhecimento).then(|| search::fotografar(raw, pool, hoje, 0, todos)),
             })
         })
         .collect();
@@ -236,27 +249,39 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
         dados.relatorios.iter().flat_map(|r| r.jogadores.iter().chain(r.da_base.iter())).map(|j| j.player_id).collect();
     for sincronia in m.sincronia {
         let id = sincronia.jogador.player_id;
-        let escolhido = dados.escolhidos.iter().any(|e| e.jogador.player_id == id);
+        let escolhido = dados.escolhidos.iter().find(|e| e.jogador.player_id == id).map(|e| e.importado);
+        let mapeado_da_lista = dados.mapeados.iter().any(|x| x.jogador.player_id == id && x.motivo == MotivoMapeamento::ListaDoJogo);
         let mapeado = dados.mapeados.iter().any(|x| x.jogador.player_id == id);
-        if !(escolhido || mapeado || nos_relatorios.contains(&id)) {
+        if escolhido.is_none() && !mapeado && !nos_relatorios.contains(&id) {
             continue; // o jogo marca 198 até em quem o técnico nunca viu
         }
+        // O nível que a Central escreve no jogo (198 − 4 × precisão) não pode
+        // passar por "o jogo sabe": só vale como nível do jogo para quem veio
+        // da lista dele e a Central nunca mexeu. Para os outros, só o campo
+        // `a` aberto ou o nível máximo mostram o jogador aberto.
+        let so_do_jogo = escolhido == Some(true) || (escolhido.is_none() && mapeado_da_lista);
+        let aberto = sincronia.campo_aberto || sincronia.nivel >= NIVEL_COMPLETO || (so_do_jogo && sincronia.nivel >= NIVEL_ABERTO);
+        let foto = match (&sincronia.exato, aberto) {
+            (Some(exato), true) => exato.clone(),
+            _ => sincronia.jogador.clone(),
+        };
+        let precisao = if aberto && sincronia.exato.is_some() { 0 } else { sincronia.precisao };
         let mut mudou = false;
         // Escolhido: o jogo sabe mais do que a Central mostra (um olheiro do
         // FIFA observou antes, ou depois)
         if let Some(e) = dados.escolhidos.iter_mut().find(|e| e.jogador.player_id == id) {
             let esperado = super::quality::nivel_no_jogo(e.precisao, false, false, 0);
-            if sincronia.nivel > esperado || (sincronia.abertos && e.precisao > sincronia.precisao) {
+            if sincronia.nivel > esperado || (aberto && e.precisao > precisao) {
                 // mantém o que a Missão de origem pediu (Fit, referência)
                 let fit_alvo = e.jogador.fit_alvo;
-                e.jogador = JogadorEncontrado { fit_alvo, ..sincronia.jogador.clone() };
-                e.precisao = sincronia.precisao;
+                e.jogador = JogadorEncontrado { fit_alvo, ..foto.clone() };
+                e.precisao = precisao;
                 e.observado_em = hoje;
                 mudou = true;
-            } else if sincronia.abertos && e.jogador.atributos.len() < sincronia.jogador.atributos.len() {
+            } else if aberto && e.jogador.atributos.len() < foto.atributos.len() {
                 // o jogo mostra todos os atributos e a Central só alguns: completa
                 // com os que faltam, sem piorar o que ela já sabe
-                for a in &sincronia.jogador.atributos {
+                for a in &foto.atributos {
                     if !e.jogador.atributos.iter().any(|x| x.atributo == a.atributo) {
                         e.jogador.atributos.push(*a);
                     }
@@ -264,17 +289,14 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
                 mudou = true;
             }
         }
-        // Base: o jogo o conhece por inteiro (ou mostra todos os atributos) e a
-        // Central ainda não o tem completo (os registros de Relatório só têm o
-        // que o Olheiro viu)
-        if sincronia.nivel >= NIVEL_COMPLETO || sincronia.abertos {
-            // completo = tudo o que se observa nele (goleiro tem menos
-            // atributos) e, no nível máximo, exato
-            let todos = sincronia.jogador.atributos.len();
-            let exato = sincronia.nivel >= NIVEL_COMPLETO || sincronia.abertos;
-            let ja_completo = |j: &JogadorEncontrado| j.atributos.len() >= todos && (!exato || j.overall.min == j.overall.max);
+        // Base: o jogador está aberto no jogo e a Central ainda não o tem
+        // completo (os registros de Relatório só têm o que o Olheiro viu)
+        if aberto {
+            // completo = tudo o que se observa nele (goleiro tem menos atributos) e exato
+            let todos = foto.atributos.len();
+            let ja_completo = |j: &JogadorEncontrado| j.atributos.len() >= todos && j.overall.min == j.overall.max;
             let relatorio_completo = dados.relatorios.iter().flat_map(|r| r.jogadores.iter()).any(|j| j.player_id == id && ja_completo(j));
-            let mut registro = sincronia.jogador;
+            let mut registro = foto;
             registro.visto_em = Some(hoje);
             match dados.mapeados.iter_mut().find(|x| x.jogador.player_id == id && x.motivo != MotivoMapeamento::ExClube) {
                 Some(existente) => {
@@ -400,12 +422,16 @@ mod tests {
         let raw = &p.jogadores[0];
         let mut dados = ScoutStateFile::default();
         // um Escolhido importado com o nível 178 (±5, 24 atributos), como o Mbappé
-        let (precisao, atributos) = revelacao(Some((178, 0x100002)));
-        assert_eq!((precisao, atributos), (5, 24));
-        assert_eq!(revelacao(Some((178, 0x10FFFF))), (0, Atributo::TODOS.len()), "aberto no jogo: exato e completo");
-        dados.escolhidos.push(escolhido(search::fotografar(raw, &p, HOJE, precisao, atributos), precisao));
-        // o jogo mostra o jogador aberto (a = 0x10FFFF), no mesmo nível
-        let abertos: HashMap<u32, Conhecimento> = [(40, (178, 0x10FFFF))].into_iter().collect();
+        let (precisao, atributos) = revelacao(Some((170, 0x100002)));
+        assert_eq!((precisao, atributos), (7, 24), "abaixo do 178 e sem o campo aberto: parcial");
+        assert_eq!(revelacao(Some((178, 0x100002))), (0, Atributo::TODOS.len()), "178: aberto no jogo, exato e completo");
+        assert_eq!(revelacao(Some((166, 0x10FFFF))), (0, Atributo::TODOS.len()), "campo aberto: exato e completo");
+        // veio da lista do jogo (como o Mbappé e o Camarda): a Central nunca escreveu o nível dele
+        let mut importado = escolhido(search::fotografar(raw, &p, HOJE, 5, 24), 5);
+        importado.importado = true;
+        dados.escolhidos.push(importado);
+        // o jogo mostra o jogador aberto (nível 178 em diante)
+        let abertos: HashMap<u32, Conhecimento> = [(40, (178, 0x100002))].into_iter().collect();
         let r = aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE);
         assert!(r.mudou());
         let e = &dados.escolhidos[0];
@@ -416,11 +442,22 @@ mod tests {
         // a Base também o tem completo
         assert!(dados.mapeados.iter().any(|m| m.jogador.player_id == 40 && m.jogador.atributos.len() == e.jogador.atributos.len()));
         assert!(!aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE).mudou(), "idempotente");
-        // sem o campo aberto, nada muda
+        // abaixo do 178 e sem o campo aberto, nada muda
         let mut outro = ScoutStateFile::default();
-        outro.escolhidos.push(escolhido(search::fotografar(raw, &p, HOJE, precisao, atributos), precisao));
-        let fechados: HashMap<u32, Conhecimento> = [(40, (178, 0x100002))].into_iter().collect();
+        let mut imp = escolhido(search::fotografar(raw, &p, HOJE, precisao, atributos), precisao);
+        imp.importado = true;
+        outro.escolhidos.push(imp);
+        let fechados: HashMap<u32, Conhecimento> = [(40, (170, 0x100002))].into_iter().collect();
         assert!(!aplicar(&mut outro, montar(&p, HOJE, &[], &fechados, &HashSet::new()), HOJE).mudou());
+        // quem a Central achou (não importado): o 178 pode ser o que ELA escreveu
+        // (±5), então não abre; só o campo `a` aberto abre
+        let mut achado = ScoutStateFile::default();
+        achado.escolhidos.push(escolhido(search::fotografar(raw, &p, HOJE, 5, 24), 5));
+        let r = aplicar(&mut achado, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE);
+        assert!(!r.mudou() && achado.escolhidos[0].precisao == 5, "o 178 sozinho não abre quem a Central escreveu");
+        let campo: HashMap<u32, Conhecimento> = [(40, (178, 0x10FFFF))].into_iter().collect();
+        let r = aplicar(&mut achado, montar(&p, HOJE, &[], &campo, &HashSet::new()), HOJE);
+        assert!(r.mudou() && achado.escolhidos[0].precisao == 0, "o campo aberto abre");
     }
 
     #[test]
