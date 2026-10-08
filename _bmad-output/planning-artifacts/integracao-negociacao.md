@@ -133,6 +133,43 @@ e `diff A B` mostra os que mudaram de quantidade entre duas telas. Os textos
 carregam sob demanda e podem ficar na memória depois que a tela fecha; o
 experimento diz se a quantidade ou o endereço muda com a tela aberta.
 
+## Sinal de tela encontrado (gravado em 2026-10-08, build 7.6-v29)
+
+O ponteiro `fifa16.exe+0x3357378` aponta para uma tabela de **16 entradas fixas
+de 64 bytes** (`0x2BD92000`...`0x2BD923C0` nesta sessão). Não é um anel que
+gira: cada entrada tem um papel. A entrada **`0x2BD92100`** guarda o **nome do
+último evento de tela**; as outras guardam o último widget (`.swf`), o último
+item do noticiário ("recentemente do ... por $ ...") e dicas de tela. Tudo muda
+**70 a 200 ms depois** do aperto que causou a mudança.
+
+| Momento | Texto na entrada `...2100` |
+|---|---|
+| Hub | `MainMenuHub`, depois `CacheTeamSheet` (hub carregado) |
+| `A` no bloco de Escolhidos | `ViewShortlist` (entrou), `NotifyScreenLoadedAndRefresh` (~1,3 s: lista pronta) |
+| `A` num jogador da lista | `ActionPopup` (menu do jogador aberto) |
+| Compra | `EnterTransferOfferActionPopup`, `TransferOffer` |
+| Contrato | `EnterPreContractOfferFromActionPopup`, `ContractOffer` |
+| `B` da negociação | `SendReadyOnLoadComplete`, depois `ActionPopup` (~0,7 s) |
+| `B` do menu | `NotifyScreenLoadedAndRefresh` (volta à lista) |
+| `B` da lista | `ViewShortlist`, `MainMenuHub`, `CacheTeamSheet` |
+
+- **Compra e empréstimo são a mesma tela** (`TransferOffer`); `RB` troca para a
+  aba de empréstimo e `LB` volta. A troca de aba **não gera evento** na entrada
+  `...2100`. A tela aberta pela opção de empréstimo não volta para a compra.
+  Então, para o empréstimo, o caminho previsível é abrir pela **compra** e dar
+  `RB`.
+- **"Pre-contract"**: o evento de contrato é `PreContractOffer`; a opção
+  "Negociar para assinar contrato" provavelmente só existe para quem está no
+  fim do contrato. Isso explicaria por que o menu varia.
+- **As opções do menu não aparecem em nenhuma entrada** (os textos de dica e do
+  noticiário não são os rótulos). Não dá para saber quais opções o jogador tem.
+- O foco do jogo (`foco no jogo: <id>`) atualiza ao abrir o menu (`ActionPopup`),
+  como já visto.
+
+Consequência para o roteiro: cada passo pode ser **conferido pelo evento
+esperado** (e abortado com `B` se vier outro evento ou nenhum em ~1 s), mas
+escolher a opção continua às cegas dentro do menu.
+
 ## Fora do escopo por ora
 
 O limite de slots de Olheiros foi adiado a pedido do Felipe (2026-10-08): o
