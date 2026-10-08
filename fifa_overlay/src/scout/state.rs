@@ -3206,6 +3206,20 @@ impl ScoutState {
                 .collect();
             linhas.sort();
             tracing::info!("[scout::state] Conhecimento do jogo dos Escolhidos (id:nível:a/precisão): {}", linhas.join(" "));
+            // a lista do jogo: o que cada entrada guarda além do jogador e as sem registro de conhecimento
+            if let Ok(entradas) = crate::save_repo::nativo::read_native_shortlist() {
+                let sem_registro: Vec<String> = entradas
+                    .iter()
+                    .filter(|e| u32::try_from(e.jogador).map_or(false, |id| !niveis.contains_key(&id)))
+                    .map(|e| format!("{}:{:?}:{}", e.jogador, e.revelado, e.marca))
+                    .collect();
+                let com_revelado: Vec<String> = entradas
+                    .iter()
+                    .filter(|e| e.revelado != [-1; 4])
+                    .map(|e| format!("{}:{:?}", e.jogador, e.revelado))
+                    .collect();
+                tracing::info!("[scout::state] Lista do jogo: sem registro de conhecimento {}; com campo revelado {}", sem_registro.join(" "), com_revelado.join(" "));
+            }
         }
         self.mapeamento_pendente = self.tarefa_mapeamento.start(move || {
             let pool = fonte.read_players_for_mapping()?;

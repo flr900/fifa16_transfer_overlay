@@ -42,10 +42,11 @@ pub type Conhecimento = (i32, i32);
 
 /// A partir deste nível o jogo mostra o jogador aberto (Overall, Potencial,
 /// atributos e contrato). O Felipe confirmou no Mbappé e no Camarda (178) e
-/// em jogadores no 162–168 (Haaland, Saka, Bellingham...); o Udogie, no 140,
-/// não está todo revelado. Entre o 141 e o 161 não se sabe: a Central fica
-/// com o lado seguro (parcial).
-const NIVEL_ABERTO: i32 = 162;
+/// em jogadores no 144 e no 162–168 (Haaland, Saka, Bellingham...). No 140
+/// o jogo mostra transferência, salário e estimativas dos atributos (um passo
+/// antes de abrir), como o Udogie. Entre o 141 e o 143 não se sabe: a
+/// Central fica com o lado seguro (parcial).
+const NIVEL_ABERTO: i32 = 144;
 
 /// O campo `a` tem os 16 bits de baixo todos ligados (visto no Mbappé, que o
 /// tem em 0x10FFFF)? Só o jogo mexe nele: a Central nunca o altera.
@@ -109,7 +110,7 @@ pub struct Sincronia {
     /// A foto na precisão do nível.
     pub jogador: JogadorEncontrado,
     /// A foto exata e completa, se o jogo pode estar mostrando o jogador
-    /// aberto (nível a partir do 162, ou o campo `a` aberto).
+    /// aberto (nível a partir do 144, ou o campo `a` aberto).
     pub exato: Option<JogadorEncontrado>,
 }
 
@@ -461,6 +462,7 @@ mod tests {
         let (precisao, atributos) = revelacao(Some((130, 0x100002)));
         assert_eq!((precisao, atributos), (PRECISAO_DESCONHECIDO, ATRIBUTOS_DESCONHECIDO), "abaixo do 140 e sem o campo aberto: o básico");
         assert_eq!(revelacao(Some((140, 0x100002))), (15, 14), "140 (o Udogie): valor e salário, não o resto");
+        assert_eq!(revelacao(Some((144, 0x100002))), (0, Atributo::TODOS.len()), "144: aberto no jogo, exato e completo");
         assert_eq!(revelacao(Some((162, 0x100002))), (0, Atributo::TODOS.len()), "162: aberto no jogo, exato e completo");
         assert_eq!(revelacao(Some((178, 0x100002))), (0, Atributo::TODOS.len()), "178: aberto no jogo, exato e completo");
         assert_eq!(revelacao(Some((166, 0x10FFFF))), (0, Atributo::TODOS.len()), "campo aberto: exato e completo");
@@ -482,13 +484,13 @@ mod tests {
         // a Base também o tem completo
         assert!(dados.mapeados.iter().any(|m| m.jogador.player_id == 40 && m.jogador.atributos.len() == e.jogador.atributos.len()));
         assert!(!aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE).mudou(), "idempotente");
-        // abaixo do 162 e sem o campo aberto, nada muda
+        // abaixo do 144 e sem o campo aberto, nada muda
         let mut outro = ScoutStateFile::default();
-        let (p150, a150) = revelacao_do_nivel(Some(150));
-        let mut imp = escolhido(search::fotografar(raw, &p, HOJE, p150, a150), p150);
+        let (p140, a140) = revelacao_do_nivel(Some(140));
+        let mut imp = escolhido(search::fotografar(raw, &p, HOJE, p140, a140), p140);
         imp.importado = true;
         outro.escolhidos.push(imp);
-        let fechados: HashMap<u32, Conhecimento> = [(40, (150, 0x100002))].into_iter().collect();
+        let fechados: HashMap<u32, Conhecimento> = [(40, (140, 0x100002))].into_iter().collect();
         assert!(!aplicar(&mut outro, montar(&p, HOJE, &[], &fechados, &HashSet::new()), HOJE).mudou());
         // quem a Central achou (não importado): o 178 pode ser o que ELA escreveu
         // (±5), então não abre; só o campo `a` aberto abre
