@@ -1956,7 +1956,7 @@ fn pedidos_de_nivel(dados: &persistence::ScoutStateFile, hoje: Date, cobre: impl
 /// A lista de escolhidos do jogo agora, com o nível de conhecimento de cada
 /// um (`None` = o jogo não tem registro). Vazia se a sincronização está
 /// desligada ou o jogo não foi localizado.
-fn lista_do_jogo() -> Vec<(u32, Option<i32>)> {
+fn lista_do_jogo() -> Vec<(u32, Option<mapeamento::Conhecimento>)> {
     use crate::save_repo::nativo;
     if !nativo::sincronizacao_ligada() {
         return Vec::new();
@@ -1967,15 +1967,16 @@ fn lista_do_jogo() -> Vec<(u32, Option<i32>)> {
         .iter()
         .filter_map(|e| u32::try_from(e.jogador).ok())
         .map(|id| {
-            let nivel = conhecimento.iter().find(|r| u32::try_from(r.jogador) == Ok(id)).map(|r| r.nivel);
+            let nivel = conhecimento.iter().find(|r| u32::try_from(r.jogador) == Ok(id)).map(|r| (r.nivel, r.a));
             (id, nivel)
         })
         .collect()
 }
 
-/// O nível de conhecimento (0–198) que o jogo tem de cada jogador. Vazio com
-/// a sincronização desligada ou o jogo não localizado.
-fn conhecimento_do_jogo() -> std::collections::HashMap<u32, i32> {
+/// O que o jogo sabe de cada jogador: nível de conhecimento (0–198) e o campo
+/// `a` (quais atributos estão abertos). Vazio com a sincronização desligada
+/// ou o jogo não localizado.
+fn conhecimento_do_jogo() -> std::collections::HashMap<u32, mapeamento::Conhecimento> {
     use crate::save_repo::nativo;
     if !nativo::sincronizacao_ligada() {
         return std::collections::HashMap::new();
@@ -1983,7 +1984,7 @@ fn conhecimento_do_jogo() -> std::collections::HashMap<u32, i32> {
     nativo::read_native_knowledge()
         .unwrap_or_default()
         .iter()
-        .filter_map(|r| Some((u32::try_from(r.jogador).ok()?, r.nivel)))
+        .filter_map(|r| Some((u32::try_from(r.jogador).ok()?, (r.nivel, r.a))))
         .collect()
 }
 
@@ -2276,7 +2277,7 @@ pub struct ScoutState {
     remapear: bool,
     /// O conhecimento do jogo sobre quem a Central conhece, na última leitura
     /// (para só refazer o mapeamento quando algum nível muda).
-    niveis_vistos: std::collections::HashMap<u32, i32>,
+    niveis_vistos: std::collections::HashMap<u32, mapeamento::Conhecimento>,
 }
 
 /// Nível aberto no filtro geográfico: a lista de continentes (o filtro
@@ -3182,7 +3183,7 @@ impl ScoutState {
         });
         // o conhecimento do jogo sobre eles: se algum nível mudou (um olheiro
         // do FIFA observou, ou a Central subiu o dela), o mapeamento roda
-        let niveis: std::collections::HashMap<u32, i32> =
+        let niveis: std::collections::HashMap<u32, mapeamento::Conhecimento> =
             conhecimento_do_jogo().into_iter().filter(|(id, _)| na_central.contains(id)).collect();
         let novidade = lista.iter().any(|(id, _)| !conhecidos.contains(id)) || niveis.iter().any(|(id, n)| self.niveis_vistos.get(id) != Some(n));
         if so_com_novidade && !novidade {

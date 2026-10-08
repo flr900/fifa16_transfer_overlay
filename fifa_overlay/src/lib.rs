@@ -35,7 +35,7 @@ use scout::Scout;
 
 /// Mostrado no log ao injetar, para saber QUAL build está no jogo (já
 /// houve confusão entre cópias injetadas).
-const BUILD_TAG: &str = "7.6-v12 — Conhecimento do FIFA só para quem a Central conhece";
+const BUILD_TAG: &str = "7.6-v13 — Atributos abertos no FIFA ficam abertos na Central";
 
 /// Só o identificador da build ("5.0-v3"), para mostrar discretamente no
 /// cabeçalho do painel.

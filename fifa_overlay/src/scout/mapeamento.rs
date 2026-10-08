@@ -37,6 +37,32 @@ const NIVEL_REVELADO: i32 = 140;
 const PRECISAO_DESCONHECIDO: u8 = 20;
 const ATRIBUTOS_DESCONHECIDO: usize = 6;
 
+/// O que o jogo sabe de um jogador: `(nível 0–198, campo "a")`. Os 16 bits de
+/// baixo do campo `a` dizem quais grupos de atributos o jogo mostra; com todos
+/// ligados (`0xFFFF`) o jogador está com os atributos abertos na tela do jogo,
+/// mesmo com o nível abaixo de 198 (visto no Mbappé: nível 178, `a` = 0x10FFFF).
+pub type Conhecimento = (i32, i32);
+
+/// Os atributos estão todos abertos no jogo?
+pub fn atributos_abertos(conhecimento: Conhecimento) -> bool {
+    conhecimento.1 & 0xFFFF == 0xFFFF
+}
+
+/// O que a Central mostra de um jogador pelo que o jogo sabe dele (ou nada,
+/// sem registro): como `revelacao_do_nivel`, mas com todos os atributos se o
+/// jogo os mostra abertos.
+pub fn revelacao(conhecimento: Option<Conhecimento>) -> (u8, usize) {
+    let (precisao, atributos) = revelacao_do_nivel(conhecimento.map(|c| c.0));
+    match conhecimento {
+        Some(c) if atributos_abertos(c) => (precisao.min(PRECISAO_ABERTOS), Atributo::TODOS.len()),
+        _ => (precisao, atributos),
+    }
+}
+
+/// A pior precisão (±) com que a Central mostra um jogador que o jogo tem de
+/// atributos abertos: o jogo o mostra completo, ainda que sem o exato.
+const PRECISAO_ABERTOS: u8 = 8;
+
 /// O que a Central mostra de um jogador pelo nível de conhecimento que o jogo
 /// tem dele: `(precisão ±, quantos atributos)`. É o inverso de
 /// `quality::nivel_no_jogo` (`198 − 4 × precisão`); sem registro, o básico.
@@ -71,7 +97,9 @@ pub struct Mapeamento {
 pub struct Sincronia {
     /// Nível de conhecimento do jogo (0–198).
     pub nivel: i32,
-    /// A precisão (±) que esse nível dá (`revelacao_do_nivel`).
+    /// O jogo mostra todos os atributos dele (`atributos_abertos`).
+    pub abertos: bool,
+    /// A precisão (±) que o jogo dá (`revelacao`).
     pub precisao: u8,
     pub jogador: JogadorEncontrado,
 }
@@ -83,8 +111,8 @@ pub struct Sincronia {
 pub fn montar(
     pool: &PlayerPool,
     hoje: Date,
-    lista: &[(u32, Option<i32>)],
-    niveis: &HashMap<u32, i32>,
+    lista: &[(u32, Option<Conhecimento>)],
+    niveis: &HashMap<u32, Conhecimento>,
     conhecidos: &HashSet<u32>,
 ) -> Mapeamento {
     let do_clube = |j: &crate::save_repo::PlayerRaw| !j.resto_do_mundo && j.clube_id.map(i64::from) == Some(pool.clube_usuario);
@@ -100,16 +128,21 @@ pub fn montar(
         .filter(|(id, _)| !conhecidos.contains(id))
         .filter_map(|&(id, nivel)| {
             let raw = pool.jogadores.iter().find(|j| j.player_id == id && !do_clube(j))?;
-            let (precisao, atributos) = revelacao_do_nivel(nivel);
+            let (precisao, atributos) = revelacao(nivel);
             Some((search::fotografar(raw, pool, hoje, precisao, atributos), precisao))
         })
         .collect();
     let mut sincronia: Vec<Sincronia> = niveis
         .iter()
-        .filter_map(|(&id, &nivel)| {
+        .filter_map(|(&id, &conhecimento)| {
             let raw = pool.jogadores.iter().find(|j| j.player_id == id && !do_clube(j))?;
-            let (precisao, atributos) = revelacao_do_nivel(Some(nivel));
-            Some(Sincronia { nivel, precisao, jogador: search::fotografar(raw, pool, hoje, precisao, atributos) })
+            let (precisao, atributos) = revelacao(Some(conhecimento));
+            Some(Sincronia {
+                nivel: conhecimento.0,
+                abertos: atributos_abertos(conhecimento),
+                precisao,
+                jogador: search::fotografar(raw, pool, hoje, precisao, atributos),
+            })
         })
         .collect();
     sincronia.sort_by_key(|s| s.jogador.player_id);
@@ -225,12 +258,26 @@ pub fn aplicar(dados: &mut ScoutStateFile, m: Mapeamento, hoje: Date) -> Resumo 
                 e.precisao = sincronia.precisao;
                 e.observado_em = hoje;
                 mudou = true;
+            } else if sincronia.abertos && e.jogador.atributos.len() < sincronia.jogador.atributos.len() {
+                // o jogo mostra todos os atributos e a Central só alguns: completa
+                // com os que faltam, sem piorar o que ela já sabe
+                for a in &sincronia.jogador.atributos {
+                    if !e.jogador.atributos.iter().any(|x| x.atributo == a.atributo) {
+                        e.jogador.atributos.push(*a);
+                    }
+                }
+                mudou = true;
             }
         }
-        // Base: o jogo o conhece por inteiro e a Central ainda não o tem
-        // completo (os registros de Relatório só têm o que o Olheiro viu)
-        if sincronia.nivel >= NIVEL_COMPLETO {
-            let ja_completo = |j: &JogadorEncontrado| j.atributos.len() >= crate::scout::lista::ATRIBUTOS_DETALHADO && j.overall.min == j.overall.max;
+        // Base: o jogo o conhece por inteiro (ou mostra todos os atributos) e a
+        // Central ainda não o tem completo (os registros de Relatório só têm o
+        // que o Olheiro viu)
+        if sincronia.nivel >= NIVEL_COMPLETO || sincronia.abertos {
+            // completo = tudo o que se observa nele (goleiro tem menos
+            // atributos) e, no nível máximo, exato
+            let todos = sincronia.jogador.atributos.len();
+            let exato = sincronia.nivel >= NIVEL_COMPLETO;
+            let ja_completo = |j: &JogadorEncontrado| j.atributos.len() >= todos && (!exato || j.overall.min == j.overall.max);
             let relatorio_completo = dados.relatorios.iter().flat_map(|r| r.jogadores.iter()).any(|j| j.player_id == id && ja_completo(j));
             let mut registro = sincronia.jogador;
             registro.visto_em = Some(hoje);
@@ -346,8 +393,38 @@ mod tests {
         }
     }
 
-    fn niveis(pares: &[(u32, i32)]) -> HashMap<u32, i32> {
-        pares.iter().copied().collect()
+    fn niveis(pares: &[(u32, i32)]) -> HashMap<u32, Conhecimento> {
+        pares.iter().map(|&(id, n)| (id, (n, 0))).collect()
+    }
+
+    #[test]
+    fn a_player_the_game_shows_with_every_attribute_open_gets_them_all_in_the_central() {
+        let mut j = jogador(40, 80, 85, 24);
+        j.clube_id = Some(5);
+        let p = pool(vec![j]);
+        let raw = &p.jogadores[0];
+        let mut dados = ScoutStateFile::default();
+        // um Escolhido importado com o nível 178 (±5, 24 atributos), como o Mbappé
+        let (precisao, atributos) = revelacao(Some((178, 0x100002)));
+        assert_eq!((precisao, atributos), (5, 24));
+        dados.escolhidos.push(escolhido(search::fotografar(raw, &p, HOJE, precisao, atributos), precisao));
+        let antes = dados.escolhidos[0].jogador.atributos.clone();
+        // o jogo mostra os atributos todos abertos (a = 0x10FFFF), no mesmo nível
+        let abertos: HashMap<u32, Conhecimento> = [(40, (178, 0x10FFFF))].into_iter().collect();
+        let r = aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE);
+        assert!(r.mudou());
+        let e = &dados.escolhidos[0];
+        assert_eq!(e.jogador.atributos.len(), crate::scout::lista::ATRIBUTOS_DETALHADO, "agora tem todos");
+        assert_eq!(&e.jogador.atributos[..antes.len()], &antes[..], "o que já tinha continua igual");
+        assert_eq!(e.precisao, 5, "a precisão não piora nem melhora");
+        // a Base também o tem completo
+        assert!(dados.mapeados.iter().any(|m| m.jogador.player_id == 40 && m.jogador.atributos.len() == e.jogador.atributos.len()));
+        assert!(!aplicar(&mut dados, montar(&p, HOJE, &[], &abertos, &HashSet::new()), HOJE).mudou(), "idempotente");
+        // sem o campo aberto, nada muda
+        let mut outro = ScoutStateFile::default();
+        outro.escolhidos.push(escolhido(search::fotografar(raw, &p, HOJE, precisao, atributos), precisao));
+        let fechados: HashMap<u32, Conhecimento> = [(40, (178, 0x100002))].into_iter().collect();
+        assert!(!aplicar(&mut outro, montar(&p, HOJE, &[], &fechados, &HashSet::new()), HOJE).mudou());
     }
 
     #[test]
@@ -445,7 +522,7 @@ mod tests {
         let mut dados = ScoutStateFile::default();
         // 10 já é Escolhido, 11 foi tirado de propósito, 99 não existe, 1 é do clube
         let conhecidos: HashSet<u32> = [10, 11].into_iter().collect();
-        let lista = [(10, Some(198)), (11, Some(198)), (12, Some(198)), (13, None), (99, Some(198)), (1, Some(198))];
+        let lista = [(10, Some((198, 0))), (11, Some((198, 0))), (12, Some((198, 0))), (13, None), (99, Some((198, 0))), (1, Some((198, 0)))];
         let r = aplicar(&mut dados, montar(&p, HOJE, &lista, &HashMap::new(), &conhecidos), HOJE);
         assert_eq!(r.importados, 2);
         let ids: Vec<u32> = dados.escolhidos.iter().map(|e| e.jogador.player_id).collect();
@@ -462,7 +539,7 @@ mod tests {
         // quem foi tirado dos Escolhidos não volta (a lista ignorada vale também na aplicação)
         dados.escolhidos.clear();
         dados.importacao_ignorada.push(12);
-        let r = aplicar(&mut dados, montar(&p, HOJE, &[(12, Some(198)), (14, Some(198))], &HashMap::new(), &HashSet::new()), HOJE);
+        let r = aplicar(&mut dados, montar(&p, HOJE, &[(12, Some((198, 0))), (14, Some((198, 0)))], &HashMap::new(), &HashSet::new()), HOJE);
         assert_eq!((r.importados, dados.escolhidos.len()), (1, 1));
         assert_eq!(dados.escolhidos[0].jogador.player_id, 14);
     }
