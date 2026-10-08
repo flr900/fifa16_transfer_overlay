@@ -93,6 +93,46 @@ está em andamento) e levar direto a elas.
 O log traz `+A` / `-A` (apertou/soltou), D-pad, gatilhos, analógico esquerdo
 e `foco no jogo: <id> "<nome>"`, todos com tempo em ms.
 
+## Resultado da Fase 0 (gravado em 2026-10-08, jogador de teste: Mbappé)
+
+Cadência dos apertos: ~70 ms apertado, ~90 a 130 ms entre eles.
+
+| Passo | Sequência |
+|---|---|
+| Hub → lista de Escolhidos | no hub, selecionar o bloco de Escolhidos (o cursor do hub **lembra o último bloco**: na 1ª vez foi o analógico + `A`; depois, `→` + `A`) |
+| Achar o jogador na lista | `↑` ×10 a partir do topo (a lista dá a volta), depois `A` abre o **menu do jogador** |
+| Menu do jogador | itens: **Adicionar/remover escolhido**, **Perguntar sobre &lt;nome&gt;**, **Negociar para assinar contrato**, **Conversar sobre compra**, **Conversar sobre empréstimo** |
+| Opção | cursor volta ao topo: contrato `↓` ×2, compra `↓` ×3, empréstimo `↓` ×4, depois `A` |
+| Voltar | `B` ×5 da negociação até o hub; `B` ×1 volta ao menu do jogador |
+
+Descobertas que mudam o desenho:
+
+- **O jogador em foco só atualiza quando o menu do jogador abre**, não enquanto
+  se anda na lista (ficou parado em outro jogador por 17 s). A conferência
+  "é o jogador certo?" vem **depois** do `A`; se errou, `B` e corrige.
+- **A ordem da lista na tela não é a da memória** (Mbappé: índice 75 de 81 na
+  memória; dez `↑` com a volta dão a posição 71 na tela). Por padrão a lista
+  é ordenada por **posição**, e o jogador a reordena por nome, posição ou valor
+  (`→` até a coluna e `X`). Ordenar **por nome** daria uma ordem que a Central
+  sabe calcular.
+- **O menu varia**: quem não tem negociação de salário não tem a opção de
+  contrato, e há jogadores que não dá para abordar. Contar `↓` às cegas pode
+  cair numa opção errada e, no pior caso, em "Adicionar/remover escolhido",
+  que **tira o jogador da lista**.
+- **O hub não tem posição fixa**: o roteiro precisa saber em que tela está.
+
+Conclusão: o que falta para o roteiro ser seguro é um **sinal de tela** (em que
+tela o jogo está, e qual item do menu está selecionado). Sem isso, só dá para
+fazer a parte "levar até o jogador" com a condição de que o jogador já esteja
+na lista de Escolhidos do jogo.
+
+### Fase 1A: procurar o sinal de tela
+`fifa_process_identifier/scout_probe.py capture <rótulo> --str "<texto>"`
+(novo, 2026-10-08) procura textos da interface na memória, em ASCII e UTF-16,
+e `diff A B` mostra os que mudaram de quantidade entre duas telas. Os textos
+carregam sob demanda e podem ficar na memória depois que a tela fecha; o
+experimento diz se a quantidade ou o endereço muda com a tela aberta.
+
 ## Fora do escopo por ora
 
 O limite de slots de Olheiros foi adiado a pedido do Felipe (2026-10-08): o

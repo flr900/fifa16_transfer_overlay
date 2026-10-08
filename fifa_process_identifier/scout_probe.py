@@ -18,6 +18,9 @@ Uso (jogo aberto, em Modo Carreira):
     python scout_probe.py capture B --int 70571
     python scout_probe.py diff A B
 
+    # telas do jogo (negociação): procura TEXTOS da interface na memória
+    python scout_probe.py capture hub --str "contrato" --str "empréstimo"
+
     python scout_probe.py list                # capturas salvas
     python scout_probe.py selftest            # testa a sonda em si mesma
 
@@ -44,6 +47,10 @@ RUNS_DIR = Path(__file__).parent / "probe_runs"
 CONTEXT = 64  # bytes de cada lado da ocorrência
 MAX_HITS_PER_VALUE = 4000
 MAX_STRINGS = 4000
+MAX_STRINGS_LIVRES = 20000
+# Em volta de um texto procurado com --str: letras, números e pontuação
+# (Latin-1), para mostrar a frase inteira e não só o pedaço.
+CONTEXTO_TEXTO = 40
 PROCESS_NAME = "FIFA16.exe"
 
 READABLE = {0x02, 0x04, 0x08, 0x20, 0x40, 0x80}  # RO, RW, WC, X, XRW, XWC
@@ -65,7 +72,22 @@ def scan_regions(handle, max_mb: int):
         yield r
 
 
-def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[int]] | None = None) -> Path:
+def padroes_de_texto(textos: list[str]) -> list[tuple[re.Pattern, str]]:
+    """Um padrão ASCII/Latin-1 e um UTF-16LE por texto (sem diferenciar
+    maiúsculas de minúsculas), com a frase em volta."""
+    padroes = []
+    for texto in textos:
+        latin = re.escape(texto.encode("latin-1", "replace"))
+        livre = b"[\\x20-\\x7e\\xa0-\\xff]{0,%d}" % CONTEXTO_TEXTO
+        padroes.append((re.compile(livre + latin + livre, re.I), "ascii"))
+        utf16 = b"".join(re.escape(c.encode("utf-16-le")) for c in texto)
+        livre16 = b"(?:[\\x20-\\x7e\\xa0-\\xff]\\x00){0,%d}" % CONTEXTO_TEXTO
+        padroes.append((re.compile(livre16 + utf16 + livre16, re.I), "utf16"))
+    return padroes
+
+
+def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[int]] | None = None,
+            textos: list[str] | None = None) -> Path:
     handle = process.open_process(pid)
     started = time.time()
     seqs = seqs or []
@@ -79,6 +101,8 @@ def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[
     )
     hits: dict[str, list[dict]] = {k: [] for k in needles.values()}
     strings: list[dict] = []
+    livres = padroes_de_texto(textos or [])
+    achados_livres = 0
     regions = bytes_read = 0
 
     for region in scan_regions(handle, max_mb):
@@ -107,7 +131,26 @@ def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[
                     }
                 )
 
-        if len(strings) < MAX_STRINGS:
+        for rx, enc in livres:
+            if achados_livres >= MAX_STRINGS_LIVRES:
+                break
+            for m in rx.finditer(raw):
+                texto = m.group(0)
+                if enc == "utf16":
+                    texto = texto[::2]
+                strings.append(
+                    {
+                        "addr": region.base + m.start(),
+                        "region": region.base,
+                        "enc": enc,
+                        "text": "T:" + texto.decode("latin-1", "replace").strip(),
+                    }
+                )
+                achados_livres += 1
+                if achados_livres >= MAX_STRINGS_LIVRES:
+                    break
+
+        if len(strings) < MAX_STRINGS + achados_livres:
             for rx, enc in ((STR_ASCII, "ascii"), (STR_UTF16, "utf16")):
                 for m in rx.finditer(raw):
                     text = m.group(0)
@@ -121,7 +164,7 @@ def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[
                             "text": text.decode("ascii", "replace"),
                         }
                     )
-                    if len(strings) >= MAX_STRINGS:
+                    if len(strings) >= MAX_STRINGS + achados_livres:
                         break
 
     memory.kernel32.CloseHandle(handle)
@@ -147,7 +190,12 @@ def capture(pid: int, label: str, ints: list[int], max_mb: int, seqs: list[list[
     kinds: dict[str, int] = {}
     for s in strings:
         kinds[s["text"]] = kinds.get(s["text"], 0) + 1
-    print(f"  strings CM_*: {len(strings)} ocorrências, {len(kinds)} distintas")
+    print(f"  strings CM_*: {len(strings) - achados_livres} ocorrências")
+    if textos:
+        livres_vistos = sorted({t for t in kinds if t.startswith("T:")})
+        print(f"  textos procurados: {achados_livres} ocorrências, {len(livres_vistos)} frases distintas")
+        for t in livres_vistos[:40]:
+            print(f"    {kinds[t]}x {t[2:]!r}")
     return path
 
 
@@ -232,16 +280,26 @@ def selftest() -> None:
     arr = (ctypes.c_int32 * 8)(1, 2, magic, 4, 5, 6, 7, 8)
     text = ctypes.create_string_buffer(b"CM_Email_GTN_SelfTest\x00")
     pid = os.getpid()
-    path = capture(pid, "_selftest", [magic], max_mb=256)
+    frase_ascii = ctypes.create_string_buffer(b"Negociar para assinar contrato (selftest)\x00")
+    frase_utf16 = ctypes.create_unicode_buffer("Conversar sobre empréstimo (selftest)")
+    path = capture(pid, "_selftest", [magic], max_mb=256, textos=["assinar contrato (selftest", "sobre empréstimo (selftest"])
     d = json.loads(path.read_text(encoding="utf-8"))
     want = ctypes.addressof(arr) + 8
     got = {h["addr"] for h in d["hits"][str(magic)]}
     ok_int = want in got
     ok_str = any(s["text"] == "CM_Email_GTN_SelfTest" for s in d["strings"])
-    print("selftest int:", "OK" if ok_int else "FALHOU", "| string:", "OK" if ok_str else "FALHOU")
+    textos = {(x["enc"], x["text"]) for x in d["strings"] if x["text"].startswith("T:")}
+    ok_ascii = any(e == "ascii" and "assinar contrato (selftest" in t for e, t in textos)
+    ok_utf16 = any(e == "utf16" and "sobre empr" in t and "(selftest" in t for e, t in textos)
+    print(
+        "selftest int:", "OK" if ok_int else "FALHOU",
+        "| string:", "OK" if ok_str else "FALHOU",
+        "| texto ASCII:", "OK" if ok_ascii else "FALHOU",
+        "| texto UTF-16:", "OK" if ok_utf16 else "FALHOU",
+    )
     path.unlink()
-    _ = text
-    sys.exit(0 if ok_int and ok_str else 1)
+    _ = (text, frase_ascii, frase_utf16)
+    sys.exit(0 if ok_int and ok_str and ok_ascii and ok_utf16 else 1)
 
 
 def main() -> None:
@@ -251,6 +309,7 @@ def main() -> None:
     c.add_argument("label")
     c.add_argument("--int", dest="ints", type=int, action="append", default=[])
     c.add_argument("--seq", dest="seqs", action="append", default=[], help="int32 contíguos, separados por vírgula")
+    c.add_argument("--str", dest="textos", action="append", default=[], help="texto da interface a procurar (ASCII e UTF-16)")
     c.add_argument("--pid", type=int)
     c.add_argument("--max-mb", type=int, default=256)
     d = sub.add_parser("diff")
@@ -265,7 +324,7 @@ def main() -> None:
         pid = args.pid or process.find_process_by_name(PROCESS_NAME)
         if pid is None:
             sys.exit("[ERRO] FIFA16.exe não está rodando.")
-        capture(pid, args.label, args.ints, args.max_mb, [[int(x) for x in q.split(",")] for q in args.seqs])
+        capture(pid, args.label, args.ints, args.max_mb, [[int(x) for x in q.split(",")] for q in args.seqs], args.textos)
     elif args.cmd == "diff":
         diff(args.a, args.b, args.limit)
     elif args.cmd == "list":
